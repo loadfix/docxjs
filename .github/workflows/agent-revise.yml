@@ -1,0 +1,115 @@
+name: Revise Agent
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: agent-revise-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  revise:
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'agent-pr') &&
+      (github.event.label.name == 'security-failed' || github.event.label.name == 'review-changes-needed')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_MODEL: au.anthropic.claude-opus-4-6-v1
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Check revision count
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          REVISION_COUNT=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '[.[] | select(.body | startswith("**Review Agent**")) | select(.body | contains("REVIEW_CHANGES_NEEDED"))] | length')
+          if [ "$REVISION_COUNT" -gt 2 ]; then
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --body "**Revise Agent**: Maximum revision cycles (2) reached. Requesting human review."
+            gh pr edit ${{ github.event.pull_request.number }} --add-label "needs-human-review"
+            exit 1
+          fi
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get review feedback
+        id: feedback
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          FEEDBACK=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '[.[] | select(.body | startswith("**Review Agent**"))] | last | .body')
+          echo "FEEDBACK<<FEEDBACKEOF" >> $GITHUB_OUTPUT
+          echo "$FEEDBACK" >> $GITHUB_OUTPUT
+          echo "FEEDBACKEOF" >> $GITHUB_OUTPUT
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Fix issues with Claude Code
+        env:
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          FEEDBACK: ${{ steps.feedback.outputs.FEEDBACK }}
+        run: |
+          claude -p \
+            --model au.anthropic.claude-opus-4-6-v1 \
+            --max-turns 20 \
+            --dangerously-skip-permissions \
+            "You are a developer agent fixing issues raised during code review of PR #${{ github.event.pull_request.number }}.
+
+          ## Review Feedback
+          $FEEDBACK
+
+          ## Instructions
+          1. Read CLAUDE.md if it exists for project conventions.
+          2. Read the review feedback carefully.
+          3. Fix each issue raised by the reviewers.
+          4. Run build: \`npm run build\`
+          5. Commit your fixes with a message like \"fix: address review feedback\""
+
+      - name: Push fixes
+        run: |
+          git remote set-url origin "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}.git"
+          git push origin HEAD
+
+      - name: Reset status labels for re-evaluation
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh pr edit ${{ github.event.pull_request.number }} \
+            --remove-label "security-failed" \
+            --remove-label "review-changes-needed" \
+            --remove-label "security-passed" \
+            --remove-label "review-approved" 2>/dev/null || true

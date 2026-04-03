@@ -1,0 +1,53 @@
+name: Merge Agent
+
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: agent-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  merge:
+    if: |
+      github.event.label.name == 'review-approved' &&
+      contains(github.event.pull_request.labels.*.name, 'agent-pr')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Merge PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --squash \
+            --delete-branch
+
+      - name: Close linked issue
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          ISSUE_NUM=$(gh pr view ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --json body -q .body | grep -oP 'Implements #\K\d+' | head -1)
+          if [ -n "$ISSUE_NUM" ]; then
+            gh issue close "$ISSUE_NUM" \
+              --repo ${{ github.repository }} \
+              --comment "**Merge Agent**: PR #${{ github.event.pull_request.number }} merged."
+          fi
