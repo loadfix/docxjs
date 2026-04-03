@@ -103,6 +103,7 @@ jobs:
       - name: Push branch
         run: |
           git remote set-url origin "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}.git"
+          git checkout -- .github/workflows/ 2>/dev/null || true
           git push --force origin "$BRANCH"
 
       - name: Create Pull Request
