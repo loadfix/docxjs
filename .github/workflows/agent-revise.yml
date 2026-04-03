@@ -81,6 +81,7 @@ jobs:
           useradd -m agent
           chown -R agent:agent "$GITHUB_WORKSPACE"
           chown -R agent:agent /tmp
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
