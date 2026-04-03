@@ -57,6 +57,12 @@ jobs:
           git checkout -b "$BRANCH"
           echo "BRANCH=$BRANCH" >> $GITHUB_ENV
 
+      - name: Set up non-root user for Claude Code
+        run: |
+          useradd -m agent
+          chown -R agent:agent "$GITHUB_WORKSPACE"
+          chown -R agent:agent /tmp
+
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
@@ -88,10 +94,10 @@ jobs:
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
         run: |
-          cat /tmp/prompt.txt | claude -p \
+          runuser -u agent -- bash -c 'cat /tmp/prompt.txt | claude -p \
             --model au.anthropic.claude-opus-4-6-v1 \
             --max-turns 50 \
-            --dangerously-skip-permissions
+            --dangerously-skip-permissions'
 
       - name: Push branch
         run: |
