@@ -18,7 +18,8 @@ jobs:
     if: |
       github.event.label.name == 'security-passed' &&
       contains(github.event.pull_request.labels.*.name, 'agent-pr')
-    runs-on: ubuntu-latest
+    runs-on:
+      - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     env:
       ANTHROPIC_MODEL: au.anthropic.claude-sonnet-4-6

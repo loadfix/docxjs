@@ -19,7 +19,8 @@ jobs:
     if: |
       github.event.label.name == 'review-approved' &&
       contains(github.event.pull_request.labels.*.name, 'agent-pr')
-    runs-on: ubuntu-latest
+    runs-on:
+      - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 10
 
     steps:
