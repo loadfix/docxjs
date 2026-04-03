@@ -1,0 +1,181 @@
+name: Debug Agent
+
+on:
+  workflow_run:
+    workflows: ["Developer Agent", "Security Agent", "Review Agent", "Revise Agent", "Merge Agent"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: write
+  id-token: write
+
+jobs:
+  debug:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_MODEL: au.anthropic.claude-sonnet-4-6
+      CLAUDE_CODE_USE_BEDROCK: "1"
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Collect failure context
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          echo "=== Failed Workflow ===" > /tmp/debug-context.txt
+          echo "Workflow: $WORKFLOW_NAME" >> /tmp/debug-context.txt
+          echo "Run ID: $RUN_ID" >> /tmp/debug-context.txt
+          echo "URL: ${{ github.event.workflow_run.html_url }}" >> /tmp/debug-context.txt
+          echo "" >> /tmp/debug-context.txt
+
+          # Get the failed job logs
+          echo "=== Failed Job Logs (last 200 lines) ===" >> /tmp/debug-context.txt
+          gh run view "$RUN_ID" --log-failed 2>&1 | tail -200 >> /tmp/debug-context.txt
+
+          # Get retry count from previous debug runs
+          RETRY_COUNT=$(gh run list --workflow "Debug Agent" --json conclusion,createdAt \
+            --jq "[.[] | select(.conclusion == \"success\")] | length" 2>/dev/null || echo "0")
+          echo "RETRY_COUNT=$RETRY_COUNT" >> $GITHUB_ENV
+
+          # Extract linked issue/PR number from the workflow run
+          echo "=== Run Details ===" >> /tmp/debug-context.txt
+          gh run view "$RUN_ID" --json headBranch,event -q '{branch: .headBranch, event: .event}' >> /tmp/debug-context.txt 2>/dev/null || true
+
+      - name: Diagnose with Claude Code
+        env:
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          cat > /tmp/debug-prompt.txt <<PROMPT
+          You are a debug agent. A GitHub Actions workflow has failed. Analyse the logs and classify the failure.
+
+          ## Failed Workflow: $WORKFLOW_NAME (Run ID: $RUN_ID)
+
+          ## Failure Logs
+          $(cat /tmp/debug-context.txt)
+
+          ## Instructions
+
+          1. Read the failure logs carefully.
+          2. Classify the error into ONE of these categories:
+             - INFRA: Infrastructure/transient failure (OIDC token, runner crash, network timeout, permission denied)
+             - TIMEOUT: The agent ran out of time or max turns
+             - MODEL: LLM/Bedrock error (invalid model, rate limit, auth failure)
+             - PROMPT: Prompt too long, argument list too long, shell escaping issues
+             - CODE: Test failure, build error, lint error in the agent's generated code
+             - UNKNOWN: Cannot determine
+
+          3. Write your diagnosis to /tmp/diagnosis.json in this exact format:
+             {
+               "category": "INFRA|TIMEOUT|MODEL|PROMPT|CODE|UNKNOWN",
+               "summary": "One-line summary of the failure",
+               "details": "Detailed explanation of what went wrong",
+               "retryable": true/false,
+               "suggested_fix": "What to do about it (if not retryable)"
+             }
+
+          Only create the JSON file. Do not modify any code or create PRs.
+          PROMPT
+
+          cat /tmp/debug-prompt.txt | claude -p \
+            --model au.anthropic.claude-sonnet-4-6 \
+            --max-turns 5 \
+            --dangerously-skip-permissions 2>/dev/null || \
+          cat /tmp/debug-prompt.txt | claude -p \
+            --model au.anthropic.claude-sonnet-4-6 \
+            --max-turns 5 \
+            --allow-dangerously-skip-permissions \
+            --dangerously-skip-permissions
+
+      - name: Process diagnosis and take action
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          if [ ! -f /tmp/diagnosis.json ]; then
+            echo "No diagnosis produced"
+            exit 0
+          fi
+
+          CATEGORY=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('category','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
+          SUMMARY=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('summary','Analysis failed'))" 2>/dev/null || echo "Analysis failed")
+          DETAILS=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('details',''))" 2>/dev/null || echo "")
+          RETRYABLE=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('retryable',False))" 2>/dev/null || echo "False")
+          FIX=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('suggested_fix',''))" 2>/dev/null || echo "")
+
+          echo "Category: $CATEGORY"
+          echo "Retryable: $RETRYABLE"
+          echo "Summary: $SUMMARY"
+
+          # Find the linked issue number from the branch name
+          BRANCH=$(gh run view "$RUN_ID" --json headBranch -q .headBranch 2>/dev/null || echo "")
+          ISSUE_NUM=$(echo "$BRANCH" | grep -oP 'issue-\K\d+' || echo "")
+
+          # Post diagnosis comment on the issue
+          if [ -n "$ISSUE_NUM" ]; then
+            COMMENT="**Debug Agent** — Workflow \`$WORKFLOW_NAME\` failed
+
+          **Category:** $CATEGORY
+          **Summary:** $SUMMARY
+
+          $DETAILS"
+
+            if [ "$RETRYABLE" = "True" ] && [ "$RETRY_COUNT" -lt 2 ]; then
+              COMMENT="$COMMENT
+
+          Retrying automatically (attempt $((RETRY_COUNT + 1))/2)..."
+            elif [ "$RETRYABLE" = "True" ]; then
+              COMMENT="$COMMENT
+
+          Max retries (2) reached. Requesting human review."
+            fi
+
+            if [ -n "$FIX" ]; then
+              COMMENT="$COMMENT
+
+          **Suggested fix:** $FIX"
+            fi
+
+            gh issue comment "$ISSUE_NUM" --body "$COMMENT" 2>/dev/null || true
+          fi
+
+          # Auto-retry for transient/retryable failures (max 2 retries)
+          if [ "$RETRYABLE" = "True" ] && [ "$RETRY_COUNT" -lt 2 ]; then
+            echo "Retrying failed workflow..."
+            gh run rerun "$RUN_ID" --failed 2>/dev/null || true
+          elif [ "$RETRYABLE" != "True" ] && [ -n "$ISSUE_NUM" ]; then
+            # Non-retryable: add label for human review
+            gh issue edit "$ISSUE_NUM" --add-label "needs-human-review" 2>/dev/null || true
+          elif [ "$RETRY_COUNT" -ge 2 ] && [ -n "$ISSUE_NUM" ]; then
+            # Max retries exceeded
+            gh issue edit "$ISSUE_NUM" --add-label "needs-human-review" 2>/dev/null || true
+          fi
