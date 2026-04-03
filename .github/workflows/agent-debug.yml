@@ -15,7 +15,8 @@ permissions:
 jobs:
   debug:
     if: github.event.workflow_run.conclusion == 'failure'
-    runs-on: ubuntu-latest
+    runs-on:
+      - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     env:
       ANTHROPIC_MODEL: au.anthropic.claude-sonnet-4-6
