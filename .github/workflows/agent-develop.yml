@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   develop:
-    if: github.event.label.name == 'agent'
+    if: github.event.label.name == 'product-approved'
     runs-on:
       - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45

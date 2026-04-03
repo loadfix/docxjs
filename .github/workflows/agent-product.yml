@@ -1,0 +1,154 @@
+name: Product Agent
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: agent-product-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  review:
+    if: github.event.label.name == 'agent'
+    runs-on:
+      - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_MODEL: au.anthropic.claude-sonnet-4-20250514-v1:0
+      CLAUDE_CODE_USE_BEDROCK: "1"
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up non-root user for Claude Code
+        run: |
+          useradd -m agent
+          chown -R agent:agent "$GITHUB_WORKSPACE"
+          chown -R agent:agent /tmp
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Write prompt file
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          cat > /tmp/prompt.txt <<INSTRUCTIONS
+          You are a Product Manager agent for docxjs — an open-source TypeScript library that renders Microsoft Word (.docx) files in the browser. It parses OOXML and renders documents with styles, tables, images, headers/footers, tracked changes, and comments.
+
+          ## Product Context
+          - Language: TypeScript, built with Rollup
+          - Renders DOCX to HTML/CSS in the browser
+          - Used as a dependency in web applications (e.g., citation-style-converter)
+          - Users: web developers integrating DOCX viewing into their apps
+          - Key features: document rendering, tracked changes, comments, styles
+          - Forked from VolodymyrBaydalka/docxjs, Apache 2.0 licence
+
+          ## Your Task
+          Review the following issue and decide whether it should proceed to development.
+
+          Evaluate:
+          1. Is the issue clear and well-defined enough for a developer to implement?
+          2. Does it align with the project's scope and purpose?
+          3. Are there any missing details, edge cases, or risks that should be addressed first?
+
+          Respond with EXACTLY one of these verdicts on the FIRST line of your output:
+          - APPROVED — the issue is clear, scoped, and ready for development
+          - NEEDS_CLARIFICATION — the issue needs more information before development
+          - REJECTED — the issue is out of scope, a duplicate, or should not be implemented
+
+          After the verdict, provide a brief explanation (2-4 sentences).
+
+          ## Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+          INSTRUCTIONS
+          echo "" >> /tmp/prompt.txt
+          echo "$ISSUE_BODY" >> /tmp/prompt.txt
+
+      - name: Review issue with Claude Code
+        id: review
+        env:
+          CLAUDE_CODE_USE_BEDROCK: "1"
+        run: |
+          OUTPUT=$(runuser -u agent -- bash -c 'cat /tmp/prompt.txt | claude -p \
+            --model au.anthropic.claude-sonnet-4-20250514-v1:0 \
+            --max-turns 5 \
+            --dangerously-skip-permissions')
+          echo "$OUTPUT" > /tmp/review-output.txt
+          VERDICT=$(echo "$OUTPUT" | head -1 | tr -d '[:space:]')
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+          echo "Verdict: $VERDICT"
+
+      - name: Handle APPROVED
+        if: steps.review.outputs.verdict == 'APPROVED'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          REVIEW=$(cat /tmp/review-output.txt)
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "**Product Agent — APPROVED**
+
+          $REVIEW
+
+          Handing off to the Developer Agent."
+          gh issue label add "$ISSUE_NUMBER" --label "product-approved"
+
+      - name: Handle NEEDS_CLARIFICATION
+        if: steps.review.outputs.verdict == 'NEEDS_CLARIFICATION'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          REVIEW=$(cat /tmp/review-output.txt)
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "**Product Agent — NEEDS CLARIFICATION**
+
+          $REVIEW
+
+          Please update the issue with the requested details and re-apply the \`agent\` label."
+          gh issue label add "$ISSUE_NUMBER" --label "needs-clarification"
+          gh issue label remove "$ISSUE_NUMBER" --label "agent"
+
+      - name: Handle REJECTED
+        if: steps.review.outputs.verdict == 'REJECTED'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          REVIEW=$(cat /tmp/review-output.txt)
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "**Product Agent — REJECTED**
+
+          $REVIEW"
+          gh issue label add "$ISSUE_NUMBER" --label "product-rejected"
+          gh issue label remove "$ISSUE_NUMBER" --label "agent"
