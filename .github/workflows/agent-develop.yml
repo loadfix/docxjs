@@ -3,20 +3,27 @@ name: Developer Agent
 on:
   issues:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to implement"
+        required: true
+        type: string
 
 concurrency:
-  group: agent-develop-${{ github.event.issue.number }}
+  group: agent-develop-${{ github.event.inputs.issue_number || github.event.issue.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
   id-token: write
 
 jobs:
   develop:
-    if: github.event.label.name == 'product-approved'
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'product-approved' || github.event.label.name == 'agent'
     runs-on:
       - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45
@@ -97,7 +104,7 @@ jobs:
         run: |
           runuser -u agent -- bash -c 'cat /tmp/prompt.txt | claude -p \
             --model au.anthropic.claude-opus-4-6-v1 \
-            --max-turns 50 \
+            --max-turns 100 \
             --dangerously-skip-permissions'
 
       - name: Push branch
