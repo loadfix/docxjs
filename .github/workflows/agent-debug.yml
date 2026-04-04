@@ -72,6 +72,7 @@ jobs:
       - name: Diagnose with Claude Code
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
         run: |

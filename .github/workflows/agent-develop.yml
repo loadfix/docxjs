@@ -101,10 +101,11 @@ jobs:
       - name: Implement feature with Claude Code
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
         run: |
           runuser -u agent -- bash -c 'cat /tmp/prompt.txt | claude -p \
             --model au.anthropic.claude-opus-4-6-v1 \
-            --max-turns 100 \
+            --max-turns 200 \
             --dangerously-skip-permissions'
 
       - name: Push branch

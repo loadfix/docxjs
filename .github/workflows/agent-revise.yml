@@ -89,6 +89,7 @@ jobs:
       - name: Fix issues with Claude Code
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
           FEEDBACK: ${{ steps.feedback.outputs.FEEDBACK }}
         run: |
           runuser -u agent -- claude -p \
