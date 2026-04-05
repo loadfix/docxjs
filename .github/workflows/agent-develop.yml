@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   develop:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'product-approved' || github.event.label.name == 'agent'
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'product-approved'
     runs-on:
       - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 45

@@ -143,7 +143,6 @@ jobs:
 
           Please update the issue with the requested details and re-apply the \`agent\` label."
           gh issue label add "$ISSUE_NUMBER" --label "needs-clarification"
-          gh issue label remove "$ISSUE_NUMBER" --label "agent"
 
       - name: Handle REJECTED
         if: steps.review.outputs.verdict == 'REJECTED'
