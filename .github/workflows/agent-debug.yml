@@ -44,6 +44,11 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
+      - name: Set up non-root user for Claude Code
+        run: |
+          useradd -m agent 2>/dev/null || true
+          chown -R agent:agent /tmp
+
       - name: Collect failure context
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -106,10 +111,10 @@ jobs:
           Only create the JSON file. Do not modify any code or create PRs.
           PROMPT
 
-          cat /tmp/debug-prompt.txt | claude -p \
+          runuser -u agent -- bash -c 'cat /tmp/debug-prompt.txt | claude -p \
             --model au.anthropic.claude-sonnet-4-6 \
             --max-turns 5 \
-            --allow-dangerously-skip-permissions --dangerously-skip-permissions 2>/dev/null || \
+            --dangerously-skip-permissions' 2>/dev/null || \
           cat /tmp/debug-prompt.txt | claude -p \
             --model au.anthropic.claude-sonnet-4-6 \
             --max-turns 5 \
