@@ -26,7 +26,7 @@ jobs:
       - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     env:
-      ANTHROPIC_MODEL: au.anthropic.claude-sonnet-4-20250514-v1:0
+      ANTHROPIC_MODEL: au.anthropic.claude-sonnet-4-6
       CLAUDE_CODE_USE_BEDROCK: "1"
 
     steps:
@@ -106,7 +106,7 @@ jobs:
           CLAUDE_CODE_USE_BEDROCK: "1"
         run: |
           OUTPUT=$(runuser -u agent -- bash -c 'cat /tmp/prompt.txt | claude -p \
-            --model au.anthropic.claude-sonnet-4-20250514-v1:0 \
+            --model au.anthropic.claude-sonnet-4-6 \
             --max-turns 5 \
             --dangerously-skip-permissions')
           echo "$OUTPUT" > /tmp/review-output.txt
