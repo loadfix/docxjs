@@ -21,7 +21,7 @@ jobs:
       github.event.label.name == 'agent' ||
       (github.event_name == 'issue_comment' &&
        !contains(github.event.comment.user.login, '[bot]') &&
-       contains(github.event.issue.labels.*.name, 'agent'))
+       contains(toJSON(github.event.issue.labels), 'agent'))
     runs-on:
       - codebuild-github-runner-docxjs-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
