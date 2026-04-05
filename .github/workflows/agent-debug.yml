@@ -189,16 +189,16 @@ jobs:
               # Agent ran out of turns — re-dispatch to continue where it left off
               if echo "$WORKFLOW_NAME" | grep -qi "Developer"; then
                 [ -n "$ISSUE_NUM" ] && echo "Re-dispatching Developer Agent..." && \
-                  gh workflow run agent-develop.yml -f issue_number="$ISSUE_NUM" 2>/dev/null || true
+                  GH_TOKEN=${{ github.token }} gh workflow run agent-develop.yml -f issue_number="$ISSUE_NUM" 2>/dev/null || true
               elif echo "$WORKFLOW_NAME" | grep -qi "Revise"; then
                 [ -n "$PR_NUM" ] && echo "Re-dispatching Revise Agent..." && \
-                  gh workflow run agent-revise.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+                  GH_TOKEN=${{ github.token }} gh workflow run agent-revise.yml -f pr_number="$PR_NUM" 2>/dev/null || true
               elif echo "$WORKFLOW_NAME" | grep -qi "Security"; then
                 [ -n "$PR_NUM" ] && echo "Re-dispatching Security Agent..." && \
-                  gh workflow run agent-security.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+                  GH_TOKEN=${{ github.token }} gh workflow run agent-security.yml -f pr_number="$PR_NUM" 2>/dev/null || true
               elif echo "$WORKFLOW_NAME" | grep -qi "Review"; then
                 [ -n "$PR_NUM" ] && echo "Re-dispatching Review Agent..." && \
-                  gh workflow run agent-review.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+                  GH_TOKEN=${{ github.token }} gh workflow run agent-review.yml -f pr_number="$PR_NUM" 2>/dev/null || true
               else
                 gh run rerun "$RUN_ID" --failed 2>/dev/null || true
               fi
@@ -208,13 +208,13 @@ jobs:
               # The existing branch has partial work; the agent will continue from there
               if echo "$WORKFLOW_NAME" | grep -qi "Developer"; then
                 [ -n "$ISSUE_NUM" ] && echo "Re-dispatching Developer Agent with error context..." && \
-                  gh workflow run agent-develop.yml -f issue_number="$ISSUE_NUM" 2>/dev/null || true
+                  GH_TOKEN=${{ github.token }} gh workflow run agent-develop.yml -f issue_number="$ISSUE_NUM" 2>/dev/null || true
               elif echo "$WORKFLOW_NAME" | grep -qi "Revise"; then
                 [ -n "$PR_NUM" ] && echo "Re-dispatching Revise Agent..." && \
-                  gh workflow run agent-revise.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+                  GH_TOKEN=${{ github.token }} gh workflow run agent-revise.yml -f pr_number="$PR_NUM" 2>/dev/null || true
               elif echo "$WORKFLOW_NAME" | grep -qi "Security"; then
                 # Security agent code failure is unusual — retry
-                [ -n "$PR_NUM" ] && gh workflow run agent-security.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+                [ -n "$PR_NUM" ] && GH_TOKEN=${{ github.token }} gh workflow run agent-security.yml -f pr_number="$PR_NUM" 2>/dev/null || true
               else
                 gh run rerun "$RUN_ID" --failed 2>/dev/null || true
               fi
