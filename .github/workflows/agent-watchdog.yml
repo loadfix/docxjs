@@ -120,19 +120,22 @@ jobs:
             done
           fi
 
-          # --- 8. ops-approved issues with no active Developer Agent run and no PR ---
-          echo "Checking ops-approved issues not in development..."
+          # --- 8. Approved issues with no active Developer Agent run and no open PR ---
+          # Check both ops-approved (CSC) and product-approved (python-docx/docxjs which skip Operator)
+          echo "Checking approved issues not in development..."
           if [ "$ACTIVE_DEV" = "0" ]; then
-            for NUM in $(gh issue list --repo $REPO --label "ops-approved" --state open --json number,labels \
-              -q '.[] | select([.labels[].name] | contains(["in-dev"]) | not) | .number'); do
-              # Check if a PR already exists for this issue
-              PR_EXISTS=$(gh pr list --repo $REPO --state all --head "agent/issue-$NUM" --json number -q 'length' 2>/dev/null || echo "0")
-              if [ "$PR_EXISTS" = "0" ]; then
-                echo "  Stalled: #$NUM (ops-approved, no PR, no active dev) — dispatching developer"
-                GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-develop.yml -f issue_number="$NUM" 2>/dev/null || true
-                FIXES=$((FIXES + 1))
-                sleep 2
-              fi
+            for LABEL in "ops-approved" "product-approved"; do
+              for NUM in $(gh issue list --repo $REPO --label "$LABEL" --state open --json number,labels \
+                -q '.[] | select([.labels[].name] | contains(["in-dev"]) | not) | .number' 2>/dev/null); do
+                # Check if an OPEN PR already exists for this issue
+                PR_EXISTS=$(gh pr list --repo $REPO --state open --head "agent/issue-$NUM" --json number -q 'length' 2>/dev/null || echo "0")
+                if [ "$PR_EXISTS" = "0" ]; then
+                  echo "  Stalled: #$NUM ($LABEL, no open PR, no active dev) — dispatching developer"
+                  GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-develop.yml -f issue_number="$NUM" 2>/dev/null || true
+                  FIXES=$((FIXES + 1))
+                  sleep 2
+                fi
+              done
             done
           fi
 
