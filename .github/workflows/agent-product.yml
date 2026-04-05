@@ -2,9 +2,9 @@ name: Product Agent
 
 on:
   issues:
+    types: [labeled]
   issue_comment:
     types: [created]
-    types: [labeled]
 
 concurrency:
   group: agent-product-${{ github.event.issue.number }}
