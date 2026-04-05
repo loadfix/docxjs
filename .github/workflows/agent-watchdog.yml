@@ -1,0 +1,140 @@
+name: Pipeline Watchdog
+
+on:
+  schedule:
+    # Run every 30 minutes
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Check for stalled issues and PRs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DISPATCH_TOKEN: ${{ github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          echo "=== Pipeline Watchdog — $(date -u) ==="
+          FIXES=0
+
+          # --- 1. ops-feedback issues: Operator sent back but Product Agent didn't pick up ---
+          echo "Checking ops-feedback issues..."
+          for NUM in $(gh issue list --repo $REPO --label "ops-feedback" --state open --json number -q '.[].number'); do
+            # Check if Product Agent ran in the last 60 minutes for this issue
+            RECENT=$(gh run list --repo $REPO --workflow "Product Agent" --limit 20 --json databaseId,createdAt,status \
+              -q "[.[] | select(.createdAt > \"$(date -u -d '60 minutes ago' +%Y-%m-%dT%H:%M:%SZ)\")] | length" 2>/dev/null || echo "0")
+            if [ "$RECENT" = "0" ]; then
+              echo "  Stalled: #$NUM (ops-feedback, no recent Product Agent run) — dispatching"
+              GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-product.yml -f issue_number="$NUM" 2>/dev/null || true
+              FIXES=$((FIXES + 1))
+              sleep 2
+            fi
+          done
+
+          # --- 2. needs-clarification with recent human response ---
+          echo "Checking needs-clarification issues..."
+          for NUM in $(gh issue list --repo $REPO --label "needs-clarification" --state open --json number -q '.[].number'); do
+            # Check if a non-bot commented after the clarification was requested
+            LAST_HUMAN=$(gh api repos/$REPO/issues/$NUM/comments \
+              --jq '[.[] | select(.user.login | contains("[bot]") | not)] | last | .created_at // ""' 2>/dev/null)
+            LAST_BOT=$(gh api repos/$REPO/issues/$NUM/comments \
+              --jq '[.[] | select(.user.login | contains("[bot]"))] | last | .created_at // ""' 2>/dev/null)
+            if [ -n "$LAST_HUMAN" ] && [ "$LAST_HUMAN" \> "$LAST_BOT" ]; then
+              echo "  Stalled: #$NUM (needs-clarification but human responded) — dispatching"
+              gh issue edit "$NUM" --remove-label "needs-clarification" 2>/dev/null || true
+              GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-product.yml -f issue_number="$NUM" 2>/dev/null || true
+              FIXES=$((FIXES + 1))
+              sleep 2
+            fi
+          done
+
+          # --- 3. Stale in-dev labels (no active Developer Agent run) ---
+          echo "Checking stale in-dev labels..."
+          ACTIVE_DEV=$(gh run list --repo $REPO --workflow "Developer Agent" --limit 5 --json status \
+            -q '[.[] | select(.status == "in_progress" or .status == "queued")] | length' 2>/dev/null || echo "0")
+          if [ "$ACTIVE_DEV" = "0" ]; then
+            for NUM in $(gh issue list --repo $REPO --label "in-dev" --state open --json number -q '.[].number'); do
+              echo "  Stale in-dev: #$NUM — removing label"
+              gh issue edit "$NUM" --remove-label "in-dev" 2>/dev/null || true
+              FIXES=$((FIXES + 1))
+            done
+          fi
+
+          # --- 4. PRs with only agent-pr label (stuck before security) ---
+          echo "Checking PRs stuck before security..."
+          gh pr list --repo $REPO --state open --json number,labels -q '.[] | select([.labels[].name] == ["agent-pr"]) | .number' | while read -r PR; do
+            echo "  Stalled PR: #$PR (no security label) — dispatching security"
+            GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-security.yml -f pr_number="$PR" 2>/dev/null || true
+            FIXES=$((FIXES + 1))
+            sleep 2
+          done
+
+          # --- 5. PRs with security-passed but no review (stuck between security and review) ---
+          echo "Checking PRs stuck between security and review..."
+          gh pr list --repo $REPO --state open --json number,labels \
+            -q '.[] | select(([.labels[].name] | contains(["security-passed"])) and ([.labels[].name] | contains(["review-approved"]) | not) and ([.labels[].name] | contains(["in-review"]) | not) and ([.labels[].name] | contains(["review-changes-needed"]) | not)) | .number' | while read -r PR; do
+            echo "  Stalled PR: #$PR (security-passed, no review) — dispatching review"
+            GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-review.yml -f pr_number="$PR" 2>/dev/null || true
+            FIXES=$((FIXES + 1))
+            sleep 2
+          done
+
+          # --- 6. PRs with review-approved but not merged (stuck before merge) ---
+          echo "Checking PRs stuck before merge..."
+          gh pr list --repo $REPO --state open --json number,labels \
+            -q '.[] | select([.labels[].name] | contains(["review-approved"])) | .number' | while read -r PR; do
+            echo "  Stalled PR: #$PR (review-approved, not merged) — dispatching merge"
+            GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-merge.yml -f pr_number="$PR" 2>/dev/null || true
+            FIXES=$((FIXES + 1))
+            sleep 2
+          done
+
+          # --- 7. PRs with review-changes-needed but no active revise run ---
+          echo "Checking PRs stuck waiting for revision..."
+          ACTIVE_REVISE=$(gh run list --repo $REPO --workflow "Revise Agent" --limit 5 --json status \
+            -q '[.[] | select(.status == "in_progress" or .status == "queued")] | length' 2>/dev/null || echo "0")
+          if [ "$ACTIVE_REVISE" = "0" ]; then
+            gh pr list --repo $REPO --state open --json number,labels \
+              -q '.[] | select(([.labels[].name] | contains(["review-changes-needed"])) or ([.labels[].name] | contains(["security-failed"]))) | .number' | while read -r PR; do
+              echo "  Stalled PR: #$PR (needs revision, no active revise run) — dispatching revise"
+              GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-revise.yml -f pr_number="$PR" 2>/dev/null || true
+              FIXES=$((FIXES + 1))
+              sleep 2
+            done
+          fi
+
+          # --- 8. ops-approved issues with no active Developer Agent run and no PR ---
+          echo "Checking ops-approved issues not in development..."
+          if [ "$ACTIVE_DEV" = "0" ]; then
+            for NUM in $(gh issue list --repo $REPO --label "ops-approved" --state open --json number,labels \
+              -q '.[] | select([.labels[].name] | contains(["in-dev"]) | not) | .number'); do
+              # Check if a PR already exists for this issue
+              PR_EXISTS=$(gh pr list --repo $REPO --state all --head "agent/issue-$NUM" --json number -q 'length' 2>/dev/null || echo "0")
+              if [ "$PR_EXISTS" = "0" ]; then
+                echo "  Stalled: #$NUM (ops-approved, no PR, no active dev) — dispatching developer"
+                GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-develop.yml -f issue_number="$NUM" 2>/dev/null || true
+                FIXES=$((FIXES + 1))
+                sleep 2
+              fi
+            done
+          fi
+
+          echo ""
+          echo "=== Watchdog complete: $FIXES fixes applied ==="
