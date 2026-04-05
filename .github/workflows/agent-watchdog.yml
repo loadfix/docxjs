@@ -86,15 +86,20 @@ jobs:
             sleep 2
           done
 
-          # --- 5. PRs with security-passed but no review (stuck between security and review) ---
+          # --- 5. PRs with security-passed but not yet approved (stuck between security and review) ---
           echo "Checking PRs stuck between security and review..."
-          gh pr list --repo $REPO --state open --json number,labels \
-            -q '.[] | select(([.labels[].name] | contains(["security-passed"])) and ([.labels[].name] | contains(["review-approved"]) | not) and ([.labels[].name] | contains(["in-review"]) | not) and ([.labels[].name] | contains(["review-changes-needed"]) | not)) | .number' | while read -r PR; do
-            echo "  Stalled PR: #$PR (security-passed, no review) — dispatching review"
-            GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-review.yml -f pr_number="$PR" 2>/dev/null || true
-            FIXES=$((FIXES + 1))
-            sleep 2
-          done
+          ACTIVE_REVIEW=$(gh run list --repo $REPO --workflow "Review Agent" --limit 5 --json status \
+            -q '[.[] | select(.status == "in_progress" or .status == "queued")] | length' 2>/dev/null || echo "0")
+          if [ "$ACTIVE_REVIEW" = "0" ]; then
+            gh pr list --repo $REPO --state open --json number,labels \
+              -q '.[] | select(([.labels[].name] | contains(["security-passed"])) and ([.labels[].name] | contains(["review-approved"]) | not) and ([.labels[].name] | contains(["review-changes-needed"]) | not)) | .number' | while read -r PR; do
+              echo "  Stalled PR: #$PR (security-passed, no active review) — dispatching review"
+              gh pr edit "$PR" --repo $REPO --remove-label "in-review" 2>/dev/null || true
+              GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-review.yml -f pr_number="$PR" 2>/dev/null || true
+              FIXES=$((FIXES + 1))
+              sleep 2
+            done
+          fi
 
           # --- 6. PRs with review-approved but not merged (stuck before merge) ---
           echo "Checking PRs stuck before merge..."
