@@ -107,7 +107,7 @@ jobs:
         run: |
           OUTPUT=$(runuser -u agent -- bash -c 'cat /tmp/prompt.txt | claude -p \
             --model au.anthropic.claude-sonnet-4-6 \
-            --max-turns 5 \
+            --max-turns 20 \
             --dangerously-skip-permissions')
           echo "$OUTPUT" > /tmp/review-output.txt
           VERDICT=$(echo "$OUTPUT" | head -1 | tr -d '[:space:]')
