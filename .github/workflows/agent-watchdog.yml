@@ -37,15 +37,11 @@ jobs:
           # --- 1. ops-feedback issues: Operator sent back but Product Agent didn't pick up ---
           echo "Checking ops-feedback issues..."
           for NUM in $(gh issue list --repo $REPO --label "ops-feedback" --state open --json number -q '.[].number'); do
-            # Check if Product Agent ran in the last 60 minutes for this issue
-            RECENT=$(gh run list --repo $REPO --workflow "Product Agent" --limit 20 --json databaseId,createdAt,status \
-              -q "[.[] | select(.createdAt > \"$(date -u -d '60 minutes ago' +%Y-%m-%dT%H:%M:%SZ)\")] | length" 2>/dev/null || echo "0")
-            if [ "$RECENT" = "0" ]; then
-              echo "  Stalled: #$NUM (ops-feedback, no recent Product Agent run) — dispatching"
-              GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-product.yml -f issue_number="$NUM" 2>/dev/null || true
-              FIXES=$((FIXES + 1))
-              sleep 2
-            fi
+            # Always re-dispatch — the Product Agent is idempotent and will skip if already reviewing
+            echo "  Stalled: #$NUM (ops-feedback) — dispatching Product Agent"
+            GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-product.yml -f issue_number="$NUM" 2>/dev/null || true
+            FIXES=$((FIXES + 1))
+            sleep 2
           done
 
           # --- 2. needs-clarification with recent human response ---
@@ -141,6 +137,21 @@ jobs:
                   sleep 2
                 fi
               done
+            done
+          fi
+
+          # --- 9. Issues with agent label but no pipeline progress (no other labels, no PR) ---
+          echo "Checking agent-labeled issues with no pipeline progress..."
+          if [ "$ACTIVE_DEV" = "0" ]; then
+            for NUM in $(gh issue list --repo $REPO --label "agent" --state open --json number,labels \
+              -q '.[] | select(([.labels[].name] | length) <= 1) | .number' 2>/dev/null); do
+              PR_EXISTS=$(gh pr list --repo $REPO --state open --head "agent/issue-$NUM" --json number -q 'length' 2>/dev/null || echo "0")
+              if [ "$PR_EXISTS" = "0" ]; then
+                echo "  Stalled: #$NUM (agent label only, no progress) — dispatching Product Agent"
+                GH_TOKEN=$DISPATCH_TOKEN gh workflow run agent-product.yml -f issue_number="$NUM" 2>/dev/null || true
+                FIXES=$((FIXES + 1))
+                sleep 2
+              fi
             done
           fi
 
