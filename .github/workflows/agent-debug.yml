@@ -109,12 +109,12 @@ jobs:
           cat /tmp/debug-prompt.txt | claude -p \
             --model au.anthropic.claude-sonnet-4-6 \
             --max-turns 5 \
-            --dangerously-skip-permissions 2>/dev/null || \
+            --allow-dangerously-skip-permissions --dangerously-skip-permissions 2>/dev/null || \
           cat /tmp/debug-prompt.txt | claude -p \
             --model au.anthropic.claude-sonnet-4-6 \
             --max-turns 5 \
             --allow-dangerously-skip-permissions \
-            --dangerously-skip-permissions
+            --allow-dangerously-skip-permissions --dangerously-skip-permissions
 
       - name: Process diagnosis and take action
         env:
@@ -127,56 +127,104 @@ jobs:
             exit 0
           fi
 
-          CATEGORY=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('category','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
-          SUMMARY=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('summary','Analysis failed'))" 2>/dev/null || echo "Analysis failed")
-          DETAILS=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('details',''))" 2>/dev/null || echo "")
-          RETRYABLE=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('retryable',False))" 2>/dev/null || echo "False")
-          FIX=$(cat /tmp/diagnosis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('suggested_fix',''))" 2>/dev/null || echo "")
+          CATEGORY=$(python3 -c "import sys,json; print(json.load(sys.stdin).get('category','UNKNOWN'))" < /tmp/diagnosis.json 2>/dev/null || echo "UNKNOWN")
+          SUMMARY=$(python3 -c "import sys,json; print(json.load(sys.stdin).get('summary','Analysis failed'))" < /tmp/diagnosis.json 2>/dev/null || echo "Analysis failed")
+          DETAILS=$(python3 -c "import sys,json; print(json.load(sys.stdin).get('details',''))" < /tmp/diagnosis.json 2>/dev/null || echo "")
+          FIX=$(python3 -c "import sys,json; print(json.load(sys.stdin).get('suggested_fix',''))" < /tmp/diagnosis.json 2>/dev/null || echo "")
 
           echo "Category: $CATEGORY"
-          echo "Retryable: $RETRYABLE"
           echo "Summary: $SUMMARY"
 
-          # Find the linked issue number from the branch name
+          # Extract issue number and PR number from the failed run
           BRANCH=$(gh run view "$RUN_ID" --json headBranch -q .headBranch 2>/dev/null || echo "")
           ISSUE_NUM=$(echo "$BRANCH" | grep -oP 'issue-\K\d+' || echo "")
+          PR_NUM=$(gh pr list --head "$BRANCH" --json number -q '.[0].number' 2>/dev/null || echo "")
 
-          # Post diagnosis comment on the issue
+          # Count how many times the debug agent has acted on this issue
+          DEBUG_COUNT=0
           if [ -n "$ISSUE_NUM" ]; then
-            COMMENT="**Debug Agent** — Workflow \`$WORKFLOW_NAME\` failed
+            DEBUG_COUNT=$(gh api repos/${{ github.repository }}/issues/$ISSUE_NUM/comments \
+              --jq '[.[] | select(.body | startswith("**Debug Agent**"))] | length' 2>/dev/null || echo "0")
+          fi
+          echo "Debug interventions so far: $DEBUG_COUNT"
+
+          # Post diagnosis comment
+          TARGET="$ISSUE_NUM"
+          [ -z "$TARGET" ] && TARGET="$PR_NUM"
+          if [ -n "$TARGET" ]; then
+            gh issue comment "$TARGET" --body "**Debug Agent** — \`$WORKFLOW_NAME\` failed (intervention $((DEBUG_COUNT + 1))/5)
 
           **Category:** $CATEGORY
           **Summary:** $SUMMARY
-
-          $DETAILS"
-
-            if [ "$RETRYABLE" = "True" ] && [ "$RETRY_COUNT" -lt 2 ]; then
-              COMMENT="$COMMENT
-
-          Retrying automatically (attempt $((RETRY_COUNT + 1))/2)..."
-            elif [ "$RETRYABLE" = "True" ]; then
-              COMMENT="$COMMENT
-
-          Max retries (2) reached. Requesting human review."
+          $DETAILS
+          **Action:** $(
+            if [ "$DEBUG_COUNT" -ge 5 ]; then
+              echo "Max interventions reached. Requesting human review."
+            elif [ "$CATEGORY" = "TIMEOUT" ]; then
+              echo "Re-dispatching developer agent to continue work."
+            elif [ "$CATEGORY" = "CODE" ]; then
+              echo "Re-dispatching developer agent with error context."
+            elif [ "$CATEGORY" = "INFRA" ] || [ "$CATEGORY" = "MODEL" ]; then
+              echo "Retrying the failed workflow."
+            else
+              echo "Requesting human review."
             fi
-
-            if [ -n "$FIX" ]; then
-              COMMENT="$COMMENT
-
-          **Suggested fix:** $FIX"
-            fi
-
-            gh issue comment "$ISSUE_NUM" --body "$COMMENT" 2>/dev/null || true
+          )" 2>/dev/null || true
           fi
 
-          # Auto-retry for transient/retryable failures (max 2 retries)
-          if [ "$RETRYABLE" = "True" ] && [ "$RETRY_COUNT" -lt 2 ]; then
-            echo "Retrying failed workflow..."
-            gh run rerun "$RUN_ID" --failed 2>/dev/null || true
-          elif [ "$RETRYABLE" != "True" ] && [ -n "$ISSUE_NUM" ]; then
-            # Non-retryable: add label for human review
-            gh issue edit "$ISSUE_NUM" --add-label "needs-human-review" 2>/dev/null || true
-          elif [ "$RETRY_COUNT" -ge 2 ] && [ -n "$ISSUE_NUM" ]; then
-            # Max retries exceeded
-            gh issue edit "$ISSUE_NUM" --add-label "needs-human-review" 2>/dev/null || true
+          # Stop after 5 interventions on the same issue
+          if [ "$DEBUG_COUNT" -ge 5 ]; then
+            echo "Max debug interventions reached"
+            [ -n "$ISSUE_NUM" ] && gh issue edit "$ISSUE_NUM" --add-label "needs-human-review" 2>/dev/null || true
+            exit 0
           fi
+
+          # Take action based on category and which workflow failed
+          case "$CATEGORY" in
+            INFRA|MODEL)
+              echo "Retrying failed run..."
+              gh run rerun "$RUN_ID" --failed 2>/dev/null || true
+              ;;
+            TIMEOUT)
+              # Agent ran out of turns — re-dispatch to continue where it left off
+              if echo "$WORKFLOW_NAME" | grep -qi "Developer"; then
+                [ -n "$ISSUE_NUM" ] && echo "Re-dispatching Developer Agent..." && \
+                  gh workflow run agent-develop.yml -f issue_number="$ISSUE_NUM" 2>/dev/null || true
+              elif echo "$WORKFLOW_NAME" | grep -qi "Revise"; then
+                [ -n "$PR_NUM" ] && echo "Re-dispatching Revise Agent..." && \
+                  gh workflow run agent-revise.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+              elif echo "$WORKFLOW_NAME" | grep -qi "Security"; then
+                [ -n "$PR_NUM" ] && echo "Re-dispatching Security Agent..." && \
+                  gh workflow run agent-security.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+              elif echo "$WORKFLOW_NAME" | grep -qi "Review"; then
+                [ -n "$PR_NUM" ] && echo "Re-dispatching Review Agent..." && \
+                  gh workflow run agent-review.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+              else
+                gh run rerun "$RUN_ID" --failed 2>/dev/null || true
+              fi
+              ;;
+            CODE|PROMPT)
+              # Code or prompt issue — re-dispatch the developer/revise agent
+              # The existing branch has partial work; the agent will continue from there
+              if echo "$WORKFLOW_NAME" | grep -qi "Developer"; then
+                [ -n "$ISSUE_NUM" ] && echo "Re-dispatching Developer Agent with error context..." && \
+                  gh workflow run agent-develop.yml -f issue_number="$ISSUE_NUM" 2>/dev/null || true
+              elif echo "$WORKFLOW_NAME" | grep -qi "Revise"; then
+                [ -n "$PR_NUM" ] && echo "Re-dispatching Revise Agent..." && \
+                  gh workflow run agent-revise.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+              elif echo "$WORKFLOW_NAME" | grep -qi "Security"; then
+                # Security agent code failure is unusual — retry
+                [ -n "$PR_NUM" ] && gh workflow run agent-security.yml -f pr_number="$PR_NUM" 2>/dev/null || true
+              else
+                gh run rerun "$RUN_ID" --failed 2>/dev/null || true
+              fi
+              ;;
+            *)
+              # Unknown — try a simple retry first, then human review
+              if [ "$DEBUG_COUNT" -lt 2 ]; then
+                gh run rerun "$RUN_ID" --failed 2>/dev/null || true
+              else
+                [ -n "$ISSUE_NUM" ] && gh issue edit "$ISSUE_NUM" --add-label "needs-human-review" 2>/dev/null || true
+              fi
+              ;;
+          esac
