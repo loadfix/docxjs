@@ -93,6 +93,15 @@ export class DocumentParser {
 			item.author = xml.attr(el, "author");
 			item.initials = xml.attr(el, "initials");
 			item.date = xml.attr(el, "date");
+
+			// Parse paraId for threading support (w14:paraId or w:paraId)
+			const paraId = el.getAttributeNS("http://schemas.microsoft.com/office/word/2010/wordml", "paraId")
+				?? el.getAttribute("w14:paraId")
+				?? xml.attr(el, "paraId");
+			if (paraId) {
+				item.paraId = paraId;
+			}
+
 			item.children = this.parseBodyElements(el);
 			result.push(item);
 		}

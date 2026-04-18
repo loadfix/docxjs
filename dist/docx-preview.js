@@ -1079,11 +1079,40 @@
     class CommentsPart extends Part {
         constructor(pkg, path, parser) {
             super(pkg, path);
+            this.topLevelComments = [];
             this._documentParser = parser;
         }
         parseXml(root) {
             this.comments = this._documentParser.parseComments(root);
             this.commentMap = keyBy(this.comments, x => x.id);
+        }
+        buildThreading(extendedComments) {
+            if (!extendedComments || extendedComments.length === 0) {
+                this.topLevelComments = [...this.comments];
+                return;
+            }
+            const extMap = keyBy(extendedComments, x => x.paraId);
+            const paraIdToComment = {};
+            for (const comment of this.comments) {
+                if (comment.paraId) {
+                    paraIdToComment[comment.paraId] = comment;
+                    const ext = extMap[comment.paraId];
+                    if (ext) {
+                        comment.done = ext.done;
+                    }
+                }
+            }
+            for (const ext of extendedComments) {
+                if (ext.paraIdParent) {
+                    const child = paraIdToComment[ext.paraId];
+                    const parent = paraIdToComment[ext.paraIdParent];
+                    if (child && parent) {
+                        child.parentCommentId = parent.id;
+                        parent.replies.push(child);
+                    }
+                }
+            }
+            this.topLevelComments = this.comments.filter(c => !c.parentCommentId);
         }
     }
 
@@ -1128,6 +1157,10 @@
                 const r = d.rels.find(x => x.type === rel.type) ?? rel;
                 return d.loadRelationshipPart(r.target, r.type);
             }));
+            if (d.commentsPart) {
+                const extComments = d.commentsExtendedPart?.comments ?? [];
+                d.commentsPart.buildThreading(extComments);
+            }
             return d;
         }
         save(type = "blob") {
@@ -1359,6 +1392,9 @@
         constructor() {
             super(...arguments);
             this.type = DomType.Comment;
+            this.done = false;
+            this.parentCommentId = null;
+            this.replies = [];
         }
     }
     class WmlCommentReference extends OpenXmlElementBase {
@@ -1444,6 +1480,12 @@
                 item.author = globalXmlParser.attr(el, "author");
                 item.initials = globalXmlParser.attr(el, "initials");
                 item.date = globalXmlParser.attr(el, "date");
+                const paraId = el.getAttributeNS("http://schemas.microsoft.com/office/word/2010/wordml", "paraId")
+                    ?? el.getAttribute("w14:paraId")
+                    ?? globalXmlParser.attr(el, "paraId");
+                if (paraId) {
+                    item.paraId = paraId;
+                }
                 item.children = this.parseBodyElements(el);
                 result.push(item);
             }
@@ -2916,9 +2958,21 @@
             this.usedHederFooterParts = [];
             this.currentTabs = [];
             this.commentMap = {};
+            this.commentAnchorElements = {};
+            this.sidebarContainer = null;
+            this.sidebarCommentElements = {};
             this.tasks = [];
             this.postRenderTasks = [];
             this.h = h;
+        }
+        get useSidebar() {
+            return this.options.renderComments && (this.options.comments?.sidebar !== false);
+        }
+        get useHighlight() {
+            return this.options.renderComments && (this.options.comments?.highlight !== false);
+        }
+        get isReadOnly() {
+            return this.options.comments?.readOnly !== false;
         }
         async render(document, options) {
             this.document = document;
@@ -2928,7 +2982,10 @@
             this.h = options.h ?? h;
             this.styleMap = null;
             this.tasks = [];
-            if (this.options.renderComments && globalThis.Highlight) {
+            this.commentAnchorElements = {};
+            this.sidebarCommentElements = {};
+            this.sidebarContainer = null;
+            if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
             }
             const result = [...this.renderDefaultStyle()];
@@ -2956,12 +3013,17 @@
                 result.push(...await this.renderFontTable(document.fontTablePart));
             var sectionElements = this.renderSections(document.documentPart.body);
             if (this.options.inWrapper) {
-                result.push(this.renderWrapper(sectionElements));
+                if (this.useSidebar) {
+                    result.push(this.renderWrapperWithSidebar(sectionElements));
+                }
+                else {
+                    result.push(this.renderWrapper(sectionElements));
+                }
             }
             else {
                 result.push(...sectionElements);
             }
-            if (this.commentHighlight && options.renderComments) {
+            if (this.commentHighlight && this.useHighlight) {
                 CSS.highlights.set(`${this.className}-comments`, this.commentHighlight);
             }
             this.postRenderTasks.forEach(t => t());
@@ -3271,6 +3333,239 @@
         renderWrapper(children) {
             return this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
         }
+        renderWrapperWithSidebar(sectionElements) {
+            const c = this.className;
+            const docContainer = this.h({ tagName: "div", className: `${c}-doc-container`, children: sectionElements });
+            this.sidebarContainer = this.h({ tagName: "div", className: `${c}-comment-sidebar` });
+            const toggleBtn = this.h({
+                tagName: "button",
+                className: `${c}-sidebar-toggle`,
+                children: ["Comments"],
+                title: "Toggle comments sidebar"
+            });
+            const highlightToggle = this.useHighlight ? this.h({
+                tagName: "label",
+                className: `${c}-highlight-toggle`,
+                children: [
+                    this.h({ tagName: "input", type: "checkbox", checked: true }),
+                    " Highlight"
+                ]
+            }) : null;
+            const toolbarChildren = [toggleBtn];
+            if (highlightToggle)
+                toolbarChildren.push(highlightToggle);
+            if (!this.isReadOnly) {
+                const addBtn = this.h({
+                    tagName: "button",
+                    className: `${c}-comment-add-btn`,
+                    children: ["+ Comment"],
+                    title: "Add a comment on selected text"
+                });
+                toolbarChildren.push(addBtn);
+                this.later(() => {
+                    addBtn.addEventListener("click", () => {
+                        const sel = document.getSelection();
+                        if (!sel || sel.isCollapsed)
+                            return;
+                        const range = sel.getRangeAt(0);
+                        if (!docContainer.contains(range.commonAncestorContainer))
+                            return;
+                        const text = prompt("Enter your comment:");
+                        if (text) {
+                            this.options.commentCallbacks?.onCommentAdd?.(range, text);
+                        }
+                    });
+                });
+            }
+            const toolbar = this.h({
+                tagName: "div",
+                className: `${c}-comment-toolbar`,
+                children: toolbarChildren
+            });
+            const contentArea = this.h({
+                tagName: "div",
+                className: `${c}-sidebar-content`,
+                children: []
+            });
+            this.sidebarContainer.appendChild(toolbar);
+            this.sidebarContainer.appendChild(contentArea);
+            this.renderSidebarComments(contentArea);
+            const wrapper = this.h({
+                tagName: "div",
+                className: `${c}-wrapper`,
+                children: [docContainer, this.sidebarContainer]
+            });
+            this.later(() => {
+                toggleBtn.addEventListener("click", () => {
+                    this.sidebarContainer.classList.toggle(`${c}-sidebar-collapsed`);
+                });
+                if (highlightToggle) {
+                    const checkbox = highlightToggle.querySelector("input");
+                    checkbox.addEventListener("change", () => {
+                        if (checkbox.checked) {
+                            if (this.commentHighlight) {
+                                CSS.highlights.set(`${c}-comments`, this.commentHighlight);
+                            }
+                            docContainer.classList.remove(`${c}-no-highlight`);
+                        }
+                        else {
+                            CSS.highlights?.delete(`${c}-comments`);
+                            docContainer.classList.add(`${c}-no-highlight`);
+                        }
+                    });
+                }
+                this.setupSidebarScrollSync(docContainer, contentArea);
+            });
+            return wrapper;
+        }
+        setupSidebarScrollSync(docContainer, sidebarContent) {
+            this.className;
+            const wrapper = docContainer.parentElement;
+            if (!wrapper)
+                return;
+            const positionComments = () => {
+                for (const [commentId, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
+                    const anchors = this.commentAnchorElements[commentId];
+                    if (!anchors || anchors.length === 0)
+                        continue;
+                    const firstAnchor = anchors[0];
+                    if (!firstAnchor || !firstAnchor.isConnected)
+                        continue;
+                    const anchorRect = firstAnchor.getBoundingClientRect();
+                    const sidebarRect = sidebarContent.getBoundingClientRect();
+                    const desiredTop = anchorRect.top - sidebarRect.top + sidebarContent.scrollTop;
+                    sidebarEl.style.marginTop = "";
+                    const currentTop = sidebarEl.offsetTop;
+                    const offset = desiredTop - currentTop;
+                    if (offset > 0) {
+                        sidebarEl.style.marginTop = `${offset}px`;
+                    }
+                }
+            };
+            let rafId;
+            const throttledPosition = () => {
+                cancelAnimationFrame(rafId);
+                rafId = requestAnimationFrame(positionComments);
+            };
+            wrapper.addEventListener("scroll", throttledPosition, { passive: true });
+            if (typeof ResizeObserver !== "undefined") {
+                const ro = new ResizeObserver(throttledPosition);
+                ro.observe(docContainer);
+            }
+            setTimeout(positionComments, 100);
+        }
+        renderSidebarComments(container) {
+            const commentsPart = this.document.commentsPart;
+            if (!commentsPart)
+                return;
+            const comments = commentsPart.topLevelComments.length > 0
+                ? commentsPart.topLevelComments
+                : commentsPart.comments;
+            for (const comment of comments) {
+                const el = this.renderSidebarComment(comment, false);
+                if (el)
+                    container.appendChild(el);
+            }
+        }
+        renderSidebarComment(comment, isReply) {
+            const c = this.className;
+            const callbacks = this.options.commentCallbacks ?? {};
+            const readOnly = this.isReadOnly;
+            const headerChildren = [
+                this.h({ tagName: "span", className: `${c}-comment-author`, children: [comment.author ?? "Unknown"] }),
+                this.h({ tagName: "span", className: `${c}-comment-date`, children: [comment.date ? new Date(comment.date).toLocaleString() : ""] })
+            ];
+            if (comment.done) {
+                headerChildren.push(this.h({ tagName: "span", className: `${c}-comment-done`, children: ["Done"] }));
+            }
+            const header = this.h({
+                tagName: "div",
+                className: `${c}-comment-header`,
+                children: headerChildren
+            });
+            const bodyEl = this.h({
+                tagName: "div",
+                className: `${c}-comment-body`,
+                children: this.renderElements(comment.children)
+            });
+            const children = [header, bodyEl];
+            if (!readOnly) {
+                const actionsEl = this.h({
+                    tagName: "div",
+                    className: `${c}-comment-actions`,
+                    children: []
+                });
+                const editBtn = this.h({ tagName: "button", className: `${c}-comment-edit-btn`, children: ["Edit"] });
+                const deleteBtn = this.h({ tagName: "button", className: `${c}-comment-delete-btn`, children: ["Delete"] });
+                actionsEl.appendChild(editBtn);
+                actionsEl.appendChild(deleteBtn);
+                if (!isReply) {
+                    const replyBtn = this.h({ tagName: "button", className: `${c}-comment-reply-btn`, children: ["Reply"] });
+                    actionsEl.appendChild(replyBtn);
+                    this.later(() => {
+                        replyBtn.addEventListener("click", () => {
+                            const text = prompt("Enter your reply:");
+                            if (text) {
+                                callbacks.onCommentReply?.(comment.id, text);
+                            }
+                        });
+                    });
+                }
+                children.push(actionsEl);
+                this.later(() => {
+                    editBtn.addEventListener("click", () => {
+                        const currentText = bodyEl.textContent ?? "";
+                        const newText = prompt("Edit comment:", currentText);
+                        if (newText !== null && newText !== currentText) {
+                            callbacks.onCommentEdit?.(comment.id, newText);
+                        }
+                    });
+                    deleteBtn.addEventListener("click", () => {
+                        if (confirm("Delete this comment?")) {
+                            callbacks.onCommentDelete?.(comment.id);
+                        }
+                    });
+                });
+            }
+            if (comment.replies && comment.replies.length > 0) {
+                const repliesContainer = this.h({
+                    tagName: "div",
+                    className: `${c}-comment-replies`,
+                    children: comment.replies.map(r => this.renderSidebarComment(r, true))
+                });
+                const threadToggle = this.h({
+                    tagName: "button",
+                    className: `${c}-thread-toggle`,
+                    children: [`${comment.replies.length} ${comment.replies.length === 1 ? 'reply' : 'replies'}`]
+                });
+                children.push(threadToggle);
+                children.push(repliesContainer);
+                this.later(() => {
+                    threadToggle.addEventListener("click", () => {
+                        repliesContainer.classList.toggle(`${c}-replies-collapsed`);
+                        threadToggle.classList.toggle(`${c}-thread-collapsed`);
+                    });
+                });
+            }
+            const commentEl = this.h({
+                tagName: "div",
+                className: cx(`${c}-sidebar-comment`, isReply && `${c}-sidebar-reply`),
+                children
+            });
+            commentEl.dataset.commentId = comment.id;
+            if (!isReply) {
+                this.sidebarCommentElements[comment.id] = commentEl;
+                this.later(() => {
+                    commentEl.addEventListener("click", () => {
+                        const anchors = this.commentAnchorElements[comment.id];
+                        if (anchors && anchors.length > 0) {
+                            anchors[0].scrollIntoView({ behavior: "smooth", block: "center" });
+                        }
+                    });
+                });
+            }
+            return commentEl;
+        }
         renderDefaultStyle() {
             var c = this.className;
             var wrapperStyle = `
@@ -3292,12 +3587,55 @@ section.${c}>footer { z-index: 1; }
 .${c} svg { fill: transparent; }
 `;
             if (this.options.renderComments) {
-                styleText += `
+                if (this.useSidebar) {
+                    styleText += `
+.${c}-wrapper { flex-flow: row !important; align-items: flex-start !important; }
+.${c}-doc-container { flex: 1; display: flex; flex-flow: column; align-items: center; min-width: 0; overflow: auto; padding: 30px; padding-bottom: 0; }
+.${c}-doc-container>section.${c} { background: white; box-shadow: 0 0 10px rgba(0, 0, 0, 0.5); margin-bottom: 30px; }
+.${c}-comment-sidebar { width: 320px; min-width: 260px; background: #fafafa; border-left: 1px solid #ddd; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow: hidden; transition: width 0.2s, min-width 0.2s, padding 0.2s; }
+.${c}-sidebar-collapsed { width: 0 !important; min-width: 0 !important; padding: 0 !important; border: none !important; overflow: hidden; }
+.${c}-sidebar-collapsed .${c}-sidebar-content,
+.${c}-sidebar-collapsed .${c}-comment-toolbar > *:not(.${c}-sidebar-toggle) { display: none; }
+.${c}-comment-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #ddd; background: #f5f5f5; flex-shrink: 0; flex-wrap: wrap; }
+.${c}-sidebar-toggle { cursor: pointer; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
+.${c}-sidebar-toggle:hover { background: #e8e8e8; }
+.${c}-highlight-toggle { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+.${c}-comment-add-btn { cursor: pointer; background: #4a90d9; color: white; border: none; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
+.${c}-comment-add-btn:hover { background: #357abd; }
+.${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
+.${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
+.${c}-sidebar-comment:hover { border-color: #4a90d9; box-shadow: 0 1px 4px rgba(74, 144, 217, 0.2); }
+.${c}-sidebar-reply { margin-left: 16px; border-left: 3px solid #4a90d9; background: #f8fbff; }
+.${c}-comment-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.${c}-comment-author { font-weight: 600; font-size: 0.85rem; color: #333; }
+.${c}-comment-date { font-size: 0.75rem; color: #999; }
+.${c}-comment-done { font-size: 0.7rem; background: #4caf50; color: white; padding: 1px 6px; border-radius: 3px; }
+.${c}-comment-body { font-size: 0.85rem; color: #444; margin-bottom: 6px; line-height: 1.4; }
+.${c}-comment-body p { margin: 2px 0; }
+.${c}-comment-actions { display: flex; gap: 6px; }
+.${c}-comment-actions button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; color: #666; }
+.${c}-comment-actions button:hover { background: #f0f0f0; border-color: #bbb; }
+.${c}-comment-delete-btn:hover { color: #d32f2f !important; border-color: #d32f2f !important; }
+.${c}-comment-replies { margin-top: 6px; }
+.${c}-replies-collapsed { display: none; }
+.${c}-thread-toggle { background: none; border: none; color: #4a90d9; cursor: pointer; font-size: 0.8rem; padding: 2px 0; margin-top: 4px; }
+.${c}-thread-toggle:hover { text-decoration: underline; }
+.${c}-thread-collapsed::before { content: "▶ "; }
+.${c}-thread-toggle:not(.${c}-thread-collapsed)::before { content: "▼ "; }
+.${c}-comment-focused { border-color: #ff9800 !important; box-shadow: 0 0 8px rgba(255, 152, 0, 0.4) !important; }
+.${c}-comment-anchor-start { cursor: pointer; }
+::highlight(${c}-comments) { background-color: rgba(255, 212, 0, 0.35); }
+.${c}-no-highlight .${c}-comment-anchor-start { cursor: default; }
+`;
+                }
+                else {
+                    styleText += `
 .${c}-comment-ref { cursor: default; }
 .${c}-comment-popover { display: none; z-index: 1000; padding: 0.5rem; background: white; position: absolute; box-shadow: 0 0 0.25rem rgba(0, 0, 0, 0.25); width: 30ch; }
 .${c}-comment-ref:hover~.${c}-comment-popover { display: block; }
 .${c}-comment-author,.${c}-comment-date { font-size: 0.875rem; color: #888; }
 `;
+                }
             }
             return [
                 this.h({ tagName: "#comment", children: ["docxjs library predefined styles"] }),
@@ -3550,6 +3888,31 @@ section.${c}>footer { z-index: 1; }
         renderCommentRangeStart(commentStart) {
             if (!this.options.renderComments)
                 return null;
+            if (this.useSidebar) {
+                const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` });
+                anchor.dataset.commentId = commentStart.id;
+                if (!this.commentAnchorElements[commentStart.id]) {
+                    this.commentAnchorElements[commentStart.id] = [];
+                }
+                this.commentAnchorElements[commentStart.id].push(anchor);
+                if (this.useHighlight) {
+                    const rng = new Range();
+                    this.commentHighlight?.add(rng);
+                    this.later(() => rng.setStart(anchor, 0));
+                    this.commentMap[commentStart.id] = rng;
+                }
+                this.later(() => {
+                    anchor.addEventListener("click", () => {
+                        const sidebarEl = this.sidebarCommentElements[commentStart.id];
+                        if (sidebarEl) {
+                            sidebarEl.scrollIntoView({ behavior: "smooth", block: "center" });
+                            sidebarEl.classList.add(`${this.className}-comment-focused`);
+                            setTimeout(() => sidebarEl.classList.remove(`${this.className}-comment-focused`), 2000);
+                        }
+                    });
+                });
+                return anchor;
+            }
             const rng = new Range();
             this.commentHighlight?.add(rng);
             const result = this.h({ tagName: "#comment", children: [`start of comment #${commentStart.id}`] });
@@ -3560,6 +3923,15 @@ section.${c}>footer { z-index: 1; }
         renderCommentRangeEnd(commentEnd) {
             if (!this.options.renderComments)
                 return null;
+            if (this.useSidebar) {
+                const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-end` });
+                anchor.dataset.commentId = commentEnd.id;
+                if (this.useHighlight) {
+                    const rng = this.commentMap[commentEnd.id];
+                    this.later(() => rng?.setEnd(anchor, 0));
+                }
+                return anchor;
+            }
             const rng = this.commentMap[commentEnd.id];
             const result = this.h({ tagName: "#comment", children: [`end of comment #${commentEnd.id}`] });
             this.later(() => rng?.setEnd(result, 0));
@@ -3568,6 +3940,9 @@ section.${c}>footer { z-index: 1; }
         renderCommentReference(commentRef) {
             if (!this.options.renderComments)
                 return null;
+            if (this.useSidebar) {
+                return this.h({ tagName: "#comment", children: [`comment ref #${commentRef.id}`] });
+            }
             var comment = this.document.commentsPart?.commentMap[commentRef.id];
             if (!comment)
                 return null;
@@ -3969,6 +4344,12 @@ section.${c}>footer { z-index: 1; }
         renderChanges: false,
         renderComments: false,
         renderAltChunks: true,
+        comments: {
+            sidebar: true,
+            highlight: true,
+            readOnly: true,
+        },
+        commentCallbacks: {},
         h: h
     };
     function parseAsync(data, userOptions) {

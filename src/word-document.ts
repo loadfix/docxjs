@@ -60,9 +60,14 @@ export class WordDocument {
 		d.contentTypes = await d._package.loadContentTypes();
 
 		await Promise.all(topLevelRels.map(rel => {
-			const r = d.rels.find(x => x.type === rel.type) ?? rel; //fallback                    
+			const r = d.rels.find(x => x.type === rel.type) ?? rel; //fallback
 			return d.loadRelationshipPart(r.target, r.type);
 		}));
+
+		if (d.commentsPart) {
+			const extComments = d.commentsExtendedPart?.comments ?? [];
+			d.commentsPart.buildThreading(extComments);
+		}
 
 		return d;
 	}
