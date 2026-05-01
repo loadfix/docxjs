@@ -16,6 +16,22 @@ export interface CommentsOptions {
     readOnly?: boolean;
 }
 
+export type ChangeKind =
+    | 'insertion'
+    | 'deletion'
+    | 'formatting'
+    | 'move'
+    | 'paragraphMark'
+    | 'rowInsertion'
+    | 'rowDeletion';
+
+export interface ChangeEventCallbacks {
+    onChangeAccept?: (changeId: string, kind: ChangeKind) => void;
+    onChangeReject?: (changeId: string, kind: ChangeKind) => void;
+    onChangeAcceptAll?: () => void;
+    onChangeRejectAll?: () => void;
+}
+
 export interface ChangesOptions {
     show?: boolean;
     showInsertions?: boolean;
@@ -25,6 +41,8 @@ export interface ChangesOptions {
     colorByAuthor?: boolean;
     changeBar?: boolean;
     legend?: boolean;
+    readOnly?: boolean;
+    sidebarCards?: boolean;
 }
 
 export interface Options {
@@ -50,6 +68,7 @@ export interface Options {
     comments: CommentsOptions;
     commentCallbacks: CommentEventCallbacks;
     changes: ChangesOptions;
+    changeCallbacks: ChangeEventCallbacks;
     h: typeof h;
 }
 
@@ -88,7 +107,10 @@ export const defaultOptions: Options = {
         colorByAuthor: true,
         changeBar: true,
         legend: true,
+        readOnly: true,
+        sidebarCards: true,
     },
+    changeCallbacks: {},
     h: h
 };
 
