@@ -16,6 +16,15 @@ export interface CommentsOptions {
     readOnly?: boolean;
 }
 
+export interface ChangesOptions {
+    show?: boolean;
+    showInsertions?: boolean;
+    showDeletions?: boolean;
+    colorByAuthor?: boolean;
+    changeBar?: boolean;
+    legend?: boolean;
+}
+
 export interface Options {
     inWrapper: boolean;
     hideWrapperOnPrint: boolean;
@@ -38,6 +47,7 @@ export interface Options {
     renderAltChunks: boolean;
     comments: CommentsOptions;
     commentCallbacks: CommentEventCallbacks;
+    changes: ChangesOptions;
     h: typeof h;
 }
 
@@ -67,16 +77,34 @@ export const defaultOptions: Options = {
         readOnly: true,
     },
     commentCallbacks: {},
+    changes: {
+        show: false,
+        showInsertions: true,
+        showDeletions: true,
+        colorByAuthor: true,
+        changeBar: true,
+        legend: true,
+    },
     h: h
 };
 
-export function parseAsync(data: Blob | any, userOptions?: Partial<Options>): Promise<any>  {
+function mergeOptions(userOptions?: Partial<Options>): Options {
     const ops = { ...defaultOptions, ...userOptions };
+    // `renderChanges: true` is the legacy switch. If a caller sets it without
+    // also passing `changes.show`, honour the legacy intent.
+    if (userOptions?.renderChanges && userOptions?.changes?.show === undefined) {
+        ops.changes = { ...defaultOptions.changes, ...userOptions.changes, show: true };
+    }
+    return ops;
+}
+
+export function parseAsync(data: Blob | any, userOptions?: Partial<Options>): Promise<any>  {
+    const ops = mergeOptions(userOptions);
     return WordDocument.load(data, new DocumentParser(ops), ops);
 }
 
 export async function renderDocument(document: any, userOptions?: Partial<Options>): Promise<any> {
-    const ops = { ...defaultOptions, ...userOptions };
+    const ops = mergeOptions(userOptions);
     const renderer = new HtmlRenderer();
     return await renderer.render(document, ops);
 }
