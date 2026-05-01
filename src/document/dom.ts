@@ -63,14 +63,28 @@ export enum DomType {
     AltChunk = "altChunk"
 }
 
+export interface Revision {
+    id?: string;
+    author?: string;
+    date?: string;
+}
+
 export interface OpenXmlElement {
     type: DomType;
     children?: OpenXmlElement[];
     cssStyle?: Record<string, string>;
     props?: Record<string, any>;
-    
+
 	styleName?: string; //style name
 	className?: string; //class mods
+
+    // Populated for DomType.Inserted / DomType.Deleted and for paragraph-mark
+    // revisions (w:pPr/w:rPr/w:ins|w:del). See Track Changes Phase 1 (#3).
+    revision?: Revision;
+    // 'inserted' or 'deleted' — only set on paragraphs whose paragraph mark
+    // itself was inserted/deleted. The paragraph body is unaffected; Phase 2
+    // renders this.
+    paragraphMarkRevisionKind?: 'inserted' | 'deleted';
 
     parent?: OpenXmlElement;
 }
