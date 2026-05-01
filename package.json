@@ -22,6 +22,7 @@
     "@rollup/plugin-typescript": "^12.1.4",
     "diff": "^8.0.2",
     "jasmine-core": "^5.1.0",
+    "jsdom": "^29.1.1",
     "karma": "^6.3.9",
     "karma-chrome-launcher": "^3.1.0",
     "karma-firefox-launcher": "^2.1.2",
@@ -34,7 +35,8 @@
     "build-prod": "rollup --config rollup.config.mjs --environment BUILD:production",
     "watch": "rollup --config rollup.config.mjs --watch",
     "e2e": "karma start karma.conf.cjs --single-run",
-    "e2e-watch": "karma start karma.conf.cjs"
+    "e2e-watch": "karma start karma.conf.cjs",
+    "test:track-changes": "npm run build && node scripts/test-track-changes.mjs"
   },
   "files": [
     "dist"
