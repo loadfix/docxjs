@@ -2,7 +2,7 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk
+	WmlAltChunk, Revision
 } from './document/dom';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -16,6 +16,14 @@ import { convertLength, LengthUsage, LengthUsageType } from './document/common';
 import { parseVmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeEnd, WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { encloseFontFamily } from './utils';
+
+function parseRevisionAttrs(elem: Element): Revision {
+	return {
+		id: xml.attr(elem, "id"),
+		author: xml.attr(elem, "author"),
+		date: xml.attr(elem, "date")
+	};
+}
 
 export var autos = {
 	shd: "inherit",
@@ -490,6 +498,7 @@ export class DocumentParser {
 	parseInserted(node: Element, parentParser: Function): OpenXmlElement {
 		return <OpenXmlElement>{
 			type: DomType.Inserted,
+			revision: parseRevisionAttrs(node),
 			children: parentParser(node)?.children ?? []
 		};
 	}
@@ -497,6 +506,7 @@ export class DocumentParser {
 	parseDeleted(node: Element, parentParser: Function): OpenXmlElement {
 		return <OpenXmlElement>{
 			type: DomType.Deleted,
+			revision: parseRevisionAttrs(node),
 			children: parentParser(node)?.children ?? []
 		};
 	}
@@ -583,7 +593,18 @@ export class DocumentParser {
 					break;
 
 				case "rPr":
-					//TODO ignore
+					// Check for paragraph-mark revisions (w:pPr/w:rPr/w:ins or w:del).
+					// The metadata is attached to the paragraph; rendering of the mark
+					// itself is Phase 2 (#4). See #3.
+					for (const rPrChild of xml.elements(c)) {
+						if (rPrChild.localName === "ins") {
+							paragraph.paragraphMarkRevisionKind = 'inserted';
+							paragraph.revision = parseRevisionAttrs(rPrChild);
+						} else if (rPrChild.localName === "del") {
+							paragraph.paragraphMarkRevisionKind = 'deleted';
+							paragraph.revision = parseRevisionAttrs(rPrChild);
+						}
+					}
 					break;
 
 				default:

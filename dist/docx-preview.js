@@ -1425,6 +1425,13 @@
         }
     }
 
+    function parseRevisionAttrs(elem) {
+        return {
+            id: globalXmlParser.attr(elem, "id"),
+            author: globalXmlParser.attr(elem, "author"),
+            date: globalXmlParser.attr(elem, "date")
+        };
+    }
     var autos = {
         shd: "inherit",
         color: "black",
@@ -1818,12 +1825,14 @@
         parseInserted(node, parentParser) {
             return {
                 type: DomType.Inserted,
+                revision: parseRevisionAttrs(node),
                 children: parentParser(node)?.children ?? []
             };
         }
         parseDeleted(node, parentParser) {
             return {
                 type: DomType.Deleted,
+                revision: parseRevisionAttrs(node),
                 children: parentParser(node)?.children ?? []
             };
         }
@@ -1890,6 +1899,16 @@
                         this.parseFrame(c, paragraph);
                         break;
                     case "rPr":
+                        for (const rPrChild of globalXmlParser.elements(c)) {
+                            if (rPrChild.localName === "ins") {
+                                paragraph.paragraphMarkRevisionKind = 'inserted';
+                                paragraph.revision = parseRevisionAttrs(rPrChild);
+                            }
+                            else if (rPrChild.localName === "del") {
+                                paragraph.paragraphMarkRevisionKind = 'deleted';
+                                paragraph.revision = parseRevisionAttrs(rPrChild);
+                            }
+                        }
                         break;
                     default:
                         return false;
@@ -2967,6 +2986,8 @@
             this.commentAnchorElements = {};
             this.sidebarContainer = null;
             this.sidebarCommentElements = {};
+            this.changeAuthorIndex = new Map();
+            this.changeElements = [];
             this.tasks = [];
             this.postRenderTasks = [];
             this.h = h;
@@ -2980,6 +3001,9 @@
         get isReadOnly() {
             return this.options.comments?.readOnly !== false;
         }
+        get showChanges() {
+            return !!this.options.changes?.show;
+        }
         async render(document, options) {
             this.document = document;
             this.options = options;
@@ -2991,6 +3015,8 @@
             this.commentAnchorElements = {};
             this.sidebarCommentElements = {};
             this.sidebarContainer = null;
+            this.changeAuthorIndex = new Map();
+            this.changeElements = [];
             if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
             }
@@ -3031,6 +3057,9 @@
             }
             if (this.commentHighlight && this.useHighlight) {
                 CSS.highlights.set(`${this.className}-comments`, this.commentHighlight);
+            }
+            if (this.showChanges) {
+                this.finalizeChangesRendering(result);
             }
             this.postRenderTasks.forEach(t => t());
             await Promise.allSettled(this.tasks);
@@ -3795,10 +3824,34 @@ section.${c}>footer { z-index: 1; }
 `;
                 }
             }
+            if (this.showChanges) {
+                styleText += this.changesStyles();
+            }
             return [
                 this.h({ tagName: "#comment", children: ["docxjs library predefined styles"] }),
                 this.h({ tagName: "style", children: [styleText] })
             ];
+        }
+        changesStyles() {
+            const c = this.className;
+            const palette = [
+                "#2563eb", "#dc2626", "#16a34a", "#9333ea",
+                "#ea580c", "#0891b2", "#c026d3", "#65a30d"
+            ];
+            let css = `
+.${c} ins { text-decoration: underline; text-decoration-thickness: 2px; background: transparent; }
+.${c} del { text-decoration: line-through; text-decoration-thickness: 2px; }
+.${c}-change-bar { position: relative; }
+.${c}-change-bar::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 2px; background: currentColor; opacity: 0.55; }
+.${c}-legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 12px; margin: 0 auto 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; color: #333; max-width: calc(100% - 60px); }
+.${c}-legend-label { font-weight: 600; margin-right: 4px; }
+.${c}-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.${c}-legend-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; }
+`;
+            for (let i = 0; i < HtmlRenderer.CHANGE_PALETTE_SIZE; i++) {
+                css += `.${c}-change-author-${i} { color: ${palette[i]}; text-decoration-color: ${palette[i]}; }\n`;
+            }
+            return css;
         }
         async renderNumbering(numberings) {
             var styleText = "";
@@ -4156,20 +4209,52 @@ section.${c}>footer { z-index: 1; }
             return this.h(elem.text);
         }
         renderDeletedText(elem) {
-            return this.options.renderChanges ? this.renderText(elem) : null;
+            return (this.showChanges && this.options.changes?.showDeletions !== false)
+                ? this.renderText(elem)
+                : null;
         }
         renderBreak(elem) {
             return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
         }
         renderInserted(elem) {
-            if (this.options.renderChanges)
-                return this.renderContainer(elem, "ins");
+            if (this.showChanges && this.options.changes?.showInsertions !== false) {
+                const node = this.renderContainer(elem, "ins");
+                this.applyChangeAttributes(node, elem);
+                return node;
+            }
             return this.renderElements(elem.children);
         }
         renderDeleted(elem) {
-            if (this.options.renderChanges)
-                return this.renderContainer(elem, "del");
+            if (this.showChanges && this.options.changes?.showDeletions !== false) {
+                const node = this.renderContainer(elem, "del");
+                this.applyChangeAttributes(node, elem);
+                return node;
+            }
             return null;
+        }
+        applyChangeAttributes(node, elem) {
+            const rev = elem.revision;
+            if (!rev)
+                return;
+            if (rev.id)
+                node.dataset.changeId = rev.id;
+            if (rev.author)
+                node.dataset.author = rev.author;
+            if (rev.date)
+                node.dataset.date = rev.date;
+            if (rev.author && this.options.changes?.colorByAuthor !== false) {
+                const idx = this.getAuthorIndex(rev.author);
+                node.classList.add(`${this.className}-change-author-${idx}`);
+            }
+            this.changeElements.push(node);
+        }
+        getAuthorIndex(author) {
+            let idx = this.changeAuthorIndex.get(author);
+            if (idx === undefined) {
+                idx = this.changeAuthorIndex.size % HtmlRenderer.CHANGE_PALETTE_SIZE;
+                this.changeAuthorIndex.set(author, idx);
+            }
+            return idx;
         }
         renderSymbol(elem) {
             return this.h({ tagName: "span", children: [String.fromCharCode(elem.char)], style: { fontFamily: elem.font } });
@@ -4474,7 +4559,82 @@ section.${c}>footer { z-index: 1; }
         later(func) {
             this.postRenderTasks.push(func);
         }
+        finalizeChangesRendering(result) {
+            const c = this.className;
+            const opts = this.options.changes ?? {};
+            if (opts.changeBar !== false) {
+                for (const el of this.changeElements) {
+                    const block = this.findBlockAncestor(el);
+                    if (!block)
+                        continue;
+                    block.classList.add(`${c}-change-bar`);
+                    if (!block.style.color) {
+                        const match = Array.from(el.classList).find(n => n.startsWith(`${c}-change-author-`));
+                        if (match)
+                            block.classList.add(match);
+                    }
+                }
+            }
+            if (opts.legend !== false && this.changeAuthorIndex.size > 0) {
+                const legend = this.buildLegend();
+                if (legend) {
+                    const wrapper = this.findWrapper(result);
+                    if (wrapper) {
+                        wrapper.insertBefore(legend, wrapper.firstChild);
+                    }
+                    else if (result.length) {
+                        const insertAt = result.findIndex(n => n.nodeName !== "STYLE" && n.nodeType === 1);
+                        if (insertAt >= 0)
+                            result.splice(insertAt, 0, legend);
+                        else
+                            result.push(legend);
+                    }
+                }
+            }
+        }
+        findBlockAncestor(el) {
+            let cur = el.parentElement;
+            while (cur) {
+                const tag = cur.tagName;
+                if (tag === "P" || tag === "LI" || tag === "TR" || tag === "H1" || tag === "H2" ||
+                    tag === "H3" || tag === "H4" || tag === "H5" || tag === "H6") {
+                    return cur;
+                }
+                if (tag === "SECTION" || tag === "BODY" || tag === "ARTICLE")
+                    return null;
+                cur = cur.parentElement;
+            }
+            return null;
+        }
+        findWrapper(result) {
+            const wrapperClass = `${this.className}-wrapper`;
+            for (const node of result) {
+                if (node instanceof HTMLElement && node.classList.contains(wrapperClass)) {
+                    return node;
+                }
+            }
+            return null;
+        }
+        buildLegend() {
+            const c = this.className;
+            const items = [
+                this.h({ tagName: "span", className: `${c}-legend-label`, children: ["Changes by:"] })
+            ];
+            const authors = [...this.changeAuthorIndex.entries()].sort((a, b) => a[1] - b[1]);
+            for (const [author, idx] of authors) {
+                items.push(this.h({
+                    tagName: "span",
+                    className: `${c}-legend-item`,
+                    children: [
+                        this.h({ tagName: "span", className: `${c}-legend-swatch ${c}-change-author-${idx}`, style: { background: "currentColor" } }),
+                        author
+                    ]
+                }));
+            }
+            return this.h({ tagName: "div", className: `${c}-legend`, children: items });
+        }
     }
+    HtmlRenderer.CHANGE_PALETTE_SIZE = 8;
     function findParent(elem, type) {
         var parent = elem.parent;
         while (parent != null && parent.type != type)
@@ -4508,14 +4668,29 @@ section.${c}>footer { z-index: 1; }
             readOnly: true,
         },
         commentCallbacks: {},
+        changes: {
+            show: false,
+            showInsertions: true,
+            showDeletions: true,
+            colorByAuthor: true,
+            changeBar: true,
+            legend: true,
+        },
         h: h
     };
-    function parseAsync(data, userOptions) {
+    function mergeOptions(userOptions) {
         const ops = { ...defaultOptions, ...userOptions };
+        if (userOptions?.renderChanges && userOptions?.changes?.show === undefined) {
+            ops.changes = { ...defaultOptions.changes, ...userOptions.changes, show: true };
+        }
+        return ops;
+    }
+    function parseAsync(data, userOptions) {
+        const ops = mergeOptions(userOptions);
         return WordDocument.load(data, new DocumentParser(ops), ops);
     }
     async function renderDocument(document, userOptions) {
-        const ops = { ...defaultOptions, ...userOptions };
+        const ops = mergeOptions(userOptions);
         const renderer = new HtmlRenderer();
         return await renderer.render(document, ops);
     }
