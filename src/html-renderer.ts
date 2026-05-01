@@ -73,6 +73,17 @@ export class HtmlRenderer {
 	// change elements so the post-render change-bar pass can walk them.
 	changeAuthorIndex: Map<string, number> = new Map();
 	changeElements: HTMLElement[] = [];
+	// Parallel to changeElements: metadata for each change element so that the
+	// sidebar card pass, the delegated accept/reject handler, and the
+	// change-bar pass can all read from the same record.
+	changeMeta: Array<{
+		el: HTMLElement;
+		id?: string;
+		kind: import('./docx-preview').ChangeKind;
+		author?: string;
+		date?: string;
+		summary: string;
+	}> = [];
 	// Tracks the two halves of each move so a click on either scrolls to the
 	// counterpart. Keyed by move id — note the parser feeds us a DOCX-derived
 	// string here, so the renderer must never interpolate it into a CSS
@@ -113,6 +124,7 @@ export class HtmlRenderer {
 		this.sidebarContainer = null;
 		this.changeAuthorIndex = new Map();
 		this.changeElements = [];
+		this.changeMeta = [];
 		this.moveElements = new Map();
 
 		if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
@@ -1079,6 +1091,19 @@ section.${c}>footer { z-index: 1; }
 .${c} .${c}-formatting-revision { text-decoration: underline dotted; text-decoration-thickness: 1px; cursor: help; }
 .${c}-paragraph-mark { margin-left: 2px; font-weight: bold; user-select: none; }
 .${c}-paragraph-mark-deleted { text-decoration: line-through; }
+.${c}-row-inserted > td { background: color-mix(in srgb, currentColor 8%, transparent); }
+.${c}-row-deleted > td { background: color-mix(in srgb, currentColor 10%, transparent); text-decoration: line-through; text-decoration-color: currentColor; text-decoration-thickness: 2px; }
+.${c}-change-actions { display: none; margin-left: 4px; user-select: none; vertical-align: baseline; font-size: 0.75em; }
+.${c}-change-actions button { border: 1px solid currentColor; background: white; color: currentColor; cursor: pointer; padding: 0 4px; border-radius: 3px; line-height: 1; margin-right: 2px; }
+.${c}-change-actions button:hover { background: currentColor; color: white; }
+.${c} ins:hover > .${c}-change-actions,
+.${c} del:hover > .${c}-change-actions,
+.${c} .${c}-move-from:hover > .${c}-change-actions,
+.${c} .${c}-move-to:hover > .${c}-change-actions,
+.${c} .${c}-formatting-revision:hover > .${c}-change-actions,
+.${c}-paragraph-mark:hover > .${c}-change-actions { display: inline-flex; gap: 2px; }
+.${c}-revision-kind { margin-left: auto; font-size: 0.7rem; padding: 1px 6px; border: 1px solid currentColor; border-radius: 3px; text-transform: uppercase; }
+.${c}-revision-card { border-left: 3px solid currentColor; }
 .${c}-change-bar { position: relative; }
 .${c}-change-bar::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 2px; background: currentColor; opacity: 0.55; }
 .${c}-legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 12px; margin: 0 auto 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; color: #333; max-width: calc(100% - 60px); }
@@ -1499,10 +1524,16 @@ section.${c}>footer { z-index: 1; }
 		if (rev?.id) mark.dataset.changeId = rev.id;
 		if (rev?.author) mark.dataset.author = rev.author;
 		if (rev?.date) mark.dataset.date = rev.date;
+		mark.dataset.changeKind = "paragraphMark";
 		mark.setAttribute("aria-label", kind === "inserted" ? "Paragraph inserted" : "Paragraph mark deleted");
 
 		paragraphEl.appendChild(mark);
 		this.changeElements.push(mark);
+		this.changeMeta.push({
+			el: mark, id: rev?.id, kind: "paragraphMark",
+			author: rev?.author, date: rev?.date,
+			summary: this.summarizeChange(mark, "paragraphMark"),
+		});
 	}
 
 	renderHyperlink(elem: WmlHyperlink) {
@@ -1685,7 +1716,7 @@ section.${c}>footer { z-index: 1; }
 	renderInserted(elem: OpenXmlElement): Node | Node[] {
 		if (this.showChanges && this.options.changes?.showInsertions !== false) {
 			const node = this.renderContainer(elem, "ins");
-			this.applyChangeAttributes(node, elem);
+			this.applyChangeAttributes(node, elem, "insertion");
 			return node;
 		}
 		return this.renderElements(elem.children);
@@ -1694,7 +1725,7 @@ section.${c}>footer { z-index: 1; }
 	renderDeleted(elem: OpenXmlElement): Node {
 		if (this.showChanges && this.options.changes?.showDeletions !== false) {
 			const node = this.renderContainer(elem, "del");
-			this.applyChangeAttributes(node, elem);
+			this.applyChangeAttributes(node, elem, "deletion");
 			return node;
 		}
 		return null;
@@ -1706,7 +1737,7 @@ section.${c}>footer { z-index: 1; }
 		}
 		const node = this.renderContainer(elem, "span") as HTMLElement;
 		node.classList.add(`${this.className}-move-from`);
-		this.applyChangeAttributes(node, elem);
+		this.applyChangeAttributes(node, elem, "move");
 		this.registerMove(node, elem, "from");
 		return node;
 	}
@@ -1717,7 +1748,7 @@ section.${c}>footer { z-index: 1; }
 		}
 		const node = this.renderContainer(elem, "span") as HTMLElement;
 		node.classList.add(`${this.className}-move-to`);
-		this.applyChangeAttributes(node, elem);
+		this.applyChangeAttributes(node, elem, "move");
 		this.registerMove(node, elem, "to");
 		return node;
 	}
@@ -1744,14 +1775,15 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	// Populates data-change-id/author/date and a palette-index class on a
-	// rendered <ins>/<del>. See Track Changes Phase 1 (#3).
-	applyChangeAttributes(node: HTMLElement, elem: OpenXmlElement) {
+	// rendered <ins>/<del>/move/etc. See Track Changes Phase 1 (#3).
+	applyChangeAttributes(node: HTMLElement, elem: OpenXmlElement, kind: import('./docx-preview').ChangeKind) {
 		const rev = elem.revision;
 		if (!rev) return;
 
 		if (rev.id) node.dataset.changeId = rev.id;
 		if (rev.author) node.dataset.author = rev.author;
 		if (rev.date) node.dataset.date = rev.date;
+		node.dataset.changeKind = kind;
 
 		if (rev.author && this.options.changes?.colorByAuthor !== false) {
 			const idx = this.getAuthorIndex(rev.author);
@@ -1759,6 +1791,44 @@ section.${c}>footer { z-index: 1; }
 		}
 
 		this.changeElements.push(node);
+		this.changeMeta.push({
+			el: node,
+			id: rev.id,
+			kind,
+			author: rev.author,
+			date: rev.date,
+			summary: this.summarizeChange(node, kind),
+		});
+	}
+
+	private summarizeChange(node: HTMLElement, kind: import('./docx-preview').ChangeKind): string {
+		const MAX = 80;
+		const truncate = (s: string) => {
+			const clean = s.replace(/\s+/g, " ").trim();
+			return clean.length > MAX ? clean.slice(0, MAX - 1) + "…" : clean;
+		};
+
+		switch (kind) {
+			case "insertion":
+			case "move": {
+				const text = truncate(node.textContent ?? "");
+				return text ? `Inserted: "${text}"` : "Inserted content";
+			}
+			case "deletion": {
+				const text = truncate(node.textContent ?? "");
+				return text ? `Deleted: "${text}"` : "Deleted content";
+			}
+			case "paragraphMark":
+				return "Paragraph mark changed";
+			case "rowInsertion":
+				return "Row inserted";
+			case "rowDeletion":
+				return "Row deleted";
+			case "formatting": {
+				const title = node.getAttribute("title");
+				return title ?? "Formatting changed";
+			}
+		}
 	}
 
 	private getAuthorIndex(author: string): number {
@@ -1846,8 +1916,15 @@ section.${c}>footer { z-index: 1; }
 			: "formatting";
 		const who = fr.author ? `${fr.author} changed` : "Changed";
 		node.setAttribute("title", `${who}: ${changed}`);
+		node.dataset.changeKind = "formatting";
+		if (fr.id) node.dataset.changeId = fr.id;
 
 		this.changeElements.push(node);
+		this.changeMeta.push({
+			el: node, id: fr.id, kind: "formatting",
+			author: fr.author, date: fr.date,
+			summary: `${who}: ${changed}`,
+		});
 	}
 
 	renderTable(elem: WmlTable) {
@@ -1888,7 +1965,44 @@ section.${c}>footer { z-index: 1; }
 
 		this.currentCellPosition.row++;
 
-		return this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+		const tr = this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+
+		if (this.showChanges && elem.rowRevisionKind) {
+			this.applyRowRevision(tr, elem);
+		}
+		this.applyFormattingRevision(tr, elem);
+
+		return tr;
+	}
+
+	// Rows can't be wrapped in <ins>/<del> (invalid HTML), so we decorate the
+	// <tr> with a class and data-attrs and lean on CSS for the strikethrough
+	// overlay on deletions.
+	private applyRowRevision(tr: HTMLTableRowElement, elem: WmlTableRow) {
+		const kind = elem.rowRevisionKind;
+		if (!kind) return;
+		if (kind === "inserted" && this.options.changes?.showInsertions === false) return;
+		if (kind === "deleted" && this.options.changes?.showDeletions === false) return;
+
+		const c = this.className;
+		tr.classList.add(`${c}-row-${kind}`);
+		const rev = elem.revision;
+		if (rev?.id) tr.dataset.changeId = rev.id;
+		if (rev?.author) tr.dataset.author = rev.author;
+		if (rev?.date) tr.dataset.date = rev.date;
+		const metaKind: import('./docx-preview').ChangeKind = kind === "inserted" ? "rowInsertion" : "rowDeletion";
+		tr.dataset.changeKind = metaKind;
+
+		if (rev?.author && this.options.changes?.colorByAuthor !== false) {
+			tr.classList.add(`${c}-change-author-${this.getAuthorIndex(rev.author)}`);
+		}
+
+		this.changeElements.push(tr);
+		this.changeMeta.push({
+			el: tr, id: rev?.id, kind: metaKind,
+			author: rev?.author, date: rev?.date,
+			summary: this.summarizeChange(tr, metaKind),
+		});
 	}
 
 	renderTableCellPlaceholder(colSpan: number) {
@@ -2230,6 +2344,199 @@ section.${c}>footer { z-index: 1; }
 					else result.push(legend);
 				}
 			}
+		}
+
+		if (opts.readOnly === false) {
+			this.wireChangeActionDelegate(result);
+			this.injectInlineChangeActions();
+			this.extendSidebarWithChanges();
+		}
+	}
+
+	// Inject ✓/✕ buttons into each change element with an id. Uses a single
+	// delegated listener attached to the wrapper; this avoids N listeners on a
+	// large document and keeps us resilient to elements being moved by CSS.
+	private injectInlineChangeActions() {
+		const c = this.className;
+		for (const meta of this.changeMeta) {
+			if (!meta.id) continue;
+			if (meta.el.querySelector(`.${c}-change-actions`)) continue;
+			// Row revisions are <tr> — inserting <span> children is invalid.
+			// Skip inline buttons for rows; the sidebar card still works.
+			if (meta.el.tagName === "TR") continue;
+
+			const accept = this.h({
+				tagName: "button",
+				className: `${c}-change-accept`,
+				children: ["✓"],
+				title: "Accept change"
+			}) as HTMLButtonElement;
+			const reject = this.h({
+				tagName: "button",
+				className: `${c}-change-reject`,
+				children: ["✕"],
+				title: "Reject change"
+			}) as HTMLButtonElement;
+			const wrap = this.h({
+				tagName: "span",
+				className: `${c}-change-actions`,
+				children: [accept, reject]
+			}) as HTMLElement;
+			meta.el.appendChild(wrap);
+		}
+	}
+
+	private wireChangeActionDelegate(result: Node[]) {
+		const c = this.className;
+		const wrapper = this.findWrapper(result);
+		const root = wrapper ?? this.findFirstElementRoot(result);
+		if (!root) return;
+		const callbacks = this.options.changeCallbacks ?? {};
+
+		root.addEventListener("click", (ev) => {
+			const target = ev.target as HTMLElement | null;
+			if (!target) return;
+			const btn = target.closest(`.${c}-change-accept, .${c}-change-reject`) as HTMLElement | null;
+			if (!btn) return;
+
+			// Find the owning change element via dataset.changeKind.
+			const owner = btn.closest<HTMLElement>("[data-change-id][data-change-kind]");
+			if (!owner) return;
+
+			ev.preventDefault();
+			ev.stopPropagation();
+
+			const id = owner.dataset.changeId!;
+			const kind = owner.dataset.changeKind as import('./docx-preview').ChangeKind;
+			if (btn.classList.contains(`${c}-change-accept`)) {
+				callbacks.onChangeAccept?.(id, kind);
+			} else {
+				callbacks.onChangeReject?.(id, kind);
+			}
+		});
+	}
+
+	// Locates the first element node in the render output so we can delegate
+	// events from its subtree when there's no wrapper.
+	private findFirstElementRoot(result: Node[]): HTMLElement | null {
+		for (const n of result) {
+			if (n instanceof HTMLElement) return n;
+		}
+		return null;
+	}
+
+	// Adds revision cards to the comments sidebar (if active) and wires up
+	// the "Accept all" / "Reject all" toolbar buttons.
+	private extendSidebarWithChanges() {
+		const c = this.className;
+		const opts = this.options.changes ?? {};
+		if (opts.sidebarCards === false) return;
+		if (!this.useSidebar || !this.sidebarContainer) return;
+
+		const content = this.sidebarContainer.querySelector(`.${c}-sidebar-content`);
+		const toolbar = this.sidebarContainer.querySelector(`.${c}-comment-toolbar`);
+		if (!content) return;
+
+		// Only include top-level changes (each revision id appears once; for
+		// moves that means a single card regardless of from/to halves).
+		const seen = new Set<string>();
+		const unique = this.changeMeta.filter(m => {
+			if (!m.id || seen.has(m.id)) return false;
+			seen.add(m.id);
+			return true;
+		});
+		const callbacks = this.options.changeCallbacks ?? {};
+
+		for (const meta of unique) {
+			content.appendChild(this.buildRevisionCard(meta, callbacks));
+		}
+
+		if (toolbar && opts.readOnly === false) {
+			const acceptAll = this.h({
+				tagName: "button",
+				className: `${c}-sidebar-toggle`,
+				children: ["Accept all"]
+			}) as HTMLButtonElement;
+			const rejectAll = this.h({
+				tagName: "button",
+				className: `${c}-sidebar-toggle`,
+				children: ["Reject all"]
+			}) as HTMLButtonElement;
+			toolbar.appendChild(acceptAll);
+			toolbar.appendChild(rejectAll);
+			acceptAll.addEventListener("click", () => callbacks.onChangeAcceptAll?.());
+			rejectAll.addEventListener("click", () => callbacks.onChangeRejectAll?.());
+		}
+	}
+
+	private buildRevisionCard(
+		meta: { el: HTMLElement; id?: string; kind: import('./docx-preview').ChangeKind; author?: string; date?: string; summary: string },
+		callbacks: import('./docx-preview').ChangeEventCallbacks,
+	): HTMLElement {
+		const c = this.className;
+		const opts = this.options.changes ?? {};
+
+		const authorIdxClass = meta.author && opts.colorByAuthor !== false
+			? `${c}-change-author-${this.getAuthorIndex(meta.author)}`
+			: "";
+
+		const headerChildren: Node[] = [
+			this.h({ tagName: "span", className: `${c}-comment-author ${authorIdxClass}`, children: [meta.author ?? "Unknown"] }),
+			this.h({ tagName: "span", className: `${c}-comment-date`, children: [meta.date ? new Date(meta.date).toLocaleString() : ""] }),
+			this.h({ tagName: "span", className: `${c}-revision-kind`, children: [this.kindLabel(meta.kind)] }),
+		];
+
+		const body = this.h({
+			tagName: "div",
+			className: `${c}-comment-body`,
+			children: [meta.summary]
+		}) as HTMLElement;
+
+		const children: Node[] = [
+			this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
+			body,
+		];
+
+		if (opts.readOnly === false && meta.id) {
+			const accept = this.h({ tagName: "button", children: ["Accept"] }) as HTMLButtonElement;
+			const reject = this.h({ tagName: "button", children: ["Reject"] }) as HTMLButtonElement;
+			accept.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				callbacks.onChangeAccept?.(meta.id!, meta.kind);
+			});
+			reject.addEventListener("click", (ev) => {
+				ev.stopPropagation();
+				callbacks.onChangeReject?.(meta.id!, meta.kind);
+			});
+			children.push(this.h({
+				tagName: "div",
+				className: `${c}-comment-actions`,
+				children: [accept, reject]
+			}));
+		}
+
+		const card = this.h({
+			tagName: "div",
+			className: `${c}-sidebar-comment ${c}-revision-card`,
+			children
+		}) as HTMLElement;
+
+		card.addEventListener("click", () => {
+			meta.el.scrollIntoView({ behavior: "smooth", block: "center" });
+		});
+
+		return card;
+	}
+
+	private kindLabel(kind: import('./docx-preview').ChangeKind): string {
+		switch (kind) {
+			case "insertion": return "Inserted";
+			case "deletion": return "Deleted";
+			case "move": return "Moved";
+			case "formatting": return "Formatted";
+			case "paragraphMark": return "Paragraph mark";
+			case "rowInsertion": return "Row added";
+			case "rowDeletion": return "Row removed";
 		}
 	}
 

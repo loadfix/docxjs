@@ -159,6 +159,10 @@ export interface WmlTableRow extends OpenXmlElement {
 	isHeader?: boolean;
     gridBefore?: number;
     gridAfter?: number;
+    // Set when w:trPr contains a w:ins or w:del element (Track Changes
+    // Phase 3, #5). The row itself is inserted or deleted, distinct from
+    // revisions to its content.
+    rowRevisionKind?: 'inserted' | 'deleted';
 }
 
 export interface WmlTableCell extends OpenXmlElement {

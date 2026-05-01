@@ -1224,6 +1224,20 @@ export class DocumentParser {
 					row.gridAfter = xml.intAttr(c, "val");
 					break;
 
+				case "ins":
+					row.revision = parseRevisionAttrs(c);
+					row.rowRevisionKind = "inserted";
+					break;
+
+				case "del":
+					row.revision = parseRevisionAttrs(c);
+					row.rowRevisionKind = "deleted";
+					break;
+
+				case "trPrChange":
+					row.formattingRevision = parseFormattingRevision(c);
+					break;
+
 				default:
 					return false;
 			}
