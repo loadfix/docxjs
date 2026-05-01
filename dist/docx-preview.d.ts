@@ -13,6 +13,19 @@ export type HElement = {
     children?: (HElement | Node | string)[];
 } & Record<string, any>;
 
+export interface CommentEventCallbacks {
+    onCommentEdit?: (commentId: string, newText: string) => void;
+    onCommentDelete?: (commentId: string) => void;
+    onCommentReply?: (parentCommentId: string, text: string) => void;
+    onCommentAdd?: (anchorRange: Range, text: string) => void;
+}
+
+export interface CommentsOptions {
+    sidebar?: boolean;
+    highlight?: boolean;
+    readOnly?: boolean;
+}
+
 export interface Options {
     inWrapper: boolean;
     hideWrapperOnPrint: boolean;
@@ -33,6 +46,8 @@ export interface Options {
     renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    comments: CommentsOptions;
+    commentCallbacks: CommentEventCallbacks;
     h: (elemOrText: HElement | Node | string) => Node; //experimental, subject to change
 }
 

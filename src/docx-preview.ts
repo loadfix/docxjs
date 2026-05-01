@@ -3,6 +3,19 @@ import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
 
+export interface CommentEventCallbacks {
+    onCommentEdit?: (commentId: string, newText: string) => void;
+    onCommentDelete?: (commentId: string) => void;
+    onCommentReply?: (parentCommentId: string, text: string) => void;
+    onCommentAdd?: (anchorRange: Range, text: string) => void;
+}
+
+export interface CommentsOptions {
+    sidebar?: boolean;
+    highlight?: boolean;
+    readOnly?: boolean;
+}
+
 export interface Options {
     inWrapper: boolean;
     hideWrapperOnPrint: boolean;
@@ -23,6 +36,8 @@ export interface Options {
 	renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    comments: CommentsOptions;
+    commentCallbacks: CommentEventCallbacks;
     h: typeof h;
 }
 
@@ -46,6 +61,12 @@ export const defaultOptions: Options = {
 	renderChanges: false,
     renderComments: false,
     renderAltChunks: true,
+    comments: {
+        sidebar: true,
+        highlight: true,
+        readOnly: true,
+    },
+    commentCallbacks: {},
     h: h
 };
 

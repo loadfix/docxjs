@@ -6,6 +6,10 @@ export class WmlComment extends OpenXmlElementBase {
 	author: string;
 	initials: string;
 	date: string;
+	paraId: string;
+	done: boolean = false;
+	parentCommentId: string = null;
+	replies: WmlComment[] = [];
 }
 
 export class WmlCommentReference  extends OpenXmlElementBase {
