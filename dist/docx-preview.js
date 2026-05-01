@@ -2416,6 +2416,17 @@
                     case "gridAfter":
                         row.gridAfter = globalXmlParser.intAttr(c, "val");
                         break;
+                    case "ins":
+                        row.revision = parseRevisionAttrs(c);
+                        row.rowRevisionKind = "inserted";
+                        break;
+                    case "del":
+                        row.revision = parseRevisionAttrs(c);
+                        row.rowRevisionKind = "deleted";
+                        break;
+                    case "trPrChange":
+                        row.formattingRevision = parseFormattingRevision(c);
+                        break;
                     default:
                         return false;
                 }
@@ -3044,6 +3055,7 @@
             this.sidebarCommentElements = {};
             this.changeAuthorIndex = new Map();
             this.changeElements = [];
+            this.changeMeta = [];
             this.moveElements = new Map();
             this.tasks = [];
             this.postRenderTasks = [];
@@ -3074,6 +3086,7 @@
             this.sidebarContainer = null;
             this.changeAuthorIndex = new Map();
             this.changeElements = [];
+            this.changeMeta = [];
             this.moveElements = new Map();
             if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
@@ -3904,6 +3917,19 @@ section.${c}>footer { z-index: 1; }
 .${c} .${c}-formatting-revision { text-decoration: underline dotted; text-decoration-thickness: 1px; cursor: help; }
 .${c}-paragraph-mark { margin-left: 2px; font-weight: bold; user-select: none; }
 .${c}-paragraph-mark-deleted { text-decoration: line-through; }
+.${c}-row-inserted > td { background: color-mix(in srgb, currentColor 8%, transparent); }
+.${c}-row-deleted > td { background: color-mix(in srgb, currentColor 10%, transparent); text-decoration: line-through; text-decoration-color: currentColor; text-decoration-thickness: 2px; }
+.${c}-change-actions { display: none; margin-left: 4px; user-select: none; vertical-align: baseline; font-size: 0.75em; }
+.${c}-change-actions button { border: 1px solid currentColor; background: white; color: currentColor; cursor: pointer; padding: 0 4px; border-radius: 3px; line-height: 1; margin-right: 2px; }
+.${c}-change-actions button:hover { background: currentColor; color: white; }
+.${c} ins:hover > .${c}-change-actions,
+.${c} del:hover > .${c}-change-actions,
+.${c} .${c}-move-from:hover > .${c}-change-actions,
+.${c} .${c}-move-to:hover > .${c}-change-actions,
+.${c} .${c}-formatting-revision:hover > .${c}-change-actions,
+.${c}-paragraph-mark:hover > .${c}-change-actions { display: inline-flex; gap: 2px; }
+.${c}-revision-kind { margin-left: auto; font-size: 0.7rem; padding: 1px 6px; border: 1px solid currentColor; border-radius: 3px; text-transform: uppercase; }
+.${c}-revision-card { border-left: 3px solid currentColor; }
 .${c}-change-bar { position: relative; }
 .${c}-change-bar::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 2px; background: currentColor; opacity: 0.55; }
 .${c}-legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 12px; margin: 0 auto 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; color: #333; max-width: calc(100% - 60px); }
@@ -4173,9 +4199,15 @@ section.${c}>footer { z-index: 1; }
                 mark.dataset.author = rev.author;
             if (rev?.date)
                 mark.dataset.date = rev.date;
+            mark.dataset.changeKind = "paragraphMark";
             mark.setAttribute("aria-label", kind === "inserted" ? "Paragraph inserted" : "Paragraph mark deleted");
             paragraphEl.appendChild(mark);
             this.changeElements.push(mark);
+            this.changeMeta.push({
+                el: mark, id: rev?.id, kind: "paragraphMark",
+                author: rev?.author, date: rev?.date,
+                summary: this.summarizeChange(mark, "paragraphMark"),
+            });
         }
         renderHyperlink(elem) {
             const res = this.toH(elem, ns.html, "a");
@@ -4315,7 +4347,7 @@ section.${c}>footer { z-index: 1; }
         renderInserted(elem) {
             if (this.showChanges && this.options.changes?.showInsertions !== false) {
                 const node = this.renderContainer(elem, "ins");
-                this.applyChangeAttributes(node, elem);
+                this.applyChangeAttributes(node, elem, "insertion");
                 return node;
             }
             return this.renderElements(elem.children);
@@ -4323,7 +4355,7 @@ section.${c}>footer { z-index: 1; }
         renderDeleted(elem) {
             if (this.showChanges && this.options.changes?.showDeletions !== false) {
                 const node = this.renderContainer(elem, "del");
-                this.applyChangeAttributes(node, elem);
+                this.applyChangeAttributes(node, elem, "deletion");
                 return node;
             }
             return null;
@@ -4334,7 +4366,7 @@ section.${c}>footer { z-index: 1; }
             }
             const node = this.renderContainer(elem, "span");
             node.classList.add(`${this.className}-move-from`);
-            this.applyChangeAttributes(node, elem);
+            this.applyChangeAttributes(node, elem, "move");
             this.registerMove(node, elem, "from");
             return node;
         }
@@ -4344,7 +4376,7 @@ section.${c}>footer { z-index: 1; }
             }
             const node = this.renderContainer(elem, "span");
             node.classList.add(`${this.className}-move-to`);
-            this.applyChangeAttributes(node, elem);
+            this.applyChangeAttributes(node, elem, "move");
             this.registerMove(node, elem, "to");
             return node;
         }
@@ -4367,7 +4399,7 @@ section.${c}>footer { z-index: 1; }
                 });
             });
         }
-        applyChangeAttributes(node, elem) {
+        applyChangeAttributes(node, elem, kind) {
             const rev = elem.revision;
             if (!rev)
                 return;
@@ -4377,11 +4409,48 @@ section.${c}>footer { z-index: 1; }
                 node.dataset.author = rev.author;
             if (rev.date)
                 node.dataset.date = rev.date;
+            node.dataset.changeKind = kind;
             if (rev.author && this.options.changes?.colorByAuthor !== false) {
                 const idx = this.getAuthorIndex(rev.author);
                 node.classList.add(`${this.className}-change-author-${idx}`);
             }
             this.changeElements.push(node);
+            this.changeMeta.push({
+                el: node,
+                id: rev.id,
+                kind,
+                author: rev.author,
+                date: rev.date,
+                summary: this.summarizeChange(node, kind),
+            });
+        }
+        summarizeChange(node, kind) {
+            const MAX = 80;
+            const truncate = (s) => {
+                const clean = s.replace(/\s+/g, " ").trim();
+                return clean.length > MAX ? clean.slice(0, MAX - 1) + "…" : clean;
+            };
+            switch (kind) {
+                case "insertion":
+                case "move": {
+                    const text = truncate(node.textContent ?? "");
+                    return text ? `Inserted: "${text}"` : "Inserted content";
+                }
+                case "deletion": {
+                    const text = truncate(node.textContent ?? "");
+                    return text ? `Deleted: "${text}"` : "Deleted content";
+                }
+                case "paragraphMark":
+                    return "Paragraph mark changed";
+                case "rowInsertion":
+                    return "Row inserted";
+                case "rowDeletion":
+                    return "Row deleted";
+                case "formatting": {
+                    const title = node.getAttribute("title");
+                    return title ?? "Formatting changed";
+                }
+            }
         }
         getAuthorIndex(author) {
             let idx = this.changeAuthorIndex.get(author);
@@ -4449,7 +4518,15 @@ section.${c}>footer { z-index: 1; }
                 : "formatting";
             const who = fr.author ? `${fr.author} changed` : "Changed";
             node.setAttribute("title", `${who}: ${changed}`);
+            node.dataset.changeKind = "formatting";
+            if (fr.id)
+                node.dataset.changeId = fr.id;
             this.changeElements.push(node);
+            this.changeMeta.push({
+                el: node, id: fr.id, kind: "formatting",
+                author: fr.author, date: fr.date,
+                summary: `${who}: ${changed}`,
+            });
         }
         renderTable(elem) {
             this.tableCellPositions.push(this.currentCellPosition);
@@ -4477,7 +4554,41 @@ section.${c}>footer { z-index: 1; }
             if (elem.gridAfter)
                 children.push(this.renderTableCellPlaceholder(elem.gridAfter));
             this.currentCellPosition.row++;
-            return this.toHTML(elem, ns.html, "tr", children);
+            const tr = this.toHTML(elem, ns.html, "tr", children);
+            if (this.showChanges && elem.rowRevisionKind) {
+                this.applyRowRevision(tr, elem);
+            }
+            this.applyFormattingRevision(tr, elem);
+            return tr;
+        }
+        applyRowRevision(tr, elem) {
+            const kind = elem.rowRevisionKind;
+            if (!kind)
+                return;
+            if (kind === "inserted" && this.options.changes?.showInsertions === false)
+                return;
+            if (kind === "deleted" && this.options.changes?.showDeletions === false)
+                return;
+            const c = this.className;
+            tr.classList.add(`${c}-row-${kind}`);
+            const rev = elem.revision;
+            if (rev?.id)
+                tr.dataset.changeId = rev.id;
+            if (rev?.author)
+                tr.dataset.author = rev.author;
+            if (rev?.date)
+                tr.dataset.date = rev.date;
+            const metaKind = kind === "inserted" ? "rowInsertion" : "rowDeletion";
+            tr.dataset.changeKind = metaKind;
+            if (rev?.author && this.options.changes?.colorByAuthor !== false) {
+                tr.classList.add(`${c}-change-author-${this.getAuthorIndex(rev.author)}`);
+            }
+            this.changeElements.push(tr);
+            this.changeMeta.push({
+                el: tr, id: rev?.id, kind: metaKind,
+                author: rev?.author, date: rev?.date,
+                summary: this.summarizeChange(tr, metaKind),
+            });
         }
         renderTableCellPlaceholder(colSpan) {
             return this.h({ tagName: "td", colSpan, style: { border: "none" } });
@@ -4751,6 +4862,173 @@ section.${c}>footer { z-index: 1; }
                     }
                 }
             }
+            if (opts.readOnly === false) {
+                this.wireChangeActionDelegate(result);
+                this.injectInlineChangeActions();
+                this.extendSidebarWithChanges();
+            }
+        }
+        injectInlineChangeActions() {
+            const c = this.className;
+            for (const meta of this.changeMeta) {
+                if (!meta.id)
+                    continue;
+                if (meta.el.querySelector(`.${c}-change-actions`))
+                    continue;
+                if (meta.el.tagName === "TR")
+                    continue;
+                const accept = this.h({
+                    tagName: "button",
+                    className: `${c}-change-accept`,
+                    children: ["✓"],
+                    title: "Accept change"
+                });
+                const reject = this.h({
+                    tagName: "button",
+                    className: `${c}-change-reject`,
+                    children: ["✕"],
+                    title: "Reject change"
+                });
+                const wrap = this.h({
+                    tagName: "span",
+                    className: `${c}-change-actions`,
+                    children: [accept, reject]
+                });
+                meta.el.appendChild(wrap);
+            }
+        }
+        wireChangeActionDelegate(result) {
+            const c = this.className;
+            const wrapper = this.findWrapper(result);
+            const root = wrapper ?? this.findFirstElementRoot(result);
+            if (!root)
+                return;
+            const callbacks = this.options.changeCallbacks ?? {};
+            root.addEventListener("click", (ev) => {
+                const target = ev.target;
+                if (!target)
+                    return;
+                const btn = target.closest(`.${c}-change-accept, .${c}-change-reject`);
+                if (!btn)
+                    return;
+                const owner = btn.closest("[data-change-id][data-change-kind]");
+                if (!owner)
+                    return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                const id = owner.dataset.changeId;
+                const kind = owner.dataset.changeKind;
+                if (btn.classList.contains(`${c}-change-accept`)) {
+                    callbacks.onChangeAccept?.(id, kind);
+                }
+                else {
+                    callbacks.onChangeReject?.(id, kind);
+                }
+            });
+        }
+        findFirstElementRoot(result) {
+            for (const n of result) {
+                if (n instanceof HTMLElement)
+                    return n;
+            }
+            return null;
+        }
+        extendSidebarWithChanges() {
+            const c = this.className;
+            const opts = this.options.changes ?? {};
+            if (opts.sidebarCards === false)
+                return;
+            if (!this.useSidebar || !this.sidebarContainer)
+                return;
+            const content = this.sidebarContainer.querySelector(`.${c}-sidebar-content`);
+            const toolbar = this.sidebarContainer.querySelector(`.${c}-comment-toolbar`);
+            if (!content)
+                return;
+            const seen = new Set();
+            const unique = this.changeMeta.filter(m => {
+                if (!m.id || seen.has(m.id))
+                    return false;
+                seen.add(m.id);
+                return true;
+            });
+            const callbacks = this.options.changeCallbacks ?? {};
+            for (const meta of unique) {
+                content.appendChild(this.buildRevisionCard(meta, callbacks));
+            }
+            if (toolbar && opts.readOnly === false) {
+                const acceptAll = this.h({
+                    tagName: "button",
+                    className: `${c}-sidebar-toggle`,
+                    children: ["Accept all"]
+                });
+                const rejectAll = this.h({
+                    tagName: "button",
+                    className: `${c}-sidebar-toggle`,
+                    children: ["Reject all"]
+                });
+                toolbar.appendChild(acceptAll);
+                toolbar.appendChild(rejectAll);
+                acceptAll.addEventListener("click", () => callbacks.onChangeAcceptAll?.());
+                rejectAll.addEventListener("click", () => callbacks.onChangeRejectAll?.());
+            }
+        }
+        buildRevisionCard(meta, callbacks) {
+            const c = this.className;
+            const opts = this.options.changes ?? {};
+            const authorIdxClass = meta.author && opts.colorByAuthor !== false
+                ? `${c}-change-author-${this.getAuthorIndex(meta.author)}`
+                : "";
+            const headerChildren = [
+                this.h({ tagName: "span", className: `${c}-comment-author ${authorIdxClass}`, children: [meta.author ?? "Unknown"] }),
+                this.h({ tagName: "span", className: `${c}-comment-date`, children: [meta.date ? new Date(meta.date).toLocaleString() : ""] }),
+                this.h({ tagName: "span", className: `${c}-revision-kind`, children: [this.kindLabel(meta.kind)] }),
+            ];
+            const body = this.h({
+                tagName: "div",
+                className: `${c}-comment-body`,
+                children: [meta.summary]
+            });
+            const children = [
+                this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
+                body,
+            ];
+            if (opts.readOnly === false && meta.id) {
+                const accept = this.h({ tagName: "button", children: ["Accept"] });
+                const reject = this.h({ tagName: "button", children: ["Reject"] });
+                accept.addEventListener("click", (ev) => {
+                    ev.stopPropagation();
+                    callbacks.onChangeAccept?.(meta.id, meta.kind);
+                });
+                reject.addEventListener("click", (ev) => {
+                    ev.stopPropagation();
+                    callbacks.onChangeReject?.(meta.id, meta.kind);
+                });
+                children.push(this.h({
+                    tagName: "div",
+                    className: `${c}-comment-actions`,
+                    children: [accept, reject]
+                }));
+            }
+            const card = this.h({
+                tagName: "div",
+                className: `${c}-sidebar-comment ${c}-revision-card`,
+                children
+            });
+            card.addEventListener("click", () => {
+                meta.el.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+            return card;
+        }
+        kindLabel(kind) {
+            switch (kind) {
+                case "insertion": return "Inserted";
+                case "deletion": return "Deleted";
+                case "move": return "Moved";
+                case "formatting": return "Formatted";
+                case "paragraphMark": return "Paragraph mark";
+                case "rowInsertion": return "Row added";
+                case "rowDeletion": return "Row removed";
+            }
         }
         findBlockAncestor(el) {
             let cur = el.parentElement;
@@ -4837,7 +5115,10 @@ section.${c}>footer { z-index: 1; }
             colorByAuthor: true,
             changeBar: true,
             legend: true,
+            readOnly: true,
+            sidebarCards: true,
         },
+        changeCallbacks: {},
         h: h
     };
     function mergeOptions(userOptions) {
