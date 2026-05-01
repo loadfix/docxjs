@@ -73,6 +73,11 @@ export class HtmlRenderer {
 	// change elements so the post-render change-bar pass can walk them.
 	changeAuthorIndex: Map<string, number> = new Map();
 	changeElements: HTMLElement[] = [];
+	// Tracks the two halves of each move so a click on either scrolls to the
+	// counterpart. Keyed by move id — note the parser feeds us a DOCX-derived
+	// string here, so the renderer must never interpolate it into a CSS
+	// selector or innerHTML (we only use dataset and addEventListener).
+	moveElements: Map<string, { from?: HTMLElement; to?: HTMLElement }> = new Map();
 	static CHANGE_PALETTE_SIZE = 8;
 
 	tasks: Promise<any>[] = [];
@@ -108,6 +113,7 @@ export class HtmlRenderer {
 		this.sidebarContainer = null;
 		this.changeAuthorIndex = new Map();
 		this.changeElements = [];
+		this.moveElements = new Map();
 
 		if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
 			this.commentHighlight = new Highlight();
@@ -1068,6 +1074,11 @@ section.${c}>footer { z-index: 1; }
 		let css = `
 .${c} ins { text-decoration: underline; text-decoration-thickness: 2px; background: transparent; }
 .${c} del { text-decoration: line-through; text-decoration-thickness: 2px; }
+.${c} .${c}-move-from { text-decoration: line-through double; text-decoration-thickness: 1px; cursor: pointer; }
+.${c} .${c}-move-to { text-decoration: underline double; text-decoration-thickness: 1px; cursor: pointer; }
+.${c} .${c}-formatting-revision { text-decoration: underline dotted; text-decoration-thickness: 1px; cursor: help; }
+.${c}-paragraph-mark { margin-left: 2px; font-weight: bold; user-select: none; }
+.${c}-paragraph-mark-deleted { text-decoration: line-through; }
 .${c}-change-bar { position: relative; }
 .${c}-change-bar::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 2px; background: currentColor; opacity: 0.55; }
 .${c}-legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 12px; margin: 0 auto 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; color: #333; max-width: calc(100% - 60px); }
@@ -1407,6 +1418,12 @@ section.${c}>footer { z-index: 1; }
 			case DomType.Deleted:
 				return this.renderDeleted(elem);
 
+			case DomType.MoveFrom:
+				return this.renderMoveFrom(elem);
+
+			case DomType.MoveTo:
+				return this.renderMoveTo(elem);
+
 			case DomType.CommentRangeStart:
 				return this.renderCommentRangeStart(elem);
 
@@ -1454,7 +1471,38 @@ section.${c}>footer { z-index: 1; }
 			result.classList.add(this.numberingClass(numbering.id, numbering.level));
 		}
 
+		if (this.showChanges && elem.paragraphMarkRevisionKind) {
+			this.appendParagraphMarkRevision(result, elem);
+		}
+
+		this.applyFormattingRevision(result, elem);
+
 		return result;
+	}
+
+	private appendParagraphMarkRevision(paragraphEl: HTMLElement, elem: WmlParagraph) {
+		const c = this.className;
+		const kind = elem.paragraphMarkRevisionKind;
+		const rev = elem.revision;
+		if (!kind) return;
+
+		const classes = [`${c}-paragraph-mark`, `${c}-paragraph-mark-${kind}`];
+		if (rev?.author && this.options.changes?.colorByAuthor !== false) {
+			classes.push(`${c}-change-author-${this.getAuthorIndex(rev.author)}`);
+		}
+
+		const mark = this.h({
+			tagName: "span",
+			className: classes.join(" "),
+			children: ["¶"]
+		}) as HTMLElement;
+		if (rev?.id) mark.dataset.changeId = rev.id;
+		if (rev?.author) mark.dataset.author = rev.author;
+		if (rev?.date) mark.dataset.date = rev.date;
+		mark.setAttribute("aria-label", kind === "inserted" ? "Paragraph inserted" : "Paragraph mark deleted");
+
+		paragraphEl.appendChild(mark);
+		this.changeElements.push(mark);
 	}
 
 	renderHyperlink(elem: WmlHyperlink) {
@@ -1652,6 +1700,49 @@ section.${c}>footer { z-index: 1; }
 		return null;
 	}
 
+	renderMoveFrom(elem: OpenXmlElement): Node | Node[] {
+		if (!this.showChanges || this.options.changes?.showMoves === false) {
+			return null;
+		}
+		const node = this.renderContainer(elem, "span") as HTMLElement;
+		node.classList.add(`${this.className}-move-from`);
+		this.applyChangeAttributes(node, elem);
+		this.registerMove(node, elem, "from");
+		return node;
+	}
+
+	renderMoveTo(elem: OpenXmlElement): Node | Node[] {
+		if (!this.showChanges || this.options.changes?.showMoves === false) {
+			return this.renderElements(elem.children);
+		}
+		const node = this.renderContainer(elem, "span") as HTMLElement;
+		node.classList.add(`${this.className}-move-to`);
+		this.applyChangeAttributes(node, elem);
+		this.registerMove(node, elem, "to");
+		return node;
+	}
+
+	private registerMove(node: HTMLElement, elem: OpenXmlElement, half: "from" | "to") {
+		const id = elem.revision?.id;
+		if (!id) return;
+		node.dataset.moveId = id;
+
+		const pair = this.moveElements.get(id) ?? {};
+		pair[half] = node;
+		this.moveElements.set(id, pair);
+
+		this.later(() => {
+			node.addEventListener("click", (ev) => {
+				const entry = this.moveElements.get(id);
+				const counterpart = half === "from" ? entry?.to : entry?.from;
+				if (counterpart) {
+					ev.preventDefault();
+					counterpart.scrollIntoView({ behavior: "smooth", block: "center" });
+				}
+			});
+		});
+	}
+
 	// Populates data-change-id/author/date and a palette-index class on a
 	// rendered <ins>/<del>. See Track Changes Phase 1 (#3).
 	applyChangeAttributes(node: HTMLElement, elem: OpenXmlElement) {
@@ -1724,7 +1815,39 @@ section.${c}>footer { z-index: 1; }
 		if (elem.id)
 			result.id = elem.id;
 
+		this.applyFormattingRevision(result, elem);
+
 		return result;
+	}
+
+	// Marks a run or paragraph as touched by a w:rPrChange / w:pPrChange.
+	// The element stays rendered with its *current* formatting — the visible
+	// revision is a dotted underline in the author's colour plus a title
+	// attribute summarising what changed. The element is registered with the
+	// change-bar pass so the paragraph still gets a margin bar even when it
+	// only contains formatting revisions.
+	applyFormattingRevision(node: HTMLElement, elem: OpenXmlElement) {
+		const fr = elem.formattingRevision;
+		if (!fr) return;
+		if (!this.showChanges || this.options.changes?.showFormatting === false) return;
+
+		const c = this.className;
+		node.classList.add(`${c}-formatting-revision`);
+		if (fr.id) node.dataset.changeId = fr.id;
+		if (fr.author) node.dataset.author = fr.author;
+		if (fr.date) node.dataset.date = fr.date;
+
+		if (fr.author && this.options.changes?.colorByAuthor !== false) {
+			node.classList.add(`${c}-change-author-${this.getAuthorIndex(fr.author)}`);
+		}
+
+		const changed = fr.changedProps && fr.changedProps.length
+			? fr.changedProps.join(", ")
+			: "formatting";
+		const who = fr.author ? `${fr.author} changed` : "Changed";
+		node.setAttribute("title", `${who}: ${changed}`);
+
+		this.changeElements.push(node);
 	}
 
 	renderTable(elem: WmlTable) {
