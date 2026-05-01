@@ -20,6 +20,8 @@ export interface ChangesOptions {
     show?: boolean;
     showInsertions?: boolean;
     showDeletions?: boolean;
+    showMoves?: boolean;
+    showFormatting?: boolean;
     colorByAuthor?: boolean;
     changeBar?: boolean;
     legend?: boolean;
@@ -81,6 +83,8 @@ export const defaultOptions: Options = {
         show: false,
         showInsertions: true,
         showDeletions: true,
+        showMoves: true,
+        showFormatting: true,
         colorByAuthor: true,
         changeBar: true,
         legend: true,

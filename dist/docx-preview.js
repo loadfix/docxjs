@@ -773,6 +773,8 @@
         DomType["Inserted"] = "inserted";
         DomType["Deleted"] = "deleted";
         DomType["DeletedText"] = "deletedText";
+        DomType["MoveFrom"] = "moveFrom";
+        DomType["MoveTo"] = "moveTo";
         DomType["Comment"] = "comment";
         DomType["CommentReference"] = "commentReference";
         DomType["CommentRangeStart"] = "commentRangeStart";
@@ -1432,6 +1434,34 @@
             date: globalXmlParser.attr(elem, "date")
         };
     }
+    const FORMATTING_PROP_NAMES = {
+        b: "bold", i: "italic", u: "underline", strike: "strikethrough",
+        sz: "font size", rFonts: "font", color: "color", highlight: "highlight",
+        jc: "alignment", ind: "indent", spacing: "spacing", numPr: "numbering",
+        pStyle: "style", rStyle: "style"
+    };
+    function parseFormattingRevision(elem) {
+        const rev = {
+            id: globalXmlParser.attr(elem, "id"),
+            author: globalXmlParser.attr(elem, "author"),
+            date: globalXmlParser.attr(elem, "date"),
+            changedProps: []
+        };
+        const prev = globalXmlParser.elements(elem).find(e => e.localName === "rPr" || e.localName === "pPr");
+        if (prev) {
+            const seen = new Set();
+            for (const child of globalXmlParser.elements(prev)) {
+                const pretty = FORMATTING_PROP_NAMES[child.localName] ?? child.localName;
+                if (seen.has(pretty))
+                    continue;
+                seen.add(pretty);
+                rev.changedProps.push(pretty);
+                if (rev.changedProps.length >= 5)
+                    break;
+            }
+        }
+        return rev;
+    }
     var autos = {
         shd: "inherit",
         color: "black",
@@ -1836,6 +1866,20 @@
                 children: parentParser(node)?.children ?? []
             };
         }
+        parseMoveFrom(node, parentParser) {
+            return {
+                type: DomType.MoveFrom,
+                revision: parseRevisionAttrs(node),
+                children: parentParser(node)?.children ?? []
+            };
+        }
+        parseMoveTo(node, parentParser) {
+            return {
+                type: DomType.MoveTo,
+                revision: parseRevisionAttrs(node),
+                children: parentParser(node)?.children ?? []
+            };
+        }
         parseAltChunk(node) {
             return { type: DomType.AltChunk, children: [], id: globalXmlParser.attr(node, "id") };
         }
@@ -1880,6 +1924,12 @@
                     case "del":
                         result.children.push(this.parseDeleted(el, e => this.parseParagraph(e)));
                         break;
+                    case "moveFrom":
+                        result.children.push(this.parseMoveFrom(el, e => this.parseParagraph(e)));
+                        break;
+                    case "moveTo":
+                        result.children.push(this.parseMoveTo(el, e => this.parseParagraph(e)));
+                        break;
                 }
             }
             return result;
@@ -1909,6 +1959,9 @@
                                 paragraph.revision = parseRevisionAttrs(rPrChild);
                             }
                         }
+                        break;
+                    case "pPrChange":
+                        paragraph.formattingRevision = parseFormattingRevision(c);
                         break;
                     default:
                         return false;
@@ -2103,6 +2156,9 @@
                         break;
                     case "vertAlign":
                         run.verticalAlign = values.valueOfVertAlign(c, true);
+                        break;
+                    case "rPrChange":
+                        run.formattingRevision = parseFormattingRevision(c);
                         break;
                     default:
                         return false;
@@ -2988,6 +3044,7 @@
             this.sidebarCommentElements = {};
             this.changeAuthorIndex = new Map();
             this.changeElements = [];
+            this.moveElements = new Map();
             this.tasks = [];
             this.postRenderTasks = [];
             this.h = h;
@@ -3017,6 +3074,7 @@
             this.sidebarContainer = null;
             this.changeAuthorIndex = new Map();
             this.changeElements = [];
+            this.moveElements = new Map();
             if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
             }
@@ -3841,6 +3899,11 @@ section.${c}>footer { z-index: 1; }
             let css = `
 .${c} ins { text-decoration: underline; text-decoration-thickness: 2px; background: transparent; }
 .${c} del { text-decoration: line-through; text-decoration-thickness: 2px; }
+.${c} .${c}-move-from { text-decoration: line-through double; text-decoration-thickness: 1px; cursor: pointer; }
+.${c} .${c}-move-to { text-decoration: underline double; text-decoration-thickness: 1px; cursor: pointer; }
+.${c} .${c}-formatting-revision { text-decoration: underline dotted; text-decoration-thickness: 1px; cursor: help; }
+.${c}-paragraph-mark { margin-left: 2px; font-weight: bold; user-select: none; }
+.${c}-paragraph-mark-deleted { text-decoration: line-through; }
 .${c}-change-bar { position: relative; }
 .${c}-change-bar::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 2px; background: currentColor; opacity: 0.55; }
 .${c}-legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 12px; margin: 0 auto 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; color: #333; max-width: calc(100% - 60px); }
@@ -4046,6 +4109,10 @@ section.${c}>footer { z-index: 1; }
                     return this.renderInserted(elem);
                 case DomType.Deleted:
                     return this.renderDeleted(elem);
+                case DomType.MoveFrom:
+                    return this.renderMoveFrom(elem);
+                case DomType.MoveTo:
+                    return this.renderMoveTo(elem);
                 case DomType.CommentRangeStart:
                     return this.renderCommentRangeStart(elem);
                 case DomType.CommentRangeEnd:
@@ -4079,7 +4146,36 @@ section.${c}>footer { z-index: 1; }
             if (numbering) {
                 result.classList.add(this.numberingClass(numbering.id, numbering.level));
             }
+            if (this.showChanges && elem.paragraphMarkRevisionKind) {
+                this.appendParagraphMarkRevision(result, elem);
+            }
+            this.applyFormattingRevision(result, elem);
             return result;
+        }
+        appendParagraphMarkRevision(paragraphEl, elem) {
+            const c = this.className;
+            const kind = elem.paragraphMarkRevisionKind;
+            const rev = elem.revision;
+            if (!kind)
+                return;
+            const classes = [`${c}-paragraph-mark`, `${c}-paragraph-mark-${kind}`];
+            if (rev?.author && this.options.changes?.colorByAuthor !== false) {
+                classes.push(`${c}-change-author-${this.getAuthorIndex(rev.author)}`);
+            }
+            const mark = this.h({
+                tagName: "span",
+                className: classes.join(" "),
+                children: ["¶"]
+            });
+            if (rev?.id)
+                mark.dataset.changeId = rev.id;
+            if (rev?.author)
+                mark.dataset.author = rev.author;
+            if (rev?.date)
+                mark.dataset.date = rev.date;
+            mark.setAttribute("aria-label", kind === "inserted" ? "Paragraph inserted" : "Paragraph mark deleted");
+            paragraphEl.appendChild(mark);
+            this.changeElements.push(mark);
         }
         renderHyperlink(elem) {
             const res = this.toH(elem, ns.html, "a");
@@ -4232,6 +4328,45 @@ section.${c}>footer { z-index: 1; }
             }
             return null;
         }
+        renderMoveFrom(elem) {
+            if (!this.showChanges || this.options.changes?.showMoves === false) {
+                return null;
+            }
+            const node = this.renderContainer(elem, "span");
+            node.classList.add(`${this.className}-move-from`);
+            this.applyChangeAttributes(node, elem);
+            this.registerMove(node, elem, "from");
+            return node;
+        }
+        renderMoveTo(elem) {
+            if (!this.showChanges || this.options.changes?.showMoves === false) {
+                return this.renderElements(elem.children);
+            }
+            const node = this.renderContainer(elem, "span");
+            node.classList.add(`${this.className}-move-to`);
+            this.applyChangeAttributes(node, elem);
+            this.registerMove(node, elem, "to");
+            return node;
+        }
+        registerMove(node, elem, half) {
+            const id = elem.revision?.id;
+            if (!id)
+                return;
+            node.dataset.moveId = id;
+            const pair = this.moveElements.get(id) ?? {};
+            pair[half] = node;
+            this.moveElements.set(id, pair);
+            this.later(() => {
+                node.addEventListener("click", (ev) => {
+                    const entry = this.moveElements.get(id);
+                    const counterpart = half === "from" ? entry?.to : entry?.from;
+                    if (counterpart) {
+                        ev.preventDefault();
+                        counterpart.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }
+                });
+            });
+        }
         applyChangeAttributes(node, elem) {
             const rev = elem.revision;
             if (!rev)
@@ -4289,7 +4424,32 @@ section.${c}>footer { z-index: 1; }
             const result = this.toHTML(elem, ns.html, "span", children);
             if (elem.id)
                 result.id = elem.id;
+            this.applyFormattingRevision(result, elem);
             return result;
+        }
+        applyFormattingRevision(node, elem) {
+            const fr = elem.formattingRevision;
+            if (!fr)
+                return;
+            if (!this.showChanges || this.options.changes?.showFormatting === false)
+                return;
+            const c = this.className;
+            node.classList.add(`${c}-formatting-revision`);
+            if (fr.id)
+                node.dataset.changeId = fr.id;
+            if (fr.author)
+                node.dataset.author = fr.author;
+            if (fr.date)
+                node.dataset.date = fr.date;
+            if (fr.author && this.options.changes?.colorByAuthor !== false) {
+                node.classList.add(`${c}-change-author-${this.getAuthorIndex(fr.author)}`);
+            }
+            const changed = fr.changedProps && fr.changedProps.length
+                ? fr.changedProps.join(", ")
+                : "formatting";
+            const who = fr.author ? `${fr.author} changed` : "Changed";
+            node.setAttribute("title", `${who}: ${changed}`);
+            this.changeElements.push(node);
         }
         renderTable(elem) {
             this.tableCellPositions.push(this.currentCellPosition);
@@ -4672,6 +4832,8 @@ section.${c}>footer { z-index: 1; }
             show: false,
             showInsertions: true,
             showDeletions: true,
+            showMoves: true,
+            showFormatting: true,
             colorByAuthor: true,
             changeBar: true,
             legend: true,

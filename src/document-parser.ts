@@ -2,7 +2,7 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk, Revision
+	WmlAltChunk, Revision, FormattingRevision
 } from './document/dom';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -23,6 +23,37 @@ function parseRevisionAttrs(elem: Element): Revision {
 		author: xml.attr(elem, "author"),
 		date: xml.attr(elem, "date")
 	};
+}
+
+// Produces a short, bounded list of changed property names from a w:rPrChange
+// or w:pPrChange element's previous-properties child (w:rPr / w:pPr).
+// We cap at 5 entries to keep the rendered title attribute short.
+const FORMATTING_PROP_NAMES: Record<string, string> = {
+	b: "bold", i: "italic", u: "underline", strike: "strikethrough",
+	sz: "font size", rFonts: "font", color: "color", highlight: "highlight",
+	jc: "alignment", ind: "indent", spacing: "spacing", numPr: "numbering",
+	pStyle: "style", rStyle: "style"
+};
+
+function parseFormattingRevision(elem: Element): FormattingRevision {
+	const rev: FormattingRevision = {
+		id: xml.attr(elem, "id"),
+		author: xml.attr(elem, "author"),
+		date: xml.attr(elem, "date"),
+		changedProps: []
+	};
+	const prev = xml.elements(elem).find(e => e.localName === "rPr" || e.localName === "pPr");
+	if (prev) {
+		const seen = new Set<string>();
+		for (const child of xml.elements(prev)) {
+			const pretty = FORMATTING_PROP_NAMES[child.localName] ?? child.localName;
+			if (seen.has(pretty)) continue;
+			seen.add(pretty);
+			rev.changedProps.push(pretty);
+			if (rev.changedProps.length >= 5) break;
+		}
+	}
+	return rev;
 }
 
 export var autos = {
@@ -511,6 +542,22 @@ export class DocumentParser {
 		};
 	}
 
+	parseMoveFrom(node: Element, parentParser: Function): OpenXmlElement {
+		return <OpenXmlElement>{
+			type: DomType.MoveFrom,
+			revision: parseRevisionAttrs(node),
+			children: parentParser(node)?.children ?? []
+		};
+	}
+
+	parseMoveTo(node: Element, parentParser: Function): OpenXmlElement {
+		return <OpenXmlElement>{
+			type: DomType.MoveTo,
+			revision: parseRevisionAttrs(node),
+			children: parentParser(node)?.children ?? []
+		};
+	}
+
 	parseAltChunk(node: Element): WmlAltChunk {
 		return { type: DomType.AltChunk, children: [], id: xml.attr(node, "id") };
 	}
@@ -568,6 +615,14 @@ export class DocumentParser {
 				case "del":
 					result.children.push(this.parseDeleted(el, e => this.parseParagraph(e)));
 					break;
+
+				case "moveFrom":
+					result.children.push(this.parseMoveFrom(el, e => this.parseParagraph(e)));
+					break;
+
+				case "moveTo":
+					result.children.push(this.parseMoveTo(el, e => this.parseParagraph(e)));
+					break;
 			}
 		}
 
@@ -605,6 +660,10 @@ export class DocumentParser {
 							paragraph.revision = parseRevisionAttrs(rPrChild);
 						}
 					}
+					break;
+
+				case "pPrChange":
+					paragraph.formattingRevision = parseFormattingRevision(c);
 					break;
 
 				default:
@@ -827,6 +886,10 @@ export class DocumentParser {
 
 				case "vertAlign":
 					run.verticalAlign = values.valueOfVertAlign(c, true);
+					break;
+
+				case "rPrChange":
+					run.formattingRevision = parseFormattingRevision(c);
 					break;
 
 				default:

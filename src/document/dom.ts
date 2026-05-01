@@ -56,6 +56,8 @@ export enum DomType {
 	Inserted = "inserted",
 	Deleted = "deleted",
 	DeletedText = "deletedText",
+	MoveFrom = "moveFrom",
+	MoveTo = "moveTo",
 	Comment = "comment",
 	CommentReference = "commentReference",
 	CommentRangeStart = "commentRangeStart",
@@ -69,6 +71,16 @@ export interface Revision {
     date?: string;
 }
 
+// Captured from w:rPrChange / w:pPrChange. Phase 2 (#4) only records the
+// revision metadata and a small, bounded summary of what changed so the
+// renderer can tell the reader "bold, font-size"; computing the full
+// previous property set is Phase 3+.
+export interface FormattingRevision extends Revision {
+    // Short summary of changed property keys, e.g. ['bold', 'fontSize'].
+    // Bounded length keeps the rendered title attribute manageable.
+    changedProps?: string[];
+}
+
 export interface OpenXmlElement {
     type: DomType;
     children?: OpenXmlElement[];
@@ -78,13 +90,16 @@ export interface OpenXmlElement {
 	styleName?: string; //style name
 	className?: string; //class mods
 
-    // Populated for DomType.Inserted / DomType.Deleted and for paragraph-mark
-    // revisions (w:pPr/w:rPr/w:ins|w:del). See Track Changes Phase 1 (#3).
+    // Populated for DomType.Inserted / DomType.Deleted / MoveFrom / MoveTo
+    // and for paragraph-mark revisions (w:pPr/w:rPr/w:ins|w:del).
+    // See Track Changes Phase 1 (#3).
     revision?: Revision;
     // 'inserted' or 'deleted' — only set on paragraphs whose paragraph mark
-    // itself was inserted/deleted. The paragraph body is unaffected; Phase 2
-    // renders this.
+    // itself was inserted/deleted. Rendered as a pilcrow in Phase 2 (#4).
     paragraphMarkRevisionKind?: 'inserted' | 'deleted';
+    // Populated on runs (w:rPrChange) and paragraphs (w:pPrChange).
+    // See Track Changes Phase 2 (#4).
+    formattingRevision?: FormattingRevision;
 
     parent?: OpenXmlElement;
 }
