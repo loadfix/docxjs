@@ -573,12 +573,9 @@ export class HtmlRenderer {
 				addBtn.addEventListener("click", () => {
 					const sel = document.getSelection();
 					if (!sel || sel.isCollapsed) return;
-					const range = sel.getRangeAt(0);
+					const range = sel.getRangeAt(0).cloneRange();
 					if (!docContainer.contains(range.commonAncestorContainer)) return;
-					const text = prompt("Enter your comment:");
-					if (text) {
-						this.options.commentCallbacks?.onCommentAdd?.(range, text);
-					}
+					this.showNewCommentComposer(contentArea, range);
 				});
 			});
 		}
@@ -633,28 +630,40 @@ export class HtmlRenderer {
 	}
 
 	setupSidebarScrollSync(docContainer: HTMLElement, sidebarContent: HTMLElement) {
-		const c = this.className;
 		const wrapper = docContainer.parentElement;
 		if (!wrapper) return;
 
-		const positionComments = () => {
-			for (const [commentId, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
-				const anchors = this.commentAnchorElements[commentId];
-				if (!anchors || anchors.length === 0) continue;
+		const CARD_GAP = 8;
 
-				const firstAnchor = anchors[0];
+		const positionComments = () => {
+			const sidebarRect = sidebarContent.getBoundingClientRect();
+			const ordered: Array<{ el: HTMLElement; desiredTop: number }> = [];
+
+			for (const [commentId, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
+				if (!sidebarEl.isConnected) continue;
+				const anchors = this.commentAnchorElements[commentId];
+				const firstAnchor = anchors?.[0];
 				if (!firstAnchor || !firstAnchor.isConnected) continue;
 
 				const anchorRect = firstAnchor.getBoundingClientRect();
-				const sidebarRect = sidebarContent.getBoundingClientRect();
 				const desiredTop = anchorRect.top - sidebarRect.top + sidebarContent.scrollTop;
+				ordered.push({ el: sidebarEl, desiredTop });
+			}
 
-				sidebarEl.style.marginTop = "";
-				const currentTop = sidebarEl.offsetTop;
-				const offset = desiredTop - currentTop;
-				if (offset > 0) {
-					sidebarEl.style.marginTop = `${offset}px`;
-				}
+			// Sort by desired vertical position so cards stack in document order even
+			// if the comments dictionary insertion order disagrees.
+			ordered.sort((a, b) => a.desiredTop - b.desiredTop);
+
+			// Clear prior offsets so offsetTop reflects the natural flow position.
+			for (const { el } of ordered) el.style.marginTop = "";
+
+			let floor = -Infinity;
+			for (const { el, desiredTop } of ordered) {
+				const target = Math.max(desiredTop, floor);
+				const naturalTop = el.offsetTop;
+				const offset = target - naturalTop;
+				if (offset > 0) el.style.marginTop = `${offset}px`;
+				floor = target + el.offsetHeight + CARD_GAP;
 			}
 		};
 
@@ -665,10 +674,14 @@ export class HtmlRenderer {
 		};
 
 		wrapper.addEventListener("scroll", throttledPosition, { passive: true });
+		docContainer.addEventListener("scroll", throttledPosition, { passive: true });
 
 		if (typeof ResizeObserver !== "undefined") {
 			const ro = new ResizeObserver(throttledPosition);
 			ro.observe(docContainer);
+			for (const el of Object.values(this.sidebarCommentElements)) {
+				if (el.isConnected) ro.observe(el);
+			}
 		}
 
 		setTimeout(positionComments, 100);
@@ -716,6 +729,8 @@ export class HtmlRenderer {
 
 		const children: Node[] = [header, bodyEl];
 
+		let replyContainerRef: HTMLElement = null;
+
 		if (!readOnly) {
 			const actionsEl = this.h({
 				tagName: "div",
@@ -728,36 +743,43 @@ export class HtmlRenderer {
 			actionsEl.appendChild(editBtn);
 			actionsEl.appendChild(deleteBtn);
 
+			let replyBtn: HTMLButtonElement = null;
 			if (!isReply) {
-				const replyBtn = this.h({ tagName: "button", className: `${c}-comment-reply-btn`, children: ["Reply"] }) as HTMLButtonElement;
+				replyBtn = this.h({ tagName: "button", className: `${c}-comment-reply-btn`, children: ["Reply"] }) as HTMLButtonElement;
 				actionsEl.appendChild(replyBtn);
-
-				this.later(() => {
-					replyBtn.addEventListener("click", () => {
-						const text = prompt("Enter your reply:");
-						if (text) {
-							callbacks.onCommentReply?.(comment.id, text);
-						}
-					});
-				});
 			}
 
 			children.push(actionsEl);
 
 			this.later(() => {
-				editBtn.addEventListener("click", () => {
-					const currentText = bodyEl.textContent ?? "";
-					const newText = prompt("Edit comment:", currentText);
-					if (newText !== null && newText !== currentText) {
+				editBtn.addEventListener("click", (ev) => {
+					ev.stopPropagation();
+					this.openInlineEditor(bodyEl, bodyEl.textContent ?? "", (newText) => {
 						callbacks.onCommentEdit?.(comment.id, newText);
-					}
+					});
 				});
 
-				deleteBtn.addEventListener("click", () => {
-					if (confirm("Delete this comment?")) {
+				deleteBtn.addEventListener("click", (ev) => {
+					ev.stopPropagation();
+					this.openInlineConfirm(actionsEl, "Delete this comment?", () => {
 						callbacks.onCommentDelete?.(comment.id);
-					}
+					});
 				});
+
+				if (replyBtn) {
+					replyBtn.addEventListener("click", (ev) => {
+						ev.stopPropagation();
+						const host = replyContainerRef ?? (() => {
+							const el = this.h({ tagName: "div", className: `${c}-comment-replies` }) as HTMLElement;
+							commentEl.insertBefore(el, null);
+							replyContainerRef = el;
+							return el;
+						})();
+						this.openReplyComposer(host, (text) => {
+							callbacks.onCommentReply?.(comment.id, text);
+						});
+					});
+				}
 			});
 		}
 
@@ -767,6 +789,8 @@ export class HtmlRenderer {
 				className: `${c}-comment-replies`,
 				children: comment.replies.map(r => this.renderSidebarComment(r, true))
 			}) as HTMLElement;
+
+			replyContainerRef = repliesContainer;
 
 			const threadToggle = this.h({
 				tagName: "button",
@@ -778,7 +802,8 @@ export class HtmlRenderer {
 			children.push(repliesContainer);
 
 			this.later(() => {
-				threadToggle.addEventListener("click", () => {
+				threadToggle.addEventListener("click", (ev) => {
+					ev.stopPropagation();
 					repliesContainer.classList.toggle(`${c}-replies-collapsed`);
 					threadToggle.classList.toggle(`${c}-thread-collapsed`);
 				});
@@ -807,6 +832,121 @@ export class HtmlRenderer {
 		}
 
 		return commentEl;
+	}
+
+	private openInlineEditor(bodyEl: HTMLElement, currentText: string, onSave: (text: string) => void) {
+		const c = this.className;
+		if (bodyEl.querySelector(`.${c}-comment-editor`)) return;
+
+		const originalContent = Array.from(bodyEl.childNodes);
+		const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` }) as HTMLTextAreaElement;
+		textarea.value = currentText;
+
+		const save = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Save"] }) as HTMLButtonElement;
+		const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] }) as HTMLButtonElement;
+		const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [save, cancel] }) as HTMLElement;
+
+		bodyEl.replaceChildren(textarea, actions);
+		textarea.focus();
+		textarea.select();
+
+		const restore = () => bodyEl.replaceChildren(...originalContent);
+
+		save.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			const next = textarea.value;
+			if (next !== currentText) onSave(next);
+			restore();
+		});
+		cancel.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			restore();
+		});
+		textarea.addEventListener("click", (ev) => ev.stopPropagation());
+		textarea.addEventListener("keydown", (ev) => {
+			if (ev.key === "Escape") { ev.preventDefault(); restore(); }
+			if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save.click(); }
+		});
+	}
+
+	private openInlineConfirm(hostEl: HTMLElement, message: string, onConfirm: () => void) {
+		const c = this.className;
+		if (hostEl.querySelector(`.${c}-comment-confirm`)) return;
+
+		const msg = this.h({ tagName: "span", className: `${c}-comment-confirm-msg`, children: [message] }) as HTMLElement;
+		const yes = this.h({ tagName: "button", className: `${c}-comment-confirm-yes`, children: ["Yes"] }) as HTMLButtonElement;
+		const no = this.h({ tagName: "button", className: `${c}-comment-confirm-no`, children: ["No"] }) as HTMLButtonElement;
+		const wrap = this.h({ tagName: "div", className: `${c}-comment-confirm`, children: [msg, yes, no] }) as HTMLElement;
+
+		hostEl.appendChild(wrap);
+
+		yes.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			wrap.remove();
+			onConfirm();
+		});
+		no.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			wrap.remove();
+		});
+	}
+
+	private openReplyComposer(hostEl: HTMLElement, onSubmit: (text: string) => void) {
+		const c = this.className;
+		if (hostEl.querySelector(`.${c}-comment-reply-composer`)) return;
+
+		const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` }) as HTMLTextAreaElement;
+		textarea.placeholder = "Write a reply...";
+		const submit = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Reply"] }) as HTMLButtonElement;
+		const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] }) as HTMLButtonElement;
+		const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [submit, cancel] }) as HTMLElement;
+		const composer = this.h({ tagName: "div", className: `${c}-comment-reply-composer`, children: [textarea, actions] }) as HTMLElement;
+
+		hostEl.appendChild(composer);
+		textarea.focus();
+
+		submit.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			const text = textarea.value.trim();
+			if (text) onSubmit(text);
+			composer.remove();
+		});
+		cancel.addEventListener("click", (ev) => {
+			ev.stopPropagation();
+			composer.remove();
+		});
+		textarea.addEventListener("click", (ev) => ev.stopPropagation());
+		textarea.addEventListener("keydown", (ev) => {
+			if (ev.key === "Escape") { ev.preventDefault(); composer.remove(); }
+			if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit.click(); }
+		});
+	}
+
+	private showNewCommentComposer(contentArea: HTMLElement, range: Range) {
+		const c = this.className;
+		const existing = contentArea.querySelector(`.${c}-new-comment-composer`);
+		if (existing) existing.remove();
+
+		const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` }) as HTMLTextAreaElement;
+		textarea.placeholder = "Write a comment on the selected text...";
+		const submit = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Add"] }) as HTMLButtonElement;
+		const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] }) as HTMLButtonElement;
+		const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [submit, cancel] }) as HTMLElement;
+		const composer = this.h({ tagName: "div", className: `${c}-new-comment-composer`, children: [textarea, actions] }) as HTMLElement;
+
+		contentArea.insertBefore(composer, contentArea.firstChild);
+		textarea.focus();
+
+		submit.addEventListener("click", () => {
+			const text = textarea.value.trim();
+			if (text) this.options.commentCallbacks?.onCommentAdd?.(range, text);
+			composer.remove();
+		});
+		cancel.addEventListener("click", () => composer.remove());
+		textarea.addEventListener("keydown", (ev) => {
+			if (ev.key === "Escape") { ev.preventDefault(); composer.remove(); }
+			if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit.click(); }
+		});
 	}
 
 	renderDefaultStyle() {
@@ -870,6 +1010,16 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-anchor-start { cursor: pointer; }
 ::highlight(${c}-comments) { background-color: rgba(255, 212, 0, 0.35); }
 .${c}-no-highlight .${c}-comment-anchor-start { cursor: default; }
+.${c}-comment-editor { width: 100%; min-height: 60px; box-sizing: border-box; font: inherit; font-size: 0.85rem; padding: 6px; border: 1px solid #bbb; border-radius: 4px; resize: vertical; }
+.${c}-comment-editor-actions { display: flex; gap: 6px; margin-top: 6px; }
+.${c}-comment-editor-actions button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 10px; font-size: 0.75rem; cursor: pointer; color: #666; }
+.${c}-comment-editor-save { background: #4a90d9 !important; color: white !important; border-color: #4a90d9 !important; }
+.${c}-comment-editor-save:hover { background: #357abd !important; }
+.${c}-comment-confirm { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 0.75rem; color: #d32f2f; }
+.${c}-comment-confirm button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; }
+.${c}-comment-confirm-yes { color: white !important; background: #d32f2f !important; border-color: #d32f2f !important; }
+.${c}-new-comment-composer,.${c}-comment-reply-composer { background: white; border: 1px solid #4a90d9; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.${c}-comment-reply-composer { margin: 6px 0; }
 `;
 			} else {
 				styleText += `

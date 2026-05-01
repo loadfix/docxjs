@@ -5,6 +5,10 @@ import { WmlComment } from "./elements";
 import { CommentsExtended } from "./comments-extended-part";
 import { keyBy } from "../utils";
 
+// paraId comes from an untrusted DOCX; reject values like "__proto__" that would
+// otherwise poison the prototype chain of the lookup map.
+const SAFE_PARA_ID = /^[A-Za-z0-9_-]+$/;
+
 export class CommentsPart extends Part {
     protected _documentParser: DocumentParser;
 
@@ -28,13 +32,18 @@ export class CommentsPart extends Part {
             return;
         }
 
-        const extMap = keyBy(extendedComments, x => x.paraId);
-        const paraIdToComment: Record<string, WmlComment> = {};
+        const extMap = new Map<string, CommentsExtended>();
+        for (const ext of extendedComments) {
+            if (ext.paraId && SAFE_PARA_ID.test(ext.paraId)) {
+                extMap.set(ext.paraId, ext);
+            }
+        }
 
+        const paraIdToComment = new Map<string, WmlComment>();
         for (const comment of this.comments) {
-            if (comment.paraId) {
-                paraIdToComment[comment.paraId] = comment;
-                const ext = extMap[comment.paraId];
+            if (comment.paraId && SAFE_PARA_ID.test(comment.paraId)) {
+                paraIdToComment.set(comment.paraId, comment);
+                const ext = extMap.get(comment.paraId);
                 if (ext) {
                     comment.done = ext.done;
                 }
@@ -42,9 +51,9 @@ export class CommentsPart extends Part {
         }
 
         for (const ext of extendedComments) {
-            if (ext.paraIdParent) {
-                const child = paraIdToComment[ext.paraId];
-                const parent = paraIdToComment[ext.paraIdParent];
+            if (ext.paraIdParent && SAFE_PARA_ID.test(ext.paraIdParent) && ext.paraId && SAFE_PARA_ID.test(ext.paraId)) {
+                const child = paraIdToComment.get(ext.paraId);
+                const parent = paraIdToComment.get(ext.paraIdParent);
                 if (child && parent) {
                     child.parentCommentId = parent.id;
                     parent.replies.push(child);
