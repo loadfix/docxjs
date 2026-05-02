@@ -2,9 +2,14 @@ import { WordDocument } from './word-document';
 import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
+import { applyVisualPageBreaks } from './page-break';
 
 export { renderThumbnails } from './thumbnails';
 export type { ThumbnailsOptions, ThumbnailsHandle } from './thumbnails';
+// Exported so consumers and tests can drive the pagination pass directly;
+// renderAsync calls this internally when `experimentalPageBreaks` is on.
+export { applyVisualPageBreaks } from './page-break';
+export type { MeasureFn, Measurement } from './page-break';
 
 // Security helpers re-exported so they can be unit-tested and (optionally)
 // reused by embedding code. Pure functions; see SECURITY_REVIEW.md for
@@ -64,6 +69,15 @@ export interface Options {
 	useBase64URL: boolean;
 	renderChanges: boolean;
     renderComments: boolean;
+    /**
+     * Experimental: when true, after the renderer emits its sections, walk
+     * each one and split any that overflow their page-sized `min-height`
+     * into multiple page-shaped sibling sections. This matches the visual
+     * pagination that `renderThumbnails` already produces on the thumbnail
+     * side (see `src/thumbnails.ts`). Default `false` to preserve current
+     * behaviour for existing consumers. See #22.
+     */
+    experimentalPageBreaks?: boolean;
     comments: CommentsOptions;
     changes: ChangesOptions;
     h: typeof h;
@@ -88,6 +102,7 @@ export const defaultOptions: Options = {
 	useBase64URL: false,
 	renderChanges: false,
     renderComments: false,
+    experimentalPageBreaks: false,
     comments: {
         sidebar: true,
         highlight: true,
@@ -139,6 +154,14 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
     for (let n of nodes) {
         const c = n.nodeName === "STYLE" ? styleContainer : bodyContainer;
         c.appendChild(n);
+    }
+
+    // Visual pagination must run after nodes are attached — the split logic
+    // relies on layout-driven measurements (getBoundingClientRect / computed
+    // styles) that return zero for detached elements. See #22.
+    const ops = mergeOptions(userOptions);
+    if (ops.experimentalPageBreaks) {
+        applyVisualPageBreaks(bodyContainer, { className: ops.className });
     }
 
     return doc;

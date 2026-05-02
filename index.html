@@ -91,6 +91,10 @@
             debug: true,
             experimental: true,
             hideWrapperOnPrint: true,
+            // Demo-side default: show the new visual pagination by default so
+            // reviewers see the fixed behaviour out of the box. The library
+            // default stays `false` for back-compat. See #22.
+            experimentalPageBreaks: true,
         });
 
         const container = document.querySelector("#document-container");
