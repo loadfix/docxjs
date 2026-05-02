@@ -42,7 +42,11 @@ const umd = readFileSync(`${repo}/dist/docx-preview.js`, 'utf8');
 // present it attaches to `globalThis` under the `name` configured in rollup
 // ("docx"). We run it as a Function so it sees our globals.
 new Function('require', umd)(() => ({})); // require stub for any node fallback
-const { parseAsync, renderDocument, renderThumbnails } = globalThis.docx;
+const {
+    parseAsync, renderDocument, renderThumbnails, defaultOptions,
+    isSafeHyperlinkHref, sanitizeCssColor, sanitizeFontFamily,
+    isSafeCssIdent, escapeCssStringContent, keyBy, mergeDeep,
+} = globalThis.docx;
 
 const failures = [];
 const warnings = [];
@@ -315,6 +319,107 @@ async function renderFixture(path, options) {
     thumbs.remove();
 }
 
+// ── 11. Security: altChunk removed, hyperlink scheme allowlist ────────────
+// These come from SECURITY_REVIEW.md findings 1 and 2. The fixes strip the
+// altChunk renderer entirely and validate hyperlink hrefs against an
+// allowlist before emitting them. No DOCX fixture needed — we check the
+// exported surface directly.
+{
+    assert(
+        !Object.prototype.hasOwnProperty.call(defaultOptions, 'renderAltChunks'),
+        '11a: defaultOptions.renderAltChunks should be removed (SECURITY_REVIEW.md #1)',
+    );
+    // No altChunk iframe should appear in the rendered output under any
+    // option combination — the switch case returns null now.
+    assert(
+        typeof isSafeHyperlinkHref === 'function',
+        '11b: isSafeHyperlinkHref should be exported',
+    );
+    // Unsafe schemes
+    const unsafe = [
+        'javascript:alert(1)',
+        'JAVASCRIPT:alert(1)',
+        '  javascript:alert(1)  ',
+        'data:text/html,<script>alert(1)</script>',
+        'vbscript:msgbox(1)',
+        'file:///etc/passwd',
+        'blob:http://attacker/foo',
+    ];
+    for (const u of unsafe) {
+        assert(!isSafeHyperlinkHref(u), `11c: should reject "${u}"`);
+    }
+    // Safe schemes + relatives + anchor
+    const safe = [
+        'https://example.com/',
+        'http://example.com/',
+        'mailto:a@example.com',
+        'tel:+1234567890',
+        '#anchor',
+        '',
+        null,
+        'relative/path.html',
+        '../up/one.html',
+    ];
+    for (const s of safe) {
+        assert(isSafeHyperlinkHref(s), `11d: should accept "${s}"`);
+    }
+}
+
+// ── 12. Security: CSS sanitizers and prototype-pollution guards ───────────
+// Findings 3, 4, 6 from SECURITY_REVIEW.md — the helpers are pure functions
+// so we poke them directly with malicious inputs.
+{
+    // Color sanitizer: allowlist hex / rgb*/hsl*; everything else → null.
+    assert(sanitizeCssColor('ff0000') === '#ff0000', '12a: bare 6-hex accepted');
+    assert(sanitizeCssColor('#fff') === '#fff', '12b: #3-hex accepted');
+    assert(sanitizeCssColor('rgb(1,2,3)') === 'rgb(1,2,3)', '12c: rgb() accepted');
+    assert(sanitizeCssColor('red; display: block') === null, '12d: CSS break-out rejected');
+    assert(sanitizeCssColor('ff0000}a{') === null, '12e: hex with trailing braces rejected');
+    assert(sanitizeCssColor('<img>') === null, '12f: non-color string rejected');
+    assert(sanitizeCssColor('"></style><script>') === null, '12g: HTML injection string rejected');
+    assert(sanitizeCssColor(null) === null, '12h: null rejected');
+
+    // Font family sanitizer: quotes wrap, backslashes/quotes stripped.
+    assert(sanitizeFontFamily('Arial') === "'Arial'", '12i: plain family quoted');
+    const evilFont = sanitizeFontFamily('Arial"; } * { background: red } a {');
+    assert(
+        !evilFont.includes('}') && !evilFont.includes('{') && !evilFont.includes('"'),
+        `12j: font-family break-out chars stripped (got ${evilFont})`,
+    );
+    assert(sanitizeFontFamily('') === 'sans-serif', '12k: empty falls back to sans-serif');
+    assert(sanitizeFontFamily(null) === 'sans-serif', '12l: null falls back to sans-serif');
+
+    // Safe CSS identifier check: alnum + underscore only.
+    assert(isSafeCssIdent('accent1') === true, '12m: accent1 is safe');
+    assert(isSafeCssIdent('foo_bar') === true, '12n: underscores ok');
+    assert(isSafeCssIdent('foo-bar') === false, '12o: dash rejected');
+    assert(isSafeCssIdent('foo bar') === false, '12p: space rejected');
+    assert(isSafeCssIdent('__proto__') === true, '12q: __proto__ is a safe CSS ident (but filtered elsewhere)');
+    assert(isSafeCssIdent('}@import url(x);') === false, '12r: injection rejected');
+
+    // CSS string escape: backslashes doubled, quotes backslash-escaped.
+    assert(escapeCssStringContent('a"b') === 'a\\"b', '12s: double quotes escaped');
+    assert(escapeCssStringContent('a\\b') === 'a\\\\b', '12t: backslashes escaped');
+    assert(escapeCssStringContent('plain') === 'plain', '12u: plain passthrough');
+
+    // keyBy / mergeDeep prototype pollution guards.
+    const before = {}.polluted;
+    const keyed = keyBy([{ id: '__proto__', polluted: true }, { id: 'ok', polluted: false }], x => x.id);
+    assert(keyed['__proto__'] === undefined, '12v: keyBy rejects __proto__ key');
+    assert(keyed['ok']?.polluted === false, '12w: keyBy still stores safe keys');
+    assert(({}).polluted === before, '12x: Object.prototype not polluted by keyBy');
+
+    const before2 = {}.pollutedViaMerge;
+    const merged = mergeDeep({}, JSON.parse('{"__proto__": {"pollutedViaMerge": true}}'));
+    assert(({}).pollutedViaMerge === before2, '12y: Object.prototype not polluted by mergeDeep');
+    // The guarded key should not be copied.
+    assert(!('pollutedViaMerge' in merged), '12z: mergeDeep drops __proto__ key');
+
+    // constructor / prototype are also filtered.
+    const keyed2 = keyBy([{ id: 'constructor', marker: true }], x => x.id);
+    assert(keyed2['constructor'] === undefined, '12aa: keyBy rejects constructor key');
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -323,5 +428,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${10} scenarios passed`);
+    console.log(`\n✓ all ${12} scenarios passed`);
 }

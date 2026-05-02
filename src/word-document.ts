@@ -180,6 +180,10 @@ export class WordDocument {
 		return x ? this.blobToURL(new Blob([deobfuscate(x, key)]), path) : x;
 	}
 
+	// @internal Dead code. The renderer no longer consumes alt chunks — the
+	// previous implementation assigned attacker-controlled HTML to iframe.srcdoc
+	// (same-origin, no sandbox). Kept as a separate surface for now, but not
+	// called from anywhere in the library. See SECURITY_REVIEW.md #1.
 	async loadAltChunk(id: string, part?: Part): Promise<string> {
 		const path = this.getPathById(part ?? this.documentPart, id);
 		return path ? this._package.load(path, "string") : Promise.resolve(null);

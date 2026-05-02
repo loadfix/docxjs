@@ -44,6 +44,41 @@ function escapeClassName(className) {
 function encloseFontFamily(fontFamily) {
     return /^[^"'].*\s.*[^"']$/.test(fontFamily) ? `'${fontFamily}'` : fontFamily;
 }
+function sanitizeFontFamily(value) {
+    if (typeof value !== 'string')
+        return 'sans-serif';
+    const cleaned = value.replace(/["'\\;{}@<>]/g, '').trim();
+    if (!cleaned)
+        return 'sans-serif';
+    return `'${cleaned}'`;
+}
+const HEX_COLOR_RE = /^[0-9A-Fa-f]{3,8}$/;
+const CSS_FN_COLOR_RE = /^(rgb|rgba|hsl|hsla)\(\s*[-0-9.,%\s/deg]+\s*\)$/i;
+function sanitizeCssColor(value) {
+    if (typeof value !== 'string')
+        return null;
+    const v = value.trim();
+    if (!v)
+        return null;
+    if (HEX_COLOR_RE.test(v))
+        return `#${v}`;
+    if (v.startsWith('#') && HEX_COLOR_RE.test(v.slice(1)))
+        return v;
+    if (CSS_FN_COLOR_RE.test(v))
+        return v;
+    return null;
+}
+const SAFE_CSS_IDENT_RE = /^[A-Za-z0-9_]+$/;
+function isSafeCssIdent(value) {
+    return typeof value === 'string' && SAFE_CSS_IDENT_RE.test(value);
+}
+function escapeCssStringContent(value) {
+    return value
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\A ')
+        .replace(/\r/g, '\\D ');
+}
 function splitPath(path) {
     let si = path.lastIndexOf('/') + 1;
     let folder = si == 0 ? "" : path.substring(0, si);
@@ -60,11 +95,19 @@ function resolvePath(path, base) {
         return `${base}${path}`;
     }
 }
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 function keyBy(array, by) {
-    return array.reduce((a, x) => {
-        a[by(x)] = x;
-        return a;
-    }, {});
+    const result = Object.create(null);
+    for (const x of array) {
+        const k = by(x);
+        if (k == null)
+            continue;
+        const s = String(k);
+        if (UNSAFE_KEYS.has(s))
+            continue;
+        result[s] = x;
+    }
+    return result;
 }
 function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
@@ -86,6 +129,10 @@ function mergeDeep(target, ...sources) {
     const source = sources.shift();
     if (isObject(target) && isObject(source)) {
         for (const key in source) {
+            if (UNSAFE_KEYS.has(key))
+                continue;
+            if (!Object.prototype.hasOwnProperty.call(source, key))
+                continue;
             if (isObject(source[key])) {
                 const val = target[key] ?? (target[key] = {});
                 mergeDeep(val, source[key]);
@@ -769,6 +816,8 @@ var DomType;
     DomType["Inserted"] = "inserted";
     DomType["Deleted"] = "deleted";
     DomType["DeletedText"] = "deletedText";
+    DomType["MoveFrom"] = "moveFrom";
+    DomType["MoveTo"] = "moveTo";
     DomType["Comment"] = "comment";
     DomType["CommentReference"] = "commentReference";
     DomType["CommentRangeStart"] = "commentRangeStart";
@@ -1072,14 +1121,49 @@ class CustomPropsPart extends Part {
     }
 }
 
+const SAFE_PARA_ID = /^[A-Za-z0-9_-]+$/;
 class CommentsPart extends Part {
     constructor(pkg, path, parser) {
         super(pkg, path);
+        this.topLevelComments = [];
         this._documentParser = parser;
     }
     parseXml(root) {
         this.comments = this._documentParser.parseComments(root);
         this.commentMap = keyBy(this.comments, x => x.id);
+    }
+    buildThreading(extendedComments) {
+        if (!extendedComments || extendedComments.length === 0) {
+            this.topLevelComments = [...this.comments];
+            return;
+        }
+        const extMap = new Map();
+        for (const ext of extendedComments) {
+            if (ext.paraId && SAFE_PARA_ID.test(ext.paraId)) {
+                extMap.set(ext.paraId, ext);
+            }
+        }
+        const paraIdToComment = new Map();
+        for (const comment of this.comments) {
+            if (comment.paraId && SAFE_PARA_ID.test(comment.paraId)) {
+                paraIdToComment.set(comment.paraId, comment);
+                const ext = extMap.get(comment.paraId);
+                if (ext) {
+                    comment.done = ext.done;
+                }
+            }
+        }
+        for (const ext of extendedComments) {
+            if (ext.paraIdParent && SAFE_PARA_ID.test(ext.paraIdParent) && ext.paraId && SAFE_PARA_ID.test(ext.paraId)) {
+                const child = paraIdToComment.get(ext.paraId);
+                const parent = paraIdToComment.get(ext.paraIdParent);
+                if (child && parent) {
+                    child.parentCommentId = parent.id;
+                    parent.replies.push(child);
+                }
+            }
+        }
+        this.topLevelComments = this.comments.filter(c => !c.parentCommentId);
     }
 }
 
@@ -1124,6 +1208,10 @@ class WordDocument {
             const r = d.rels.find(x => x.type === rel.type) ?? rel;
             return d.loadRelationshipPart(r.target, r.type);
         }));
+        if (d.commentsPart) {
+            const extComments = d.commentsExtendedPart?.comments ?? [];
+            d.commentsPart.buildThreading(extComments);
+        }
         return d;
     }
     save(type = "blob") {
@@ -1355,6 +1443,9 @@ class WmlComment extends OpenXmlElementBase {
     constructor() {
         super(...arguments);
         this.type = DomType.Comment;
+        this.done = false;
+        this.parentCommentId = null;
+        this.replies = [];
     }
 }
 class WmlCommentReference extends OpenXmlElementBase {
@@ -1379,6 +1470,41 @@ class WmlCommentRangeEnd extends OpenXmlElementBase {
     }
 }
 
+function parseRevisionAttrs(elem) {
+    return {
+        id: globalXmlParser.attr(elem, "id"),
+        author: globalXmlParser.attr(elem, "author"),
+        date: globalXmlParser.attr(elem, "date")
+    };
+}
+const FORMATTING_PROP_NAMES = {
+    b: "bold", i: "italic", u: "underline", strike: "strikethrough",
+    sz: "font size", rFonts: "font", color: "color", highlight: "highlight",
+    jc: "alignment", ind: "indent", spacing: "spacing", numPr: "numbering",
+    pStyle: "style", rStyle: "style"
+};
+function parseFormattingRevision(elem) {
+    const rev = {
+        id: globalXmlParser.attr(elem, "id"),
+        author: globalXmlParser.attr(elem, "author"),
+        date: globalXmlParser.attr(elem, "date"),
+        changedProps: []
+    };
+    const prev = globalXmlParser.elements(elem).find(e => e.localName === "rPr" || e.localName === "pPr");
+    if (prev) {
+        const seen = new Set();
+        for (const child of globalXmlParser.elements(prev)) {
+            const pretty = FORMATTING_PROP_NAMES[child.localName] ?? child.localName;
+            if (seen.has(pretty))
+                continue;
+            seen.add(pretty);
+            rev.changedProps.push(pretty);
+            if (rev.changedProps.length >= 5)
+                break;
+        }
+    }
+    return rev;
+}
 var autos = {
     shd: "inherit",
     color: "black",
@@ -1440,6 +1566,12 @@ class DocumentParser {
             item.author = globalXmlParser.attr(el, "author");
             item.initials = globalXmlParser.attr(el, "initials");
             item.date = globalXmlParser.attr(el, "date");
+            const paraId = el.getAttributeNS("http://schemas.microsoft.com/office/word/2010/wordml", "paraId")
+                ?? el.getAttribute("w14:paraId")
+                ?? globalXmlParser.attr(el, "paraId");
+            if (paraId) {
+                item.paraId = paraId;
+            }
             item.children = this.parseBodyElements(el);
             result.push(item);
         }
@@ -1766,12 +1898,28 @@ class DocumentParser {
     parseInserted(node, parentParser) {
         return {
             type: DomType.Inserted,
+            revision: parseRevisionAttrs(node),
             children: parentParser(node)?.children ?? []
         };
     }
     parseDeleted(node, parentParser) {
         return {
             type: DomType.Deleted,
+            revision: parseRevisionAttrs(node),
+            children: parentParser(node)?.children ?? []
+        };
+    }
+    parseMoveFrom(node, parentParser) {
+        return {
+            type: DomType.MoveFrom,
+            revision: parseRevisionAttrs(node),
+            children: parentParser(node)?.children ?? []
+        };
+    }
+    parseMoveTo(node, parentParser) {
+        return {
+            type: DomType.MoveTo,
+            revision: parseRevisionAttrs(node),
             children: parentParser(node)?.children ?? []
         };
     }
@@ -1819,6 +1967,12 @@ class DocumentParser {
                 case "del":
                     result.children.push(this.parseDeleted(el, e => this.parseParagraph(e)));
                     break;
+                case "moveFrom":
+                    result.children.push(this.parseMoveFrom(el, e => this.parseParagraph(e)));
+                    break;
+                case "moveTo":
+                    result.children.push(this.parseMoveTo(el, e => this.parseParagraph(e)));
+                    break;
             }
         }
         return result;
@@ -1838,6 +1992,19 @@ class DocumentParser {
                     this.parseFrame(c, paragraph);
                     break;
                 case "rPr":
+                    for (const rPrChild of globalXmlParser.elements(c)) {
+                        if (rPrChild.localName === "ins") {
+                            paragraph.paragraphMarkRevisionKind = 'inserted';
+                            paragraph.revision = parseRevisionAttrs(rPrChild);
+                        }
+                        else if (rPrChild.localName === "del") {
+                            paragraph.paragraphMarkRevisionKind = 'deleted';
+                            paragraph.revision = parseRevisionAttrs(rPrChild);
+                        }
+                    }
+                    break;
+                case "pPrChange":
+                    paragraph.formattingRevision = parseFormattingRevision(c);
                     break;
                 default:
                     return false;
@@ -2032,6 +2199,9 @@ class DocumentParser {
                     break;
                 case "vertAlign":
                     run.verticalAlign = values.valueOfVertAlign(c, true);
+                    break;
+                case "rPrChange":
+                    run.formattingRevision = parseFormattingRevision(c);
                     break;
                 default:
                     return false;
@@ -2288,6 +2458,17 @@ class DocumentParser {
                     break;
                 case "gridAfter":
                     row.gridAfter = globalXmlParser.intAttr(c, "val");
+                    break;
+                case "ins":
+                    row.revision = parseRevisionAttrs(c);
+                    row.rowRevisionKind = "inserted";
+                    break;
+                case "del":
+                    row.revision = parseRevisionAttrs(c);
+                    row.rowRevisionKind = "deleted";
+                    break;
+                case "trPrChange":
+                    row.formattingRevision = parseFormattingRevision(c);
                     break;
                 default:
                     return false;
@@ -2897,6 +3078,25 @@ function cx(...classNames) {
     return classNames.filter(Boolean).join(" ");
 }
 
+const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
+function isSafeHyperlinkHref(raw) {
+    if (raw == null)
+        return true;
+    if (typeof raw !== 'string')
+        return false;
+    const trimmed = raw.trim();
+    if (trimmed === '')
+        return true;
+    if (trimmed.startsWith('#'))
+        return true;
+    try {
+        const parsed = new URL(trimmed, 'http://docxjs.invalid/');
+        return SAFE_HREF_SCHEMES.has(parsed.protocol);
+    }
+    catch {
+        return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+    }
+}
 class HtmlRenderer {
     constructor() {
         this.className = "docx";
@@ -2912,9 +3112,29 @@ class HtmlRenderer {
         this.usedHederFooterParts = [];
         this.currentTabs = [];
         this.commentMap = {};
+        this.commentAnchorElements = {};
+        this.sidebarContainer = null;
+        this.sidebarCommentElements = {};
+        this.revisionCardElements = new Map();
+        this.changeAuthorIndex = new Map();
+        this.changeElements = [];
+        this.changeMeta = [];
+        this.moveElements = new Map();
         this.tasks = [];
         this.postRenderTasks = [];
         this.h = h;
+    }
+    get useSidebar() {
+        return this.options.renderComments && (this.options.comments?.sidebar !== false);
+    }
+    get useHighlight() {
+        return this.options.renderComments && (this.options.comments?.highlight !== false);
+    }
+    get sidebarLayout() {
+        return this.options.comments?.layout === 'packed' ? 'packed' : 'anchored';
+    }
+    get showChanges() {
+        return !!this.options.changes?.show;
     }
     async render(document, options) {
         this.document = document;
@@ -2924,7 +3144,15 @@ class HtmlRenderer {
         this.h = options.h ?? h;
         this.styleMap = null;
         this.tasks = [];
-        if (this.options.renderComments && globalThis.Highlight) {
+        this.commentAnchorElements = {};
+        this.sidebarCommentElements = {};
+        this.revisionCardElements = new Map();
+        this.sidebarContainer = null;
+        this.changeAuthorIndex = new Map();
+        this.changeElements = [];
+        this.changeMeta = [];
+        this.moveElements = new Map();
+        if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
             this.commentHighlight = new Highlight();
         }
         const result = [...this.renderDefaultStyle()];
@@ -2952,13 +3180,24 @@ class HtmlRenderer {
             result.push(...await this.renderFontTable(document.fontTablePart));
         var sectionElements = this.renderSections(document.documentPart.body);
         if (this.options.inWrapper) {
-            result.push(this.renderWrapper(sectionElements));
+            if (this.useSidebar) {
+                result.push(this.renderWrapperWithSidebar(sectionElements));
+            }
+            else {
+                result.push(this.renderWrapper(sectionElements));
+            }
         }
         else {
             result.push(...sectionElements);
         }
-        if (this.commentHighlight && options.renderComments) {
+        if (this.commentHighlight && this.useHighlight) {
             CSS.highlights.set(`${this.className}-comments`, this.commentHighlight);
+        }
+        else {
+            CSS.highlights?.delete(`${this.className}-comments`);
+        }
+        if (this.showChanges) {
+            this.finalizeChangesRendering(result);
         }
         this.postRenderTasks.forEach(t => t());
         await Promise.allSettled(this.tasks);
@@ -2969,17 +3208,22 @@ class HtmlRenderer {
         const variables = {};
         const fontScheme = themePart.theme?.fontScheme;
         if (fontScheme) {
-            if (fontScheme.majorFont) {
-                variables['--docx-majorHAnsi-font'] = fontScheme.majorFont.latinTypeface;
+            if (fontScheme.majorFont?.latinTypeface) {
+                variables['--docx-majorHAnsi-font'] = sanitizeFontFamily(fontScheme.majorFont.latinTypeface);
             }
-            if (fontScheme.minorFont) {
-                variables['--docx-minorHAnsi-font'] = fontScheme.minorFont.latinTypeface;
+            if (fontScheme.minorFont?.latinTypeface) {
+                variables['--docx-minorHAnsi-font'] = sanitizeFontFamily(fontScheme.minorFont.latinTypeface);
             }
         }
         const colorScheme = themePart.theme?.colorScheme;
         if (colorScheme) {
-            for (let [k, v] of Object.entries(colorScheme.colors)) {
-                variables[`--docx-${k}-color`] = `#${v}`;
+            for (const [k, v] of Object.entries(colorScheme.colors)) {
+                if (!isSafeCssIdent(k))
+                    continue;
+                const color = sanitizeCssColor(v);
+                if (!color)
+                    continue;
+                variables[`--docx-${k}-color`] = color;
             }
         }
         const cssText = this.styleToString(`.${this.className}`, variables);
@@ -3267,6 +3511,158 @@ class HtmlRenderer {
     renderWrapper(children) {
         return this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
     }
+    renderWrapperWithSidebar(sectionElements) {
+        const c = this.className;
+        const docContainer = this.h({ tagName: "div", className: `${c}-doc-container`, children: sectionElements });
+        this.sidebarContainer = this.h({
+            tagName: "div",
+            className: `${c}-comment-sidebar ${c}-sidebar-${this.sidebarLayout}`
+        });
+        const contentArea = this.h({
+            tagName: "div",
+            className: `${c}-sidebar-content`,
+            children: []
+        });
+        this.sidebarContainer.appendChild(contentArea);
+        this.renderSidebarComments(contentArea);
+        const wrapper = this.h({
+            tagName: "div",
+            className: `${c}-wrapper`,
+            children: [docContainer, this.sidebarContainer]
+        });
+        this.later(() => {
+            this.setupSidebarScrollSync(docContainer, contentArea);
+        });
+        return wrapper;
+    }
+    setupSidebarScrollSync(docContainer, sidebarContent) {
+        if (this.sidebarLayout === 'packed')
+            return;
+        const CARD_GAP = 8;
+        const positionCards = () => {
+            const anchored = [];
+            for (const [id, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
+                if (!sidebarEl.isConnected)
+                    continue;
+                const anchor = this.commentAnchorElements[id]?.[0];
+                if (!anchor?.isConnected)
+                    continue;
+                anchored.push({ el: sidebarEl, anchor, desiredTop: 0 });
+            }
+            for (const meta of this.changeMeta) {
+                const card = this.revisionCardElements.get(meta.id ?? '');
+                if (!card?.isConnected || !meta.el.isConnected)
+                    continue;
+                anchored.push({ el: card, anchor: meta.el, desiredTop: 0 });
+            }
+            if (anchored.length === 0)
+                return;
+            const sidebarRect = sidebarContent.getBoundingClientRect();
+            for (const entry of anchored) {
+                const r = entry.anchor.getBoundingClientRect();
+                entry.desiredTop = r.top - sidebarRect.top + sidebarContent.scrollTop;
+            }
+            anchored.sort((a, b) => a.desiredTop - b.desiredTop);
+            for (const { el } of anchored)
+                el.style.marginTop = "";
+            let floor = -Infinity;
+            for (const entry of anchored) {
+                const target = Math.max(entry.desiredTop, floor);
+                const naturalTop = entry.el.offsetTop;
+                const offset = target - naturalTop;
+                if (offset > 0)
+                    entry.el.style.marginTop = `${offset}px`;
+                floor = target + entry.el.offsetHeight + CARD_GAP;
+            }
+        };
+        let rafId;
+        const schedule = () => {
+            cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(positionCards);
+        };
+        if (typeof ResizeObserver !== "undefined") {
+            const ro = new ResizeObserver(schedule);
+            ro.observe(docContainer);
+            for (const el of Object.values(this.sidebarCommentElements)) {
+                if (el.isConnected)
+                    ro.observe(el);
+            }
+        }
+        setTimeout(positionCards, 100);
+    }
+    renderSidebarComments(container) {
+        const commentsPart = this.document.commentsPart;
+        if (!commentsPart)
+            return;
+        const comments = commentsPart.topLevelComments.length > 0
+            ? commentsPart.topLevelComments
+            : commentsPart.comments;
+        for (const comment of comments) {
+            const el = this.renderSidebarComment(comment, false);
+            if (el)
+                container.appendChild(el);
+        }
+    }
+    renderSidebarComment(comment, isReply) {
+        const c = this.className;
+        const headerChildren = [
+            this.h({ tagName: "span", className: `${c}-comment-author`, children: [comment.author ?? "Unknown"] }),
+            this.h({ tagName: "span", className: `${c}-comment-date`, children: [comment.date ? new Date(comment.date).toLocaleString() : ""] })
+        ];
+        if (comment.done) {
+            headerChildren.push(this.h({ tagName: "span", className: `${c}-comment-done`, children: ["Done"] }));
+        }
+        const header = this.h({
+            tagName: "div",
+            className: `${c}-comment-header`,
+            children: headerChildren
+        });
+        const bodyEl = this.h({
+            tagName: "div",
+            className: `${c}-comment-body`,
+            children: this.renderElements(comment.children)
+        });
+        const children = [header, bodyEl];
+        if (comment.replies && comment.replies.length > 0) {
+            const repliesContainer = this.h({
+                tagName: "div",
+                className: `${c}-comment-replies`,
+                children: comment.replies.map(r => this.renderSidebarComment(r, true))
+            });
+            const threadToggle = this.h({
+                tagName: "button",
+                className: `${c}-thread-toggle`,
+                children: [`${comment.replies.length} ${comment.replies.length === 1 ? 'reply' : 'replies'}`]
+            });
+            children.push(threadToggle);
+            children.push(repliesContainer);
+            this.later(() => {
+                threadToggle.addEventListener("click", (ev) => {
+                    ev.stopPropagation();
+                    repliesContainer.classList.toggle(`${c}-replies-collapsed`);
+                    threadToggle.classList.toggle(`${c}-thread-collapsed`);
+                });
+            });
+        }
+        const commentEl = this.h({
+            tagName: "div",
+            className: cx(`${c}-sidebar-comment`, isReply && `${c}-sidebar-reply`),
+            children
+        });
+        commentEl.dataset.commentId = comment.id;
+        if (!isReply) {
+            this.sidebarCommentElements[comment.id] = commentEl;
+            this.later(() => {
+                commentEl.addEventListener("click", () => {
+                    const anchors = this.commentAnchorElements[comment.id];
+                    if (anchors && anchors.length > 0) {
+                        anchors[0].scrollIntoView({ behavior: "smooth", block: "center" });
+                    }
+                });
+            });
+        }
+        return commentEl;
+    }
     renderDefaultStyle() {
         var c = this.className;
         var wrapperStyle = `
@@ -3288,31 +3684,105 @@ section.${c}>footer { z-index: 1; }
 .${c} svg { fill: transparent; }
 `;
         if (this.options.renderComments) {
-            styleText += `
+            if (this.useSidebar) {
+                styleText += `
+.${c}-wrapper { flex-flow: row !important; align-items: flex-start !important; }
+.${c}-doc-container { flex: 1; display: flex; flex-flow: column; align-items: center; min-width: 0; overflow: auto; padding: 30px; padding-bottom: 0; }
+.${c}-doc-container>section.${c} { background: white; box-shadow: 0 0 10px rgba(0, 0, 0, 0.5); margin-bottom: 30px; }
+.${c}-comment-sidebar { width: 320px; min-width: 260px; background: #fafafa; border-left: 1px solid #ddd; display: flex; flex-direction: column; transition: width 0.2s, min-width 0.2s, padding 0.2s; }
+/* packed mode: panel stays pinned as a short compact list at the top of the viewport. */
+.${c}-comment-sidebar.${c}-sidebar-packed { position: sticky; top: 0; height: 100vh; overflow: hidden; align-self: flex-start; }
+/* anchored mode: panel grows to match the document height and rides the same scroll container so each card stays next to its anchor. The toolbar inside it is sticky so it's always visible. */
+.${c}-comment-sidebar.${c}-sidebar-anchored { align-self: stretch; }
+.${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
+.${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
+.${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
+.${c}-sidebar-comment:hover { border-color: #4a90d9; box-shadow: 0 1px 4px rgba(74, 144, 217, 0.2); }
+.${c}-sidebar-reply { margin-left: 16px; border-left: 3px solid #4a90d9; background: #f8fbff; }
+.${c}-comment-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.${c}-comment-author { font-weight: 600; font-size: 0.85rem; color: #333; }
+.${c}-comment-date { font-size: 0.75rem; color: #999; }
+.${c}-comment-done { font-size: 0.7rem; background: #4caf50; color: white; padding: 1px 6px; border-radius: 3px; }
+.${c}-comment-body { font-size: 0.85rem; color: #444; margin-bottom: 6px; line-height: 1.4; }
+.${c}-comment-body p { margin: 2px 0; }
+.${c}-comment-replies { margin-top: 6px; }
+.${c}-replies-collapsed { display: none; }
+.${c}-thread-toggle { background: none; border: none; color: #4a90d9; cursor: pointer; font-size: 0.8rem; padding: 2px 0; margin-top: 4px; }
+.${c}-thread-toggle:hover { text-decoration: underline; }
+.${c}-thread-collapsed::before { content: "▶ "; }
+.${c}-thread-toggle:not(.${c}-thread-collapsed)::before { content: "▼ "; }
+.${c}-comment-focused { border-color: #ff9800 !important; box-shadow: 0 0 8px rgba(255, 152, 0, 0.4) !important; }
+.${c}-comment-anchor-start { cursor: pointer; }
+::highlight(${c}-comments) { background-color: rgba(255, 212, 0, 0.35); }
+.${c}-no-highlight .${c}-comment-anchor-start { cursor: default; }
+`;
+            }
+            else {
+                styleText += `
 .${c}-comment-ref { cursor: default; }
 .${c}-comment-popover { display: none; z-index: 1000; padding: 0.5rem; background: white; position: absolute; box-shadow: 0 0 0.25rem rgba(0, 0, 0, 0.25); width: 30ch; }
 .${c}-comment-ref:hover~.${c}-comment-popover { display: block; }
 .${c}-comment-author,.${c}-comment-date { font-size: 0.875rem; color: #888; }
 `;
+            }
+        }
+        if (this.showChanges) {
+            styleText += this.changesStyles();
         }
         return [
             this.h({ tagName: "#comment", children: ["docxjs library predefined styles"] }),
             this.h({ tagName: "style", children: [styleText] })
         ];
     }
+    changesStyles() {
+        const c = this.className;
+        const palette = [
+            "#2563eb", "#dc2626", "#16a34a", "#9333ea",
+            "#ea580c", "#0891b2", "#c026d3", "#65a30d"
+        ];
+        let css = `
+.${c} ins { text-decoration: underline; text-decoration-thickness: 2px; background: transparent; }
+.${c} del { text-decoration: line-through; text-decoration-thickness: 2px; }
+.${c} .${c}-move-from { text-decoration: line-through double; text-decoration-thickness: 1px; cursor: pointer; }
+.${c} .${c}-move-to { text-decoration: underline double; text-decoration-thickness: 1px; cursor: pointer; }
+.${c} .${c}-formatting-revision { text-decoration: underline dotted; text-decoration-thickness: 1px; cursor: help; }
+.${c}-paragraph-mark { margin-left: 2px; font-weight: bold; user-select: none; }
+.${c}-paragraph-mark-deleted { text-decoration: line-through; }
+.${c}-row-inserted > td { background: color-mix(in srgb, currentColor 8%, transparent); }
+.${c}-row-deleted > td { background: color-mix(in srgb, currentColor 10%, transparent); text-decoration: line-through; text-decoration-color: currentColor; text-decoration-thickness: 2px; }
+.${c}-revision-kind { margin-left: auto; font-size: 0.7rem; padding: 1px 6px; border: 1px solid currentColor; border-radius: 3px; text-transform: uppercase; }
+.${c}-revision-card { border-left: 3px solid currentColor; }
+.${c}-change-bar { position: relative; }
+.${c}-change-bar::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 2px; background: currentColor; opacity: 0.55; }
+.${c}-legend { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 8px 12px; margin: 0 auto 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; font-size: 0.85rem; color: #333; max-width: calc(100% - 60px); }
+.${c}-legend-label { font-weight: 600; margin-right: 4px; }
+.${c}-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.${c}-legend-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; }
+`;
+        for (let i = 0; i < HtmlRenderer.CHANGE_PALETTE_SIZE; i++) {
+            css += `.${c}-change-author-${i} { color: ${palette[i]}; text-decoration-color: ${palette[i]}; }\n`;
+        }
+        return css;
+    }
     async renderNumbering(numberings) {
         var styleText = "";
         var resetCounters = [];
         for (var num of numberings) {
+            if (!isSafeCssIdent(String(num.id)) || !Number.isInteger(num.level)) {
+                continue;
+            }
             var selector = `p.${this.numberingClass(num.id, num.level)}`;
             var listStyleType = "none";
             if (num.bullet) {
+                if (!isSafeCssIdent(String(num.bullet.src))) {
+                    continue;
+                }
                 let valiable = `--${this.className}-${num.bullet.src}`.toLowerCase();
                 styleText += this.styleToString(`${selector}:before`, {
                     "content": "' '",
                     "display": "inline-block",
                     "background": `var(${valiable})`
-                }, num.bullet.style);
+                });
                 try {
                     const imgData = await this.document.loadNumberingImage(num.bullet.src);
                     styleText += `${this.rootSelector} { ${valiable}: url(${imgData}) }`;
@@ -3493,6 +3963,10 @@ section.${c}>footer { z-index: 1; }
                 return this.renderInserted(elem);
             case DomType.Deleted:
                 return this.renderDeleted(elem);
+            case DomType.MoveFrom:
+                return this.renderMoveFrom(elem);
+            case DomType.MoveTo:
+                return this.renderMoveTo(elem);
             case DomType.CommentRangeStart:
                 return this.renderCommentRangeStart(elem);
             case DomType.CommentRangeEnd:
@@ -3500,7 +3974,7 @@ section.${c}>footer { z-index: 1; }
             case DomType.CommentReference:
                 return this.renderCommentReference(elem);
             case DomType.AltChunk:
-                return this.renderAltChunk(elem);
+                return null;
         }
         return null;
     }
@@ -3526,18 +4000,64 @@ section.${c}>footer { z-index: 1; }
         if (numbering) {
             result.classList.add(this.numberingClass(numbering.id, numbering.level));
         }
+        if (this.showChanges && elem.paragraphMarkRevisionKind) {
+            this.appendParagraphMarkRevision(result, elem);
+        }
+        this.applyFormattingRevision(result, elem);
         return result;
+    }
+    appendParagraphMarkRevision(paragraphEl, elem) {
+        const c = this.className;
+        const kind = elem.paragraphMarkRevisionKind;
+        const rev = elem.revision;
+        if (!kind)
+            return;
+        const classes = [`${c}-paragraph-mark`, `${c}-paragraph-mark-${kind}`];
+        if (rev?.author && this.options.changes?.colorByAuthor !== false) {
+            classes.push(`${c}-change-author-${this.getAuthorIndex(rev.author)}`);
+        }
+        const mark = this.h({
+            tagName: "span",
+            className: classes.join(" "),
+            children: ["¶"]
+        });
+        if (rev?.id)
+            mark.dataset.changeId = rev.id;
+        if (rev?.author)
+            mark.dataset.author = rev.author;
+        if (rev?.date)
+            mark.dataset.date = rev.date;
+        mark.dataset.changeKind = "paragraphMark";
+        mark.setAttribute("aria-label", kind === "inserted" ? "Paragraph inserted" : "Paragraph mark deleted");
+        paragraphEl.appendChild(mark);
+        this.changeElements.push(mark);
+        this.changeMeta.push({
+            el: mark, id: rev?.id, kind: "paragraphMark",
+            author: rev?.author, date: rev?.date,
+            summary: this.summarizeChange(mark, "paragraphMark"),
+        });
     }
     renderHyperlink(elem) {
         const res = this.toH(elem, ns.html, "a");
-        res.href = '';
+        let rawHref = '';
         if (elem.id) {
             const rel = this.document.documentPart.rels.find(it => it.id == elem.id && it.targetMode === "External");
-            res.href = rel?.target ?? res.href;
+            rawHref = rel?.target ?? '';
         }
+        if (rawHref && !isSafeHyperlinkHref(rawHref)) {
+            return this.h({
+                ns: ns.html,
+                tagName: "span",
+                className: res.className,
+                style: res.style,
+                children: res.children,
+            });
+        }
+        let href = rawHref;
         if (elem.anchor) {
-            res.href += `#${elem.anchor}`;
+            href += `#${elem.anchor}`;
         }
+        res.href = href;
         return this.h(res);
     }
     renderSmartTag(elem) {
@@ -3546,6 +4066,31 @@ section.${c}>footer { z-index: 1; }
     renderCommentRangeStart(commentStart) {
         if (!this.options.renderComments)
             return null;
+        if (this.useSidebar) {
+            const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` });
+            anchor.dataset.commentId = commentStart.id;
+            if (!this.commentAnchorElements[commentStart.id]) {
+                this.commentAnchorElements[commentStart.id] = [];
+            }
+            this.commentAnchorElements[commentStart.id].push(anchor);
+            if (this.useHighlight) {
+                const rng = new Range();
+                this.commentHighlight?.add(rng);
+                this.later(() => rng.setStart(anchor, 0));
+                this.commentMap[commentStart.id] = rng;
+            }
+            this.later(() => {
+                anchor.addEventListener("click", () => {
+                    const sidebarEl = this.sidebarCommentElements[commentStart.id];
+                    if (sidebarEl) {
+                        sidebarEl.scrollIntoView({ behavior: "smooth", block: "center" });
+                        sidebarEl.classList.add(`${this.className}-comment-focused`);
+                        setTimeout(() => sidebarEl.classList.remove(`${this.className}-comment-focused`), 2000);
+                    }
+                });
+            });
+            return anchor;
+        }
         const rng = new Range();
         this.commentHighlight?.add(rng);
         const result = this.h({ tagName: "#comment", children: [`start of comment #${commentStart.id}`] });
@@ -3556,6 +4101,15 @@ section.${c}>footer { z-index: 1; }
     renderCommentRangeEnd(commentEnd) {
         if (!this.options.renderComments)
             return null;
+        if (this.useSidebar) {
+            const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-end` });
+            anchor.dataset.commentId = commentEnd.id;
+            if (this.useHighlight) {
+                const rng = this.commentMap[commentEnd.id];
+                this.later(() => rng?.setEnd(anchor, 0));
+            }
+            return anchor;
+        }
         const rng = this.commentMap[commentEnd.id];
         const result = this.h({ tagName: "#comment", children: [`end of comment #${commentEnd.id}`] });
         this.later(() => rng?.setEnd(result, 0));
@@ -3564,6 +4118,9 @@ section.${c}>footer { z-index: 1; }
     renderCommentReference(commentRef) {
         if (!this.options.renderComments)
             return null;
+        if (this.useSidebar) {
+            return this.h({ tagName: "#comment", children: [`comment ref #${commentRef.id}`] });
+        }
         var comment = this.document.commentsPart?.commentMap[commentRef.id];
         if (!comment)
             return null;
@@ -3580,15 +4137,6 @@ section.${c}>footer { z-index: 1; }
                 commentRefEl,
                 commentsContainerEl
             ] });
-    }
-    renderAltChunk(elem) {
-        if (!this.options.renderAltChunks)
-            return null;
-        var result = this.h({ tagName: "iframe" });
-        this.tasks.push(this.document.loadAltChunk(elem.id, this.currentPart).then(x => {
-            result.srcdoc = x;
-        }));
-        return result;
     }
     renderDrawing(elem) {
         var result = this.toHTML(elem, ns.html, "div");
@@ -3619,20 +4167,128 @@ section.${c}>footer { z-index: 1; }
         return this.h(elem.text);
     }
     renderDeletedText(elem) {
-        return this.options.renderChanges ? this.renderText(elem) : null;
+        return (this.showChanges && this.options.changes?.showDeletions !== false)
+            ? this.renderText(elem)
+            : null;
     }
     renderBreak(elem) {
         return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
     }
     renderInserted(elem) {
-        if (this.options.renderChanges)
-            return this.renderContainer(elem, "ins");
+        if (this.showChanges && this.options.changes?.showInsertions !== false) {
+            const node = this.renderContainer(elem, "ins");
+            this.applyChangeAttributes(node, elem, "insertion");
+            return node;
+        }
         return this.renderElements(elem.children);
     }
     renderDeleted(elem) {
-        if (this.options.renderChanges)
-            return this.renderContainer(elem, "del");
+        if (this.showChanges && this.options.changes?.showDeletions !== false) {
+            const node = this.renderContainer(elem, "del");
+            this.applyChangeAttributes(node, elem, "deletion");
+            return node;
+        }
         return null;
+    }
+    renderMoveFrom(elem) {
+        if (!this.showChanges || this.options.changes?.showMoves === false) {
+            return null;
+        }
+        const node = this.renderContainer(elem, "span");
+        node.classList.add(`${this.className}-move-from`);
+        this.applyChangeAttributes(node, elem, "move");
+        this.registerMove(node, elem, "from");
+        return node;
+    }
+    renderMoveTo(elem) {
+        if (!this.showChanges || this.options.changes?.showMoves === false) {
+            return this.renderElements(elem.children);
+        }
+        const node = this.renderContainer(elem, "span");
+        node.classList.add(`${this.className}-move-to`);
+        this.applyChangeAttributes(node, elem, "move");
+        this.registerMove(node, elem, "to");
+        return node;
+    }
+    registerMove(node, elem, half) {
+        const id = elem.revision?.id;
+        if (!id)
+            return;
+        node.dataset.moveId = id;
+        const pair = this.moveElements.get(id) ?? {};
+        pair[half] = node;
+        this.moveElements.set(id, pair);
+        this.later(() => {
+            node.addEventListener("click", (ev) => {
+                const entry = this.moveElements.get(id);
+                const counterpart = half === "from" ? entry?.to : entry?.from;
+                if (counterpart) {
+                    ev.preventDefault();
+                    counterpart.scrollIntoView({ behavior: "smooth", block: "center" });
+                }
+            });
+        });
+    }
+    applyChangeAttributes(node, elem, kind) {
+        const rev = elem.revision;
+        if (!rev)
+            return;
+        if (rev.id)
+            node.dataset.changeId = rev.id;
+        if (rev.author)
+            node.dataset.author = rev.author;
+        if (rev.date)
+            node.dataset.date = rev.date;
+        node.dataset.changeKind = kind;
+        if (rev.author && this.options.changes?.colorByAuthor !== false) {
+            const idx = this.getAuthorIndex(rev.author);
+            node.classList.add(`${this.className}-change-author-${idx}`);
+        }
+        this.changeElements.push(node);
+        this.changeMeta.push({
+            el: node,
+            id: rev.id,
+            kind,
+            author: rev.author,
+            date: rev.date,
+            summary: this.summarizeChange(node, kind),
+        });
+    }
+    summarizeChange(node, kind) {
+        const MAX = 80;
+        const truncate = (s) => {
+            const clean = s.replace(/\s+/g, " ").trim();
+            return clean.length > MAX ? clean.slice(0, MAX - 1) + "…" : clean;
+        };
+        switch (kind) {
+            case "insertion":
+            case "move": {
+                const text = truncate(node.textContent ?? "");
+                return text ? `Inserted: "${text}"` : "Inserted content";
+            }
+            case "deletion": {
+                const text = truncate(node.textContent ?? "");
+                return text ? `Deleted: "${text}"` : "Deleted content";
+            }
+            case "paragraphMark":
+                return "Paragraph mark changed";
+            case "rowInsertion":
+                return "Row inserted";
+            case "rowDeletion":
+                return "Row deleted";
+            case "formatting": {
+                const title = node.getAttribute("title");
+                return title ?? "Formatting changed";
+            }
+        }
+    }
+    getAuthorIndex(author) {
+        let idx = this.changeAuthorIndex.get(author);
+        if (idx === undefined) {
+            idx = this.changeAuthorIndex.size % HtmlRenderer.CHANGE_PALETTE_SIZE;
+            this.changeAuthorIndex.set(author, idx);
+        }
+        return idx;
     }
     renderSymbol(elem) {
         return this.h({ tagName: "span", children: [String.fromCharCode(elem.char)], style: { fontFamily: elem.font } });
@@ -3667,7 +4323,40 @@ section.${c}>footer { z-index: 1; }
         const result = this.toHTML(elem, ns.html, "span", children);
         if (elem.id)
             result.id = elem.id;
+        this.applyFormattingRevision(result, elem);
         return result;
+    }
+    applyFormattingRevision(node, elem) {
+        const fr = elem.formattingRevision;
+        if (!fr)
+            return;
+        if (!this.showChanges || this.options.changes?.showFormatting === false)
+            return;
+        const c = this.className;
+        node.classList.add(`${c}-formatting-revision`);
+        if (fr.id)
+            node.dataset.changeId = fr.id;
+        if (fr.author)
+            node.dataset.author = fr.author;
+        if (fr.date)
+            node.dataset.date = fr.date;
+        if (fr.author && this.options.changes?.colorByAuthor !== false) {
+            node.classList.add(`${c}-change-author-${this.getAuthorIndex(fr.author)}`);
+        }
+        const changed = fr.changedProps && fr.changedProps.length
+            ? fr.changedProps.join(", ")
+            : "formatting";
+        const who = fr.author ? `${fr.author} changed` : "Changed";
+        node.setAttribute("title", `${who}: ${changed}`);
+        node.dataset.changeKind = "formatting";
+        if (fr.id)
+            node.dataset.changeId = fr.id;
+        this.changeElements.push(node);
+        this.changeMeta.push({
+            el: node, id: fr.id, kind: "formatting",
+            author: fr.author, date: fr.date,
+            summary: `${who}: ${changed}`,
+        });
     }
     renderTable(elem) {
         this.tableCellPositions.push(this.currentCellPosition);
@@ -3695,7 +4384,41 @@ section.${c}>footer { z-index: 1; }
         if (elem.gridAfter)
             children.push(this.renderTableCellPlaceholder(elem.gridAfter));
         this.currentCellPosition.row++;
-        return this.toHTML(elem, ns.html, "tr", children);
+        const tr = this.toHTML(elem, ns.html, "tr", children);
+        if (this.showChanges && elem.rowRevisionKind) {
+            this.applyRowRevision(tr, elem);
+        }
+        this.applyFormattingRevision(tr, elem);
+        return tr;
+    }
+    applyRowRevision(tr, elem) {
+        const kind = elem.rowRevisionKind;
+        if (!kind)
+            return;
+        if (kind === "inserted" && this.options.changes?.showInsertions === false)
+            return;
+        if (kind === "deleted" && this.options.changes?.showDeletions === false)
+            return;
+        const c = this.className;
+        tr.classList.add(`${c}-row-${kind}`);
+        const rev = elem.revision;
+        if (rev?.id)
+            tr.dataset.changeId = rev.id;
+        if (rev?.author)
+            tr.dataset.author = rev.author;
+        if (rev?.date)
+            tr.dataset.date = rev.date;
+        const metaKind = kind === "inserted" ? "rowInsertion" : "rowDeletion";
+        tr.dataset.changeKind = metaKind;
+        if (rev?.author && this.options.changes?.colorByAuthor !== false) {
+            tr.classList.add(`${c}-change-author-${this.getAuthorIndex(rev.author)}`);
+        }
+        this.changeElements.push(tr);
+        this.changeMeta.push({
+            el: tr, id: rev?.id, kind: metaKind,
+            author: rev?.author, date: rev?.date,
+            summary: this.summarizeChange(tr, metaKind),
+        });
     }
     renderTableCellPlaceholder(colSpan) {
         return this.h({ tagName: "td", colSpan, style: { border: "none" } });
@@ -3867,11 +4590,26 @@ section.${c}>footer { z-index: 1; }
             "tab": "\\9",
             "space": "\\a0",
         };
-        var result = text.replace(/%\d*/g, s => {
-            let lvl = parseInt(s.substring(1), 10) - 1;
-            return `"counter(${this.numberingCounter(id, lvl)}, ${numformat})"`;
-        });
-        return `"${result}${suffMap[suff] ?? ""}"`;
+        const parts = [];
+        let last = 0;
+        const re = /%\d+/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            if (m.index > last) {
+                parts.push(`"${escapeCssStringContent(text.slice(last, m.index))}"`);
+            }
+            const lvl = parseInt(m[0].substring(1), 10) - 1;
+            parts.push(`counter(${this.numberingCounter(id, lvl)}, ${numformat})`);
+            last = re.lastIndex;
+        }
+        if (last < text.length) {
+            parts.push(`"${escapeCssStringContent(text.slice(last))}"`);
+        }
+        const suffToken = suffMap[suff];
+        if (suffToken) {
+            parts.push(`"${suffToken}"`);
+        }
+        return parts.length > 0 ? parts.join(' ') : '""';
     }
     numFormatToCssValue(format) {
         var mapping = {
@@ -3910,7 +4648,7 @@ section.${c}>footer { z-index: 1; }
             taiwaneseCountingThousand: "cjk-ideographic",
             taiwaneseDigital: "cjk-decimal",
         };
-        return mapping[format] ?? format;
+        return mapping[format] ?? 'decimal';
     }
     refreshTabStops() {
         if (!this.options.experimental)
@@ -3937,12 +4675,371 @@ section.${c}>footer { z-index: 1; }
     later(func) {
         this.postRenderTasks.push(func);
     }
+    finalizeChangesRendering(result) {
+        const c = this.className;
+        const opts = this.options.changes ?? {};
+        if (opts.changeBar !== false) {
+            for (const el of this.changeElements) {
+                const block = this.findBlockAncestor(el);
+                if (!block)
+                    continue;
+                block.classList.add(`${c}-change-bar`);
+                if (!block.style.color) {
+                    const match = Array.from(el.classList).find(n => n.startsWith(`${c}-change-author-`));
+                    if (match)
+                        block.classList.add(match);
+                }
+            }
+        }
+        if (opts.legend !== false && this.changeAuthorIndex.size > 0) {
+            const legend = this.buildLegend();
+            if (legend) {
+                const wrapper = this.findWrapper(result);
+                if (wrapper) {
+                    wrapper.insertBefore(legend, wrapper.firstChild);
+                }
+                else if (result.length) {
+                    const insertAt = result.findIndex(n => n.nodeName !== "STYLE" && n.nodeType === 1);
+                    if (insertAt >= 0)
+                        result.splice(insertAt, 0, legend);
+                    else
+                        result.push(legend);
+                }
+            }
+        }
+        this.extendSidebarWithChanges();
+    }
+    extendSidebarWithChanges() {
+        const c = this.className;
+        const opts = this.options.changes ?? {};
+        if (opts.sidebarCards === false)
+            return;
+        if (!this.useSidebar || !this.sidebarContainer)
+            return;
+        const content = this.sidebarContainer.querySelector(`.${c}-sidebar-content`);
+        if (!content)
+            return;
+        const seen = new Set();
+        const unique = this.changeMeta.filter(m => {
+            if (!m.id || seen.has(m.id))
+                return false;
+            seen.add(m.id);
+            return true;
+        });
+        for (const meta of unique) {
+            const card = this.buildRevisionCard(meta);
+            content.appendChild(card);
+            if (meta.id)
+                this.revisionCardElements.set(meta.id, card);
+        }
+    }
+    buildRevisionCard(meta) {
+        const c = this.className;
+        const opts = this.options.changes ?? {};
+        const authorIdxClass = meta.author && opts.colorByAuthor !== false
+            ? `${c}-change-author-${this.getAuthorIndex(meta.author)}`
+            : "";
+        const headerChildren = [
+            this.h({ tagName: "span", className: `${c}-comment-author ${authorIdxClass}`, children: [meta.author ?? "Unknown"] }),
+            this.h({ tagName: "span", className: `${c}-comment-date`, children: [meta.date ? new Date(meta.date).toLocaleString() : ""] }),
+            this.h({ tagName: "span", className: `${c}-revision-kind`, children: [this.kindLabel(meta.kind)] }),
+        ];
+        const card = this.h({
+            tagName: "div",
+            className: `${c}-sidebar-comment ${c}-revision-card`,
+            children: [
+                this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
+                this.h({ tagName: "div", className: `${c}-comment-body`, children: [meta.summary] }),
+            ]
+        });
+        card.addEventListener("click", () => {
+            meta.el.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+        return card;
+    }
+    kindLabel(kind) {
+        switch (kind) {
+            case "insertion": return "Inserted";
+            case "deletion": return "Deleted";
+            case "move": return "Moved";
+            case "formatting": return "Formatted";
+            case "paragraphMark": return "Paragraph mark";
+            case "rowInsertion": return "Row added";
+            case "rowDeletion": return "Row removed";
+        }
+    }
+    findBlockAncestor(el) {
+        let cur = el.parentElement;
+        while (cur) {
+            const tag = cur.tagName;
+            if (tag === "P" || tag === "LI" || tag === "TR" || tag === "H1" || tag === "H2" ||
+                tag === "H3" || tag === "H4" || tag === "H5" || tag === "H6") {
+                return cur;
+            }
+            if (tag === "SECTION" || tag === "BODY" || tag === "ARTICLE")
+                return null;
+            cur = cur.parentElement;
+        }
+        return null;
+    }
+    findWrapper(result) {
+        const wrapperClass = `${this.className}-wrapper`;
+        for (const node of result) {
+            if (node instanceof HTMLElement && node.classList.contains(wrapperClass)) {
+                return node;
+            }
+        }
+        return null;
+    }
+    buildLegend() {
+        const c = this.className;
+        const items = [
+            this.h({ tagName: "span", className: `${c}-legend-label`, children: ["Changes by:"] })
+        ];
+        const authors = [...this.changeAuthorIndex.entries()].sort((a, b) => a[1] - b[1]);
+        for (const [author, idx] of authors) {
+            items.push(this.h({
+                tagName: "span",
+                className: `${c}-legend-item`,
+                children: [
+                    this.h({ tagName: "span", className: `${c}-legend-swatch ${c}-change-author-${idx}`, style: { background: "currentColor" } }),
+                    author
+                ]
+            }));
+        }
+        return this.h({ tagName: "div", className: `${c}-legend`, children: items });
+    }
 }
+HtmlRenderer.CHANGE_PALETTE_SIZE = 8;
 function findParent(elem, type) {
     var parent = elem.parent;
     while (parent != null && parent.type != type)
         parent = parent.parent;
     return parent;
+}
+
+const STYLE_MARKER = 'data-docxjs-thumbnails';
+function findScrollingAncestor(el) {
+    let cur = el?.parentElement ?? null;
+    while (cur) {
+        const cs = cur.ownerDocument.defaultView?.getComputedStyle(cur);
+        if (cs) {
+            const oy = cs.overflowY;
+            if ((oy === 'auto' || oy === 'scroll') && cur.scrollHeight > cur.clientHeight) {
+                return cur;
+            }
+        }
+        cur = cur.parentElement;
+    }
+    return null;
+}
+function ensureStyle(doc, className, activeClassName) {
+    const head = doc.head;
+    if (!head)
+        return;
+    if (head.querySelector(`style[${STYLE_MARKER}]`))
+        return;
+    const style = doc.createElement('style');
+    style.setAttribute(STYLE_MARKER, '');
+    style.textContent = `
+.${className}-thumbnail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 0.5rem auto;
+    cursor: pointer;
+    outline: none;
+}
+.${className}-thumbnail:focus-visible .${className}-thumbnail-preview {
+    box-shadow: 0 0 0 2px #4a90e2, 0 0 10px rgba(0, 0, 0, 0.5);
+}
+.${className}-thumbnail-preview {
+    overflow: hidden;
+    background: white;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    box-sizing: content-box;
+    border: 2px solid transparent;
+    position: relative;
+}
+.${className}-thumbnail-label {
+    font-size: 0.75rem;
+    color: white;
+    margin-top: 0.25rem;
+    text-align: center;
+    line-height: 1.2;
+}
+.${activeClassName} .${className}-thumbnail-preview {
+    border-color: #4a90e2;
+}
+`;
+    head.appendChild(style);
+}
+function measure(el, win) {
+    const cs = win?.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    const width = (cs ? parseFloat(cs.width) : 0) || rect.width || 0;
+    const height = (cs ? parseFloat(cs.height) : 0) || rect.height || 0;
+    const minHeight = cs ? parseFloat(cs.minHeight) || 0 : 0;
+    return { width, height, minHeight };
+}
+function paginateSection(section, win) {
+    const { width, height, minHeight } = measure(section, win);
+    const pageHeight = minHeight > 0 ? minHeight : height;
+    const pageWidth = width;
+    if (pageHeight <= 0 || height <= 0) {
+        return [{
+                section, scrollTarget: section,
+                topOffset: 0, pageWidth, pageHeight,
+            }];
+    }
+    const pageCount = Math.max(1, Math.ceil(height / pageHeight));
+    if (pageCount === 1) {
+        return [{
+                section, scrollTarget: section,
+                topOffset: 0, pageWidth, pageHeight,
+            }];
+    }
+    const cs = win?.getComputedStyle(section);
+    if (cs && cs.position === 'static') {
+        section.style.position = 'relative';
+    }
+    const pages = [];
+    for (let i = 0; i < pageCount; i++) {
+        let anchor = section.querySelector(`[data-docxjs-page-anchor="${i}"]`);
+        if (!anchor) {
+            anchor = section.ownerDocument.createElement('div');
+            anchor.setAttribute('data-docxjs-page-anchor', String(i));
+            anchor.setAttribute('aria-hidden', 'true');
+            anchor.style.cssText = [
+                'position:absolute',
+                `top:${i * pageHeight}px`,
+                'left:0',
+                `width:${pageWidth}px`,
+                `height:${pageHeight}px`,
+                'pointer-events:none',
+                'visibility:hidden',
+            ].join(';');
+            section.appendChild(anchor);
+        }
+        pages.push({
+            section, scrollTarget: anchor,
+            topOffset: i * pageHeight,
+            pageWidth, pageHeight,
+        });
+    }
+    return pages;
+}
+function renderThumbnails(mainContainer, thumbnailContainer, options) {
+    const width = options?.width ?? 120;
+    const showPageNumbers = options?.showPageNumbers ?? true;
+    const className = options?.className ?? 'docx';
+    const activeClassName = options?.activeClassName ?? `${className}-thumbnail-active`;
+    const doc = thumbnailContainer.ownerDocument;
+    const win = doc.defaultView;
+    ensureStyle(mainContainer.ownerDocument, className, activeClassName);
+    thumbnailContainer.innerHTML = '';
+    const sections = Array.from(mainContainer.querySelectorAll(`section.${className}`));
+    const pages = [];
+    for (const section of sections) {
+        for (const p of paginateSection(section, win)) {
+            pages.push(p);
+        }
+    }
+    const pairs = [];
+    for (let i = 0; i < pages.length; i++) {
+        const { section, scrollTarget, topOffset, pageWidth, pageHeight } = pages[i];
+        const pageNum = i + 1;
+        const thumb = doc.createElement('div');
+        thumb.className = `${className}-thumbnail`;
+        thumb.setAttribute('role', 'button');
+        thumb.setAttribute('tabindex', '0');
+        thumb.setAttribute('aria-label', `Go to page ${pageNum}`);
+        thumb.dataset.page = String(pageNum);
+        const preview = doc.createElement('div');
+        preview.className = `${className}-thumbnail-preview`;
+        const clone = section.cloneNode(true);
+        clone.setAttribute('aria-hidden', 'true');
+        clone.removeAttribute('id');
+        clone.style.boxShadow = 'none';
+        clone.style.margin = '0';
+        clone.style.flexShrink = '0';
+        let scale = 1;
+        let previewHeight = 0;
+        if (pageWidth > 0) {
+            scale = width / pageWidth;
+            previewHeight = pageHeight * scale;
+        }
+        preview.style.width = `${width}px`;
+        if (previewHeight > 0) {
+            preview.style.height = `${previewHeight}px`;
+        }
+        const translate = -topOffset * scale;
+        clone.style.transform = `translateY(${translate}px) scale(${scale})`;
+        clone.style.transformOrigin = '0 0';
+        preview.appendChild(clone);
+        thumb.appendChild(preview);
+        if (showPageNumbers) {
+            const label = doc.createElement('div');
+            label.className = `${className}-thumbnail-label`;
+            label.textContent = String(pageNum);
+            thumb.appendChild(label);
+        }
+        const goTo = () => {
+            scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+        thumb.addEventListener('click', goTo);
+        thumb.addEventListener('keydown', (ev) => {
+            const ke = ev;
+            if (ke.key === 'Enter' || ke.key === ' ') {
+                ke.preventDefault();
+                goTo();
+            }
+        });
+        thumbnailContainer.appendChild(thumb);
+        pairs.push({ scrollTarget, thumb });
+    }
+    let observer = null;
+    const IO = win?.IntersectionObserver ??
+        globalThis.IntersectionObserver;
+    if (IO && pairs.length > 0) {
+        const scrollRoot = findScrollingAncestor(mainContainer);
+        const visibility = new Map();
+        observer = new IO((entries) => {
+            for (const entry of entries) {
+                visibility.set(entry.target, entry.intersectionRatio);
+            }
+            let bestIdx = -1;
+            let bestRatio = -1;
+            for (let i = 0; i < pairs.length; i++) {
+                const r = visibility.get(pairs[i].scrollTarget) ?? 0;
+                if (r > bestRatio) {
+                    bestRatio = r;
+                    bestIdx = i;
+                }
+            }
+            for (let i = 0; i < pairs.length; i++) {
+                pairs[i].thumb.classList.toggle(activeClassName, i === bestIdx && bestRatio > 0);
+            }
+        }, {
+            root: scrollRoot,
+            rootMargin: '-45% 0px -45% 0px',
+            threshold: [0, 0.01, 0.5, 1],
+        });
+        for (const { scrollTarget } of pairs)
+            observer.observe(scrollTarget);
+    }
+    return {
+        dispose() {
+            if (observer) {
+                observer.disconnect();
+                observer = null;
+            }
+            thumbnailContainer.innerHTML = '';
+            for (const section of sections) {
+                section.querySelectorAll('[data-docxjs-page-anchor]').forEach(n => n.remove());
+            }
+        },
+    };
 }
 
 const defaultOptions = {
@@ -3964,15 +5061,37 @@ const defaultOptions = {
     useBase64URL: false,
     renderChanges: false,
     renderComments: false,
-    renderAltChunks: true,
+    comments: {
+        sidebar: true,
+        highlight: true,
+        layout: 'anchored',
+    },
+    changes: {
+        show: false,
+        showInsertions: true,
+        showDeletions: true,
+        showMoves: true,
+        showFormatting: true,
+        colorByAuthor: true,
+        changeBar: true,
+        legend: true,
+        sidebarCards: true,
+    },
     h: h
 };
-function parseAsync(data, userOptions) {
+function mergeOptions(userOptions) {
     const ops = { ...defaultOptions, ...userOptions };
+    if (userOptions?.renderChanges && userOptions?.changes?.show === undefined) {
+        ops.changes = { ...defaultOptions.changes, ...userOptions.changes, show: true };
+    }
+    return ops;
+}
+function parseAsync(data, userOptions) {
+    const ops = mergeOptions(userOptions);
     return WordDocument.load(data, new DocumentParser(ops), ops);
 }
 async function renderDocument(document, userOptions) {
-    const ops = { ...defaultOptions, ...userOptions };
+    const ops = mergeOptions(userOptions);
     const renderer = new HtmlRenderer();
     return await renderer.render(document, ops);
 }
@@ -3989,5 +5108,5 @@ async function renderAsync(data, bodyContainer, styleContainer, userOptions) {
     return doc;
 }
 
-export { defaultOptions, parseAsync, renderAsync, renderDocument };
+export { defaultOptions, escapeCssStringContent, isSafeCssIdent, isSafeHyperlinkHref, keyBy, mergeDeep, parseAsync, renderAsync, renderDocument, renderThumbnails, sanitizeCssColor, sanitizeFontFamily };
 //# sourceMappingURL=docx-preview.mjs.map
