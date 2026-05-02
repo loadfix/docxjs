@@ -1521,6 +1521,17 @@
         }
         return rev;
     }
+    function classNameOfCnfStyle(c) {
+        const val = globalXmlParser.attr(c, "val");
+        if (!val)
+            return '';
+        const classes = [
+            'first-row', 'last-row', 'first-col', 'last-col',
+            'odd-col', 'even-col', 'odd-row', 'even-row',
+            'ne-cell', 'nw-cell', 'se-cell', 'sw-cell'
+        ];
+        return classes.filter((_, i) => val[i] == '1').join(' ');
+    }
     var autos = {
         shd: "inherit",
         color: "black",
@@ -2920,13 +2931,7 @@
             return type == "fixed" ? "fixed" : "auto";
         }
         static classNameOfCnfStyle(c) {
-            const val = globalXmlParser.attr(c, "val");
-            const classes = [
-                'first-row', 'last-row', 'first-col', 'last-col',
-                'odd-col', 'even-col', 'odd-row', 'even-row',
-                'ne-cell', 'nw-cell', 'se-cell', 'sw-cell'
-            ];
-            return classes.filter((_, i) => val[i] == '1').join(' ');
+            return classNameOfCnfStyle(c);
         }
         static valueOfJc(c) {
             var type = globalXmlParser.attr(c, "val");
@@ -5237,6 +5242,7 @@ section.${c}>footer { z-index: 1; }
     }
 
     exports.applyVisualPageBreaks = applyVisualPageBreaks;
+    exports.classNameOfCnfStyle = classNameOfCnfStyle;
     exports.defaultOptions = defaultOptions;
     exports.escapeCssStringContent = escapeCssStringContent;
     exports.isSafeCssIdent = isSafeCssIdent;

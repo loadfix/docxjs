@@ -56,6 +56,23 @@ function parseFormattingRevision(elem: Element): FormattingRevision {
 	return rev;
 }
 
+// Exported for unit-testing the null-attribute guard added for upstream
+// issue #196 — when a `<w:cnfStyle/>` element appears without a `w:val`
+// attribute, `xml.attr` returns `null` and the previous indexing into that
+// `null` crashed the parser. The guard returns '' so callers get an empty
+// className instead.
+export function classNameOfCnfStyle(c: Element): string {
+	const val = xml.attr(c, "val");
+	if (!val) return '';
+	const classes = [
+		'first-row', 'last-row', 'first-col', 'last-col',
+		'odd-col', 'even-col', 'odd-row', 'even-row',
+		'ne-cell', 'nw-cell', 'se-cell', 'sw-cell'
+	];
+
+	return classes.filter((_, i) => val[i] == '1').join(' ');
+}
+
 export var autos = {
 	shd: "inherit",
 	color: "black",
@@ -1779,14 +1796,7 @@ class values {
 	}
 
 	static classNameOfCnfStyle(c: Element) {
-		const val = xml.attr(c, "val");
-		const classes = [
-			'first-row', 'last-row', 'first-col', 'last-col',
-			'odd-col', 'even-col', 'odd-row', 'even-row',
-			'ne-cell', 'nw-cell', 'se-cell', 'sw-cell'
-		];
-
-		return classes.filter((_, i) => val[i] == '1').join(' ');
+		return classNameOfCnfStyle(c);
 	}
 
 	static valueOfJc(c: Element) {

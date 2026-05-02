@@ -6,6 +6,9 @@ import { applyVisualPageBreaks } from './page-break';
 
 export { renderThumbnails } from './thumbnails';
 export type { ThumbnailsOptions, ThumbnailsHandle } from './thumbnails';
+// Exported for the Node jsdom harness so it can exercise the null-val
+// guard for upstream issue #196 directly, without needing a crafted DOCX.
+export { classNameOfCnfStyle } from './document-parser';
 // Exported so consumers and tests can drive the pagination pass directly;
 // renderAsync calls this internally when `experimentalPageBreaks` is on.
 export { applyVisualPageBreaks } from './page-break';

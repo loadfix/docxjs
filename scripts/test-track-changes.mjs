@@ -48,6 +48,7 @@ const {
     isSafeHyperlinkHref, sanitizeCssColor, sanitizeFontFamily,
     isSafeCssIdent, escapeCssStringContent, keyBy, mergeDeep,
     sanitizeVmlColor,
+    classNameOfCnfStyle,
 } = globalThis.docx;
 
 const failures = [];
@@ -634,6 +635,61 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 17. classNameOfCnfStyle null-val guard (upstream #196) ────────────────
+// A `<w:cnfStyle/>` element without a `w:val` attribute used to crash the
+// parser ("Cannot read properties of null (reading '0')") because the code
+// indexed into the result of xml.attr(), which is null for a missing attr.
+// The fix short-circuits with ''. We exercise the helper directly with a
+// synthetic Element — no DOCX fixture needed.
+{
+    assert(
+        typeof classNameOfCnfStyle === 'function',
+        '17a: docx.classNameOfCnfStyle export should be a function',
+    );
+
+    // Synthesize <w:cnfStyle/> with no val attribute — the crash path.
+    const xmlDoc = new dom.window.DOMParser().parseFromString(
+        '<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+        '<w:cnfStyle/></w:pPr>',
+        'application/xml',
+    );
+    const cnfEl = xmlDoc.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'cnfStyle',
+    ).item(0);
+    assert(!!cnfEl, '17b: synthetic cnfStyle element should exist');
+
+    let result, threw = null;
+    try {
+        result = classNameOfCnfStyle(cnfEl);
+    } catch (e) {
+        threw = e;
+    }
+    assert(
+        threw === null,
+        `17c: classNameOfCnfStyle must not throw on missing val (got ${threw?.message})`,
+    );
+    assert(
+        result === '',
+        `17d: missing val should yield '' (got ${JSON.stringify(result)})`,
+    );
+
+    // Sanity: still produces classes when val is present.
+    const withValDoc = new dom.window.DOMParser().parseFromString(
+        '<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+        '<w:cnfStyle w:val="100000000000"/></w:pPr>',
+        'application/xml',
+    );
+    const withValEl = withValDoc.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'cnfStyle',
+    ).item(0);
+    assert(
+        classNameOfCnfStyle(withValEl) === 'first-row',
+        "17e: val='100000000000' should map to 'first-row'",
+    );
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -642,5 +698,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${16} scenarios passed`);
+    console.log(`\n✓ all ${17} scenarios passed`);
 }
