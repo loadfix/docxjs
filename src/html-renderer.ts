@@ -1341,6 +1341,13 @@ section.${c}>footer { z-index: 1; }
 
 		this.applyFormattingRevision(result, elem);
 
+		// Expose the Word-assigned paraId so consumers can correlate/navigate
+		// paragraphs by their stable DOCX identifier. The value is attacker-
+		// controlled, but dataset.* attribute-encodes it — no innerHTML sink.
+		if (elem.paraId) {
+			result.dataset.paraId = elem.paraId;
+		}
+
 		return result;
 	}
 
