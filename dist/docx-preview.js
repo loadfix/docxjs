@@ -3447,7 +3447,10 @@
         renderWrapperWithSidebar(sectionElements) {
             const c = this.className;
             const docContainer = this.h({ tagName: "div", className: `${c}-doc-container`, children: sectionElements });
-            this.sidebarContainer = this.h({ tagName: "div", className: `${c}-comment-sidebar` });
+            this.sidebarContainer = this.h({
+                tagName: "div",
+                className: `${c}-comment-sidebar ${c}-sidebar-${this.sidebarLayout}`
+            });
             const toggleBtn = this.h({
                 tagName: "button",
                 className: `${c}-sidebar-toggle`,
@@ -3529,7 +3532,6 @@
         setupSidebarScrollSync(docContainer, sidebarContent) {
             if (this.sidebarLayout === 'packed')
                 return;
-            const scroller = this.findScrollingAncestor(docContainer);
             const CARD_GAP = 8;
             const positionCards = () => {
                 const anchored = [];
@@ -3572,10 +3574,6 @@
                 cancelAnimationFrame(rafId);
                 rafId = requestAnimationFrame(positionCards);
             };
-            if (scroller) {
-                scroller.addEventListener("scroll", schedule, { passive: true });
-            }
-            globalThis.addEventListener?.("scroll", schedule, { passive: true });
             if (typeof ResizeObserver !== "undefined") {
                 const ro = new ResizeObserver(schedule);
                 ro.observe(docContainer);
@@ -3585,21 +3583,6 @@
                 }
             }
             setTimeout(positionCards, 100);
-        }
-        findScrollingAncestor(el) {
-            const win = el.ownerDocument?.defaultView ?? globalThis.window;
-            const getStyle = win?.getComputedStyle;
-            if (typeof getStyle !== 'function')
-                return null;
-            let cur = el;
-            while (cur && cur !== (el.ownerDocument?.body ?? null)) {
-                const overflowY = getStyle.call(win, cur).overflowY;
-                if ((overflowY === 'auto' || overflowY === 'scroll') && cur.scrollHeight > cur.clientHeight) {
-                    return cur;
-                }
-                cur = cur.parentElement;
-            }
-            return null;
         }
         renderSidebarComments(container) {
             const commentsPart = this.document.commentsPart;
@@ -3871,17 +3854,23 @@ section.${c}>footer { z-index: 1; }
 .${c}-wrapper { flex-flow: row !important; align-items: flex-start !important; }
 .${c}-doc-container { flex: 1; display: flex; flex-flow: column; align-items: center; min-width: 0; overflow: auto; padding: 30px; padding-bottom: 0; }
 .${c}-doc-container>section.${c} { background: white; box-shadow: 0 0 10px rgba(0, 0, 0, 0.5); margin-bottom: 30px; }
-.${c}-comment-sidebar { width: 320px; min-width: 260px; background: #fafafa; border-left: 1px solid #ddd; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow: hidden; transition: width 0.2s, min-width 0.2s, padding 0.2s; }
+.${c}-comment-sidebar { width: 320px; min-width: 260px; background: #fafafa; border-left: 1px solid #ddd; display: flex; flex-direction: column; transition: width 0.2s, min-width 0.2s, padding 0.2s; }
+/* packed mode: panel stays pinned as a short compact list at the top of the viewport. */
+.${c}-comment-sidebar.${c}-sidebar-packed { position: sticky; top: 0; height: 100vh; overflow: hidden; align-self: flex-start; }
+/* anchored mode: panel grows to match the document height and rides the same scroll container so each card stays next to its anchor. The toolbar inside it is sticky so it's always visible. */
+.${c}-comment-sidebar.${c}-sidebar-anchored { align-self: stretch; }
 .${c}-sidebar-collapsed { width: 0 !important; min-width: 0 !important; padding: 0 !important; border: none !important; overflow: hidden; }
 .${c}-sidebar-collapsed .${c}-sidebar-content,
 .${c}-sidebar-collapsed .${c}-comment-toolbar > *:not(.${c}-sidebar-toggle) { display: none; }
 .${c}-comment-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #ddd; background: #f5f5f5; flex-shrink: 0; flex-wrap: wrap; }
+.${c}-sidebar-anchored .${c}-comment-toolbar { position: sticky; top: 0; z-index: 2; }
 .${c}-sidebar-toggle { cursor: pointer; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
 .${c}-sidebar-toggle:hover { background: #e8e8e8; }
 .${c}-highlight-toggle { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
 .${c}-comment-add-btn { cursor: pointer; background: #4a90d9; color: white; border: none; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
 .${c}-comment-add-btn:hover { background: #357abd; }
-.${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
+.${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
+.${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
 .${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
 .${c}-sidebar-comment:hover { border-color: #4a90d9; box-shadow: 0 1px 4px rgba(74, 144, 217, 0.2); }
 .${c}-sidebar-reply { margin-left: 16px; border-left: 3px solid #4a90d9; background: #f8fbff; }
