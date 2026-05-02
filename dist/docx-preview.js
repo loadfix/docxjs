@@ -4822,6 +4822,91 @@ section.${c}>footer { z-index: 1; }
         return parent;
     }
 
+    const defaultMeasure = (el) => {
+        const win = el.ownerDocument.defaultView;
+        const cs = win?.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const width = (cs ? parseFloat(cs.width) : 0) || rect.width || 0;
+        const height = (cs ? parseFloat(cs.height) : 0) || rect.height || 0;
+        const minHeight = cs ? parseFloat(cs.minHeight) || 0 : 0;
+        return { width, height, minHeight };
+    };
+    const VISUAL_PAGE_MARKER = 'data-docxjs-visual-page';
+    function applyVisualPageBreaks(bodyContainer, options = {}, measureFn = defaultMeasure) {
+        const className = options.className ?? 'docx';
+        const slack = options.slack ?? 1.1;
+        const sections = Array.from(bodyContainer.querySelectorAll(`section.${className}`));
+        let inserted = 0;
+        for (const section of sections) {
+            if (section.hasAttribute(VISUAL_PAGE_MARKER))
+                continue;
+            inserted += splitSection(section, measureFn, slack);
+        }
+        return inserted;
+    }
+    function splitSection(section, measureFn, slack) {
+        const { height, minHeight } = measureFn(section);
+        const pageHeight = minHeight > 0 ? minHeight : 0;
+        if (pageHeight <= 0)
+            return 0;
+        if (height <= pageHeight * slack)
+            return 0;
+        const article = section.querySelector(':scope > article');
+        if (!article)
+            return 0;
+        const children = Array.from(article.children);
+        if (children.length === 0)
+            return 0;
+        const articleTopOffset = offsetWithinSection(article, section);
+        let inserted = 0;
+        let currentArticle = article;
+        let currentTop = articleTopOffset;
+        let runningHeight = 0;
+        let currentSection = section;
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            const { height: ch } = measureFn(child);
+            const roomLeft = pageHeight - currentTop - runningHeight;
+            const willOverflow = ch > roomLeft;
+            if (willOverflow && runningHeight > 0) {
+                const newSection = cloneSectionShell(currentSection);
+                const newArticle = cloneArticleShell(currentArticle);
+                newSection.appendChild(newArticle);
+                currentSection.parentNode.insertBefore(newSection, currentSection.nextSibling);
+                inserted++;
+                for (let j = i; j < children.length; j++) {
+                    newArticle.appendChild(children[j]);
+                }
+                currentSection = newSection;
+                currentArticle = newArticle;
+                currentTop = 0;
+                runningHeight = ch;
+                continue;
+            }
+            runningHeight += ch;
+        }
+        return inserted;
+    }
+    function offsetWithinSection(child, ancestor, measureFn) {
+        const cRect = child.getBoundingClientRect();
+        const aRect = ancestor.getBoundingClientRect();
+        const delta = cRect.top - aRect.top;
+        if (Number.isFinite(delta) && delta >= 0)
+            return delta;
+        return 0;
+    }
+    function cloneSectionShell(source) {
+        const shell = source.cloneNode(false);
+        shell.removeAttribute('id');
+        shell.setAttribute(VISUAL_PAGE_MARKER, '');
+        return shell;
+    }
+    function cloneArticleShell(source) {
+        const shell = source.cloneNode(false);
+        shell.removeAttribute('id');
+        return shell;
+    }
+
     const STYLE_MARKER = 'data-docxjs-thumbnails';
     function findScrollingAncestor(el) {
         let cur = el?.parentElement ?? null;
@@ -5065,6 +5150,7 @@ section.${c}>footer { z-index: 1; }
         useBase64URL: false,
         renderChanges: false,
         renderComments: false,
+        experimentalPageBreaks: false,
         comments: {
             sidebar: true,
             highlight: true,
@@ -5109,9 +5195,14 @@ section.${c}>footer { z-index: 1; }
             const c = n.nodeName === "STYLE" ? styleContainer : bodyContainer;
             c.appendChild(n);
         }
+        const ops = mergeOptions(userOptions);
+        if (ops.experimentalPageBreaks) {
+            applyVisualPageBreaks(bodyContainer, { className: ops.className });
+        }
         return doc;
     }
 
+    exports.applyVisualPageBreaks = applyVisualPageBreaks;
     exports.defaultOptions = defaultOptions;
     exports.escapeCssStringContent = escapeCssStringContent;
     exports.isSafeCssIdent = isSafeCssIdent;

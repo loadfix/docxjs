@@ -44,6 +44,7 @@ const umd = readFileSync(`${repo}/dist/docx-preview.js`, 'utf8');
 new Function('require', umd)(() => ({})); // require stub for any node fallback
 const {
     parseAsync, renderDocument, renderThumbnails, defaultOptions,
+    applyVisualPageBreaks,
     isSafeHyperlinkHref, sanitizeCssColor, sanitizeFontFamily,
     isSafeCssIdent, escapeCssStringContent, keyBy, mergeDeep,
 } = globalThis.docx;
@@ -420,6 +421,73 @@ async function renderFixture(path, options) {
     assert(keyed2['constructor'] === undefined, '12aa: keyBy rejects constructor key');
 }
 
+// ── 13. Experimental visual page breaks (#22) ─────────────────────────────
+// Two flavours: (a) integration through renderAsync-equivalent path is a
+// no-op in jsdom because there's no layout, so just assert nothing throws
+// and sections remain present; (b) drive applyVisualPageBreaks directly
+// with an injected measure function so we can force a split even without
+// a real browser layout.
+{
+    assert(
+        typeof applyVisualPageBreaks === 'function',
+        '13a: docx.applyVisualPageBreaks export should be a function',
+    );
+
+    // (a) jsdom path — no-op, but should not throw and should leave the
+    // existing sections intact.
+    const { container: inert } = await renderFixture('text', { experimentalPageBreaks: true });
+    const inertSections = inert.querySelectorAll('section.docx');
+    assert(inertSections.length > 0, '13b: text fixture should still render sections when experimentalPageBreaks is on');
+    const inertVisualPages = inert.querySelectorAll('section.docx[data-docxjs-visual-page]');
+    assert(
+        inertVisualPages.length === 0,
+        `13c: no visual-page splits expected in jsdom without layout (got ${inertVisualPages.length})`,
+    );
+
+    // (b) measure-injection path — build a fake section that overflows and
+    // drive the pagination helper directly.
+    const root = document.createElement('div');
+    const section = document.createElement('section');
+    section.className = 'docx';
+    const article = document.createElement('article');
+    for (let i = 0; i < 6; i++) {
+        const p = document.createElement('p');
+        p.textContent = `paragraph ${i}`;
+        article.appendChild(p);
+    }
+    section.appendChild(article);
+    root.appendChild(section);
+    document.body.appendChild(root);
+
+    // Fake measurements: section reports a height of 6× page height, each
+    // paragraph reports exactly page/3 (so 3 paragraphs fit per page).
+    const PAGE = 300;
+    const PARA = 100;
+    const heights = new Map();
+    heights.set(section, { width: 800, height: PAGE * 6, minHeight: PAGE });
+    for (const p of article.children) heights.set(p, { width: 800, height: PARA, minHeight: 0 });
+    // Article itself fills the section content area.
+    heights.set(article, { width: 800, height: PAGE * 6, minHeight: 0 });
+
+    const inserted = applyVisualPageBreaks(root, { className: 'docx' }, (el) => {
+        return heights.get(el) ?? { width: 0, height: 0, minHeight: 0 };
+    });
+
+    const sectionsAfter = root.querySelectorAll('section.docx');
+    note(`13·: forced-split produced ${sectionsAfter.length} section(s), inserted=${inserted}`);
+    assert(inserted > 0, '13d: forced overflow should insert at least one new section');
+    assert(sectionsAfter.length >= 2, `13e: expected >= 2 sections after split (got ${sectionsAfter.length})`);
+    // Injected siblings should carry the marker attribute.
+    const marked = root.querySelectorAll('section[data-docxjs-visual-page]');
+    assert(marked.length === inserted, `13f: marker attribute should be present on ${inserted} injected section(s), got ${marked.length}`);
+    // The original section should retain its class (cloneNode(false) copies attrs).
+    for (const s of sectionsAfter) {
+        assert(s.classList.contains('docx'), '13g: every split section should keep the docx class');
+    }
+
+    root.remove();
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -428,5 +496,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${12} scenarios passed`);
+    console.log(`\n✓ all ${13} scenarios passed`);
 }
