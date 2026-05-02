@@ -592,13 +592,6 @@ export class HtmlRenderer {
 			className: `${c}-comment-sidebar ${c}-sidebar-${this.sidebarLayout}`
 		}) as HTMLElement;
 
-		const toggleBtn = this.h({
-			tagName: "button",
-			className: `${c}-sidebar-toggle`,
-			children: ["Comments"],
-			title: "Toggle comments sidebar"
-		}) as HTMLButtonElement;
-
 		const highlightToggle = this.useHighlight ? this.h({
 			tagName: "label",
 			className: `${c}-highlight-toggle`,
@@ -608,7 +601,7 @@ export class HtmlRenderer {
 			]
 		}) as HTMLElement : null;
 
-		const toolbarChildren: Node[] = [toggleBtn];
+		const toolbarChildren: Node[] = [];
 		if (highlightToggle) toolbarChildren.push(highlightToggle);
 
 		const toolbar = this.h({
@@ -635,10 +628,6 @@ export class HtmlRenderer {
 		}) as HTMLElement;
 
 		this.later(() => {
-			toggleBtn.addEventListener("click", () => {
-				this.sidebarContainer.classList.toggle(`${c}-sidebar-collapsed`);
-			});
-
 			if (highlightToggle) {
 				const checkbox = highlightToggle.querySelector("input") as HTMLInputElement;
 				checkbox.addEventListener("change", () => {
@@ -851,13 +840,8 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-sidebar.${c}-sidebar-packed { position: sticky; top: 0; height: 100vh; overflow: hidden; align-self: flex-start; }
 /* anchored mode: panel grows to match the document height and rides the same scroll container so each card stays next to its anchor. The toolbar inside it is sticky so it's always visible. */
 .${c}-comment-sidebar.${c}-sidebar-anchored { align-self: stretch; }
-.${c}-sidebar-collapsed { width: 0 !important; min-width: 0 !important; padding: 0 !important; border: none !important; overflow: hidden; }
-.${c}-sidebar-collapsed .${c}-sidebar-content,
-.${c}-sidebar-collapsed .${c}-comment-toolbar > *:not(.${c}-sidebar-toggle) { display: none; }
 .${c}-comment-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #ddd; background: #f5f5f5; flex-shrink: 0; flex-wrap: wrap; }
 .${c}-sidebar-anchored .${c}-comment-toolbar { position: sticky; top: 0; z-index: 2; }
-.${c}-sidebar-toggle { cursor: pointer; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
-.${c}-sidebar-toggle:hover { background: #e8e8e8; }
 .${c}-highlight-toggle { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
 .${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
 .${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
