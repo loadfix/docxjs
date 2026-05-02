@@ -4728,6 +4728,230 @@ section.${c}>footer { z-index: 1; }
         return parent;
     }
 
+    const STYLE_MARKER = 'data-docxjs-thumbnails';
+    function findScrollingAncestor(el) {
+        let cur = el?.parentElement ?? null;
+        while (cur) {
+            const cs = cur.ownerDocument.defaultView?.getComputedStyle(cur);
+            if (cs) {
+                const oy = cs.overflowY;
+                if ((oy === 'auto' || oy === 'scroll') && cur.scrollHeight > cur.clientHeight) {
+                    return cur;
+                }
+            }
+            cur = cur.parentElement;
+        }
+        return null;
+    }
+    function ensureStyle(doc, className, activeClassName) {
+        const head = doc.head;
+        if (!head)
+            return;
+        if (head.querySelector(`style[${STYLE_MARKER}]`))
+            return;
+        const style = doc.createElement('style');
+        style.setAttribute(STYLE_MARKER, '');
+        style.textContent = `
+.${className}-thumbnail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 0.5rem auto;
+    cursor: pointer;
+    outline: none;
+}
+.${className}-thumbnail:focus-visible .${className}-thumbnail-preview {
+    box-shadow: 0 0 0 2px #4a90e2, 0 0 10px rgba(0, 0, 0, 0.5);
+}
+.${className}-thumbnail-preview {
+    overflow: hidden;
+    background: white;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    box-sizing: content-box;
+    border: 2px solid transparent;
+    position: relative;
+}
+.${className}-thumbnail-label {
+    font-size: 0.75rem;
+    color: white;
+    margin-top: 0.25rem;
+    text-align: center;
+    line-height: 1.2;
+}
+.${activeClassName} .${className}-thumbnail-preview {
+    border-color: #4a90e2;
+}
+`;
+        head.appendChild(style);
+    }
+    function measure(el, win) {
+        const cs = win?.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const width = (cs ? parseFloat(cs.width) : 0) || rect.width || 0;
+        const height = (cs ? parseFloat(cs.height) : 0) || rect.height || 0;
+        const minHeight = cs ? parseFloat(cs.minHeight) || 0 : 0;
+        return { width, height, minHeight };
+    }
+    function paginateSection(section, win) {
+        const { width, height, minHeight } = measure(section, win);
+        const pageHeight = minHeight > 0 ? minHeight : height;
+        const pageWidth = width;
+        if (pageHeight <= 0 || height <= 0) {
+            return [{
+                    section, scrollTarget: section,
+                    topOffset: 0, pageWidth, pageHeight,
+                }];
+        }
+        const pageCount = Math.max(1, Math.ceil(height / pageHeight));
+        if (pageCount === 1) {
+            return [{
+                    section, scrollTarget: section,
+                    topOffset: 0, pageWidth, pageHeight,
+                }];
+        }
+        const cs = win?.getComputedStyle(section);
+        if (cs && cs.position === 'static') {
+            section.style.position = 'relative';
+        }
+        const pages = [];
+        for (let i = 0; i < pageCount; i++) {
+            let anchor = section.querySelector(`[data-docxjs-page-anchor="${i}"]`);
+            if (!anchor) {
+                anchor = section.ownerDocument.createElement('div');
+                anchor.setAttribute('data-docxjs-page-anchor', String(i));
+                anchor.setAttribute('aria-hidden', 'true');
+                anchor.style.cssText = [
+                    'position:absolute',
+                    `top:${i * pageHeight}px`,
+                    'left:0',
+                    `width:${pageWidth}px`,
+                    `height:${pageHeight}px`,
+                    'pointer-events:none',
+                    'visibility:hidden',
+                ].join(';');
+                section.appendChild(anchor);
+            }
+            pages.push({
+                section, scrollTarget: anchor,
+                topOffset: i * pageHeight,
+                pageWidth, pageHeight,
+            });
+        }
+        return pages;
+    }
+    function renderThumbnails(mainContainer, thumbnailContainer, options) {
+        const width = options?.width ?? 120;
+        const showPageNumbers = options?.showPageNumbers ?? true;
+        const className = options?.className ?? 'docx';
+        const activeClassName = options?.activeClassName ?? `${className}-thumbnail-active`;
+        const doc = thumbnailContainer.ownerDocument;
+        const win = doc.defaultView;
+        ensureStyle(mainContainer.ownerDocument, className, activeClassName);
+        thumbnailContainer.innerHTML = '';
+        const sections = Array.from(mainContainer.querySelectorAll(`section.${className}`));
+        const pages = [];
+        for (const section of sections) {
+            for (const p of paginateSection(section, win)) {
+                pages.push(p);
+            }
+        }
+        const pairs = [];
+        for (let i = 0; i < pages.length; i++) {
+            const { section, scrollTarget, topOffset, pageWidth, pageHeight } = pages[i];
+            const pageNum = i + 1;
+            const thumb = doc.createElement('div');
+            thumb.className = `${className}-thumbnail`;
+            thumb.setAttribute('role', 'button');
+            thumb.setAttribute('tabindex', '0');
+            thumb.setAttribute('aria-label', `Go to page ${pageNum}`);
+            thumb.dataset.page = String(pageNum);
+            const preview = doc.createElement('div');
+            preview.className = `${className}-thumbnail-preview`;
+            const clone = section.cloneNode(true);
+            clone.setAttribute('aria-hidden', 'true');
+            clone.removeAttribute('id');
+            clone.style.boxShadow = 'none';
+            clone.style.margin = '0';
+            clone.style.flexShrink = '0';
+            let scale = 1;
+            let previewHeight = 0;
+            if (pageWidth > 0) {
+                scale = width / pageWidth;
+                previewHeight = pageHeight * scale;
+            }
+            preview.style.width = `${width}px`;
+            if (previewHeight > 0) {
+                preview.style.height = `${previewHeight}px`;
+            }
+            const translate = -topOffset * scale;
+            clone.style.transform = `translateY(${translate}px) scale(${scale})`;
+            clone.style.transformOrigin = '0 0';
+            preview.appendChild(clone);
+            thumb.appendChild(preview);
+            if (showPageNumbers) {
+                const label = doc.createElement('div');
+                label.className = `${className}-thumbnail-label`;
+                label.textContent = String(pageNum);
+                thumb.appendChild(label);
+            }
+            const goTo = () => {
+                scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            };
+            thumb.addEventListener('click', goTo);
+            thumb.addEventListener('keydown', (ev) => {
+                const ke = ev;
+                if (ke.key === 'Enter' || ke.key === ' ') {
+                    ke.preventDefault();
+                    goTo();
+                }
+            });
+            thumbnailContainer.appendChild(thumb);
+            pairs.push({ scrollTarget, thumb });
+        }
+        let observer = null;
+        const IO = win?.IntersectionObserver ??
+            globalThis.IntersectionObserver;
+        if (IO && pairs.length > 0) {
+            const scrollRoot = findScrollingAncestor(mainContainer);
+            const visibility = new Map();
+            observer = new IO((entries) => {
+                for (const entry of entries) {
+                    visibility.set(entry.target, entry.intersectionRatio);
+                }
+                let bestIdx = -1;
+                let bestRatio = -1;
+                for (let i = 0; i < pairs.length; i++) {
+                    const r = visibility.get(pairs[i].scrollTarget) ?? 0;
+                    if (r > bestRatio) {
+                        bestRatio = r;
+                        bestIdx = i;
+                    }
+                }
+                for (let i = 0; i < pairs.length; i++) {
+                    pairs[i].thumb.classList.toggle(activeClassName, i === bestIdx && bestRatio > 0);
+                }
+            }, {
+                root: scrollRoot,
+                rootMargin: '-45% 0px -45% 0px',
+                threshold: [0, 0.01, 0.5, 1],
+            });
+            for (const { scrollTarget } of pairs)
+                observer.observe(scrollTarget);
+        }
+        return {
+            dispose() {
+                if (observer) {
+                    observer.disconnect();
+                    observer = null;
+                }
+                thumbnailContainer.innerHTML = '';
+                for (const section of sections) {
+                    section.querySelectorAll('[data-docxjs-page-anchor]').forEach(n => n.remove());
+                }
+            },
+        };
+    }
+
     const defaultOptions = {
         ignoreHeight: false,
         ignoreWidth: false,
@@ -4799,6 +5023,7 @@ section.${c}>footer { z-index: 1; }
     exports.parseAsync = parseAsync;
     exports.renderAsync = renderAsync;
     exports.renderDocument = renderDocument;
+    exports.renderThumbnails = renderThumbnails;
 
 }));
 //# sourceMappingURL=docx-preview.js.map

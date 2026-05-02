@@ -3,6 +3,9 @@ import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
 
+export { renderThumbnails } from './thumbnails';
+export type { ThumbnailsOptions, ThumbnailsHandle } from './thumbnails';
+
 export interface CommentsOptions {
     sidebar?: boolean;
     highlight?: boolean;
