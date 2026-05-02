@@ -3131,6 +3131,9 @@
             if (this.commentHighlight && this.useHighlight) {
                 CSS.highlights.set(`${this.className}-comments`, this.commentHighlight);
             }
+            else {
+                CSS.highlights?.delete(`${this.className}-comments`);
+            }
             if (this.showChanges) {
                 this.finalizeChangesRendering(result);
             }
@@ -3448,28 +3451,11 @@
                 tagName: "div",
                 className: `${c}-comment-sidebar ${c}-sidebar-${this.sidebarLayout}`
             });
-            const highlightToggle = this.useHighlight ? this.h({
-                tagName: "label",
-                className: `${c}-highlight-toggle`,
-                children: [
-                    this.h({ tagName: "input", type: "checkbox", checked: true }),
-                    " Highlight"
-                ]
-            }) : null;
-            const toolbarChildren = [];
-            if (highlightToggle)
-                toolbarChildren.push(highlightToggle);
-            const toolbar = this.h({
-                tagName: "div",
-                className: `${c}-comment-toolbar`,
-                children: toolbarChildren
-            });
             const contentArea = this.h({
                 tagName: "div",
                 className: `${c}-sidebar-content`,
                 children: []
             });
-            this.sidebarContainer.appendChild(toolbar);
             this.sidebarContainer.appendChild(contentArea);
             this.renderSidebarComments(contentArea);
             const wrapper = this.h({
@@ -3478,21 +3464,6 @@
                 children: [docContainer, this.sidebarContainer]
             });
             this.later(() => {
-                if (highlightToggle) {
-                    const checkbox = highlightToggle.querySelector("input");
-                    checkbox.addEventListener("change", () => {
-                        if (checkbox.checked) {
-                            if (this.commentHighlight) {
-                                CSS.highlights.set(`${c}-comments`, this.commentHighlight);
-                            }
-                            docContainer.classList.remove(`${c}-no-highlight`);
-                        }
-                        else {
-                            CSS.highlights?.delete(`${c}-comments`);
-                            docContainer.classList.add(`${c}-no-highlight`);
-                        }
-                    });
-                }
                 this.setupSidebarScrollSync(docContainer, contentArea);
             });
             return wrapper;
@@ -3656,9 +3627,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-sidebar.${c}-sidebar-packed { position: sticky; top: 0; height: 100vh; overflow: hidden; align-self: flex-start; }
 /* anchored mode: panel grows to match the document height and rides the same scroll container so each card stays next to its anchor. The toolbar inside it is sticky so it's always visible. */
 .${c}-comment-sidebar.${c}-sidebar-anchored { align-self: stretch; }
-.${c}-comment-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #ddd; background: #f5f5f5; flex-shrink: 0; flex-wrap: wrap; }
-.${c}-sidebar-anchored .${c}-comment-toolbar { position: sticky; top: 0; z-index: 2; }
-.${c}-highlight-toggle { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
 .${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
 .${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
 .${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
