@@ -861,6 +861,21 @@ section.${c}>footer { z-index: 1; }
 .${c} a { color: inherit; text-decoration: inherit; }
 .${c} svg { fill: transparent; }
 .${c}-footnote-ref, .${c}-endnote-ref { font-size: 0.65em; line-height: 0; vertical-align: super; }
+/* Footnote / endnote list: hide the default browser list marker and render
+ * our own superscript counter before each <li>, so the item number matches
+ * the style of the inline footnote reference. The list-item counter
+ * automatically respects the <ol> start attribute set by page-break.ts. */
+section.${c}>ol { list-style: none; padding-left: 0; }
+section.${c}>ol>li { position: relative; padding-left: 1.25em; }
+section.${c}>ol>li::before {
+    content: counter(list-item);
+    position: absolute;
+    left: 0;
+    font-size: 0.65em;
+    line-height: 0;
+    vertical-align: super;
+    top: 0.35em;
+}
 `;
 
 		if (this.options.renderComments) {
