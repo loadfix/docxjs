@@ -31,6 +31,12 @@ export interface ThumbnailsHandle {
 }
 
 const STYLE_MARKER = 'data-docxjs-thumbnails';
+// Marker set by the page-break splitter (src/page-break.ts) on every
+// injected sibling section when `experimentalPageBreaks: true`. If any
+// section in the main container carries it, we know the splitter has
+// already produced one section per visual page — thumbnails must then
+// skip their own sub-pagination and emit one thumbnail per section.
+const VISUAL_PAGE_MARKER = 'data-docxjs-visual-page';
 
 // One visual page: the section it belongs to, its position within that
 // section's flow, and the scroll-target element used when the user clicks.
@@ -113,6 +119,18 @@ function measure(el: HTMLElement, win: Window | null): { width: number; height: 
     const height = (cs ? parseFloat(cs.height) : 0) || rect.height || 0;
     const minHeight = cs ? parseFloat(cs.minHeight) || 0 : 0;
     return { width, height, minHeight };
+}
+
+// Single-page short-circuit. Used when the page-break splitter has
+// already run and guaranteed that each section represents exactly one
+// visual page — sub-pagination would double-count.
+function singlePage(section: HTMLElement, win: Window | null): VisualPage[] {
+    const { width, height, minHeight } = measure(section, win);
+    const pageHeight = minHeight > 0 ? minHeight : height;
+    return [{
+        section, scrollTarget: section,
+        topOffset: 0, pageWidth: width, pageHeight,
+    }];
 }
 
 // Splits a rendered section into its visual pages. Returns at least one
@@ -205,10 +223,23 @@ export function renderThumbnails(
         mainContainer.querySelectorAll<HTMLElement>(`section.${className}`),
     );
 
+    // If the page-break splitter (src/page-break.ts, gated by
+    // `experimentalPageBreaks: true`) has already run, every section in the
+    // container is exactly one visual page — injected siblings carry the
+    // `data-docxjs-visual-page` attribute, and the original (first) section
+    // is also one page by construction. Short-circuit to one thumbnail per
+    // section instead of re-paginating, which would otherwise double-count.
+    const splitterRan = mainContainer.querySelector(
+        `section[${VISUAL_PAGE_MARKER}]`,
+    ) !== null;
+
     // Expand each section into its visual pages.
     const pages: VisualPage[] = [];
     for (const section of sections) {
-        for (const p of paginateSection(section, win)) {
+        const sectionPages = splitterRan
+            ? singlePage(section, win)
+            : paginateSection(section, win);
+        for (const p of sectionPages) {
             pages.push(p);
         }
     }
