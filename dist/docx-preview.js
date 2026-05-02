@@ -48,6 +48,41 @@
     function encloseFontFamily(fontFamily) {
         return /^[^"'].*\s.*[^"']$/.test(fontFamily) ? `'${fontFamily}'` : fontFamily;
     }
+    function sanitizeFontFamily(value) {
+        if (typeof value !== 'string')
+            return 'sans-serif';
+        const cleaned = value.replace(/["'\\;{}@<>]/g, '').trim();
+        if (!cleaned)
+            return 'sans-serif';
+        return `'${cleaned}'`;
+    }
+    const HEX_COLOR_RE = /^[0-9A-Fa-f]{3,8}$/;
+    const CSS_FN_COLOR_RE = /^(rgb|rgba|hsl|hsla)\(\s*[-0-9.,%\s/deg]+\s*\)$/i;
+    function sanitizeCssColor(value) {
+        if (typeof value !== 'string')
+            return null;
+        const v = value.trim();
+        if (!v)
+            return null;
+        if (HEX_COLOR_RE.test(v))
+            return `#${v}`;
+        if (v.startsWith('#') && HEX_COLOR_RE.test(v.slice(1)))
+            return v;
+        if (CSS_FN_COLOR_RE.test(v))
+            return v;
+        return null;
+    }
+    const SAFE_CSS_IDENT_RE = /^[A-Za-z0-9_]+$/;
+    function isSafeCssIdent(value) {
+        return typeof value === 'string' && SAFE_CSS_IDENT_RE.test(value);
+    }
+    function escapeCssStringContent(value) {
+        return value
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\A ')
+            .replace(/\r/g, '\\D ');
+    }
     function splitPath(path) {
         let si = path.lastIndexOf('/') + 1;
         let folder = si == 0 ? "" : path.substring(0, si);
@@ -64,11 +99,19 @@
             return `${base}${path}`;
         }
     }
+    const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
     function keyBy(array, by) {
-        return array.reduce((a, x) => {
-            a[by(x)] = x;
-            return a;
-        }, {});
+        const result = Object.create(null);
+        for (const x of array) {
+            const k = by(x);
+            if (k == null)
+                continue;
+            const s = String(k);
+            if (UNSAFE_KEYS.has(s))
+                continue;
+            result[s] = x;
+        }
+        return result;
     }
     function blobToBase64(blob) {
         return new Promise((resolve, reject) => {
@@ -90,6 +133,10 @@
         const source = sources.shift();
         if (isObject(target) && isObject(source)) {
             for (const key in source) {
+                if (UNSAFE_KEYS.has(key))
+                    continue;
+                if (!Object.prototype.hasOwnProperty.call(source, key))
+                    continue;
                 if (isObject(source[key])) {
                     const val = target[key] ?? (target[key] = {});
                     mergeDeep(val, source[key]);
@@ -3035,6 +3082,25 @@
         return classNames.filter(Boolean).join(" ");
     }
 
+    const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
+    function isSafeHyperlinkHref(raw) {
+        if (raw == null)
+            return true;
+        if (typeof raw !== 'string')
+            return false;
+        const trimmed = raw.trim();
+        if (trimmed === '')
+            return true;
+        if (trimmed.startsWith('#'))
+            return true;
+        try {
+            const parsed = new URL(trimmed, 'http://docxjs.invalid/');
+            return SAFE_HREF_SCHEMES.has(parsed.protocol);
+        }
+        catch {
+            return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+        }
+    }
     class HtmlRenderer {
         constructor() {
             this.className = "docx";
@@ -3146,17 +3212,22 @@
             const variables = {};
             const fontScheme = themePart.theme?.fontScheme;
             if (fontScheme) {
-                if (fontScheme.majorFont) {
-                    variables['--docx-majorHAnsi-font'] = fontScheme.majorFont.latinTypeface;
+                if (fontScheme.majorFont?.latinTypeface) {
+                    variables['--docx-majorHAnsi-font'] = sanitizeFontFamily(fontScheme.majorFont.latinTypeface);
                 }
-                if (fontScheme.minorFont) {
-                    variables['--docx-minorHAnsi-font'] = fontScheme.minorFont.latinTypeface;
+                if (fontScheme.minorFont?.latinTypeface) {
+                    variables['--docx-minorHAnsi-font'] = sanitizeFontFamily(fontScheme.minorFont.latinTypeface);
                 }
             }
             const colorScheme = themePart.theme?.colorScheme;
             if (colorScheme) {
-                for (let [k, v] of Object.entries(colorScheme.colors)) {
-                    variables[`--docx-${k}-color`] = `#${v}`;
+                for (const [k, v] of Object.entries(colorScheme.colors)) {
+                    if (!isSafeCssIdent(k))
+                        continue;
+                    const color = sanitizeCssColor(v);
+                    if (!color)
+                        continue;
+                    variables[`--docx-${k}-color`] = color;
                 }
             }
             const cssText = this.styleToString(`.${this.className}`, variables);
@@ -3701,15 +3772,21 @@ section.${c}>footer { z-index: 1; }
             var styleText = "";
             var resetCounters = [];
             for (var num of numberings) {
+                if (!isSafeCssIdent(String(num.id)) || !Number.isInteger(num.level)) {
+                    continue;
+                }
                 var selector = `p.${this.numberingClass(num.id, num.level)}`;
                 var listStyleType = "none";
                 if (num.bullet) {
+                    if (!isSafeCssIdent(String(num.bullet.src))) {
+                        continue;
+                    }
                     let valiable = `--${this.className}-${num.bullet.src}`.toLowerCase();
                     styleText += this.styleToString(`${selector}:before`, {
                         "content": "' '",
                         "display": "inline-block",
                         "background": `var(${valiable})`
-                    }, num.bullet.style);
+                    });
                     try {
                         const imgData = await this.document.loadNumberingImage(num.bullet.src);
                         styleText += `${this.rootSelector} { ${valiable}: url(${imgData}) }`;
@@ -3901,7 +3978,7 @@ section.${c}>footer { z-index: 1; }
                 case DomType.CommentReference:
                     return this.renderCommentReference(elem);
                 case DomType.AltChunk:
-                    return this.renderAltChunk(elem);
+                    return null;
             }
             return null;
         }
@@ -3966,14 +4043,25 @@ section.${c}>footer { z-index: 1; }
         }
         renderHyperlink(elem) {
             const res = this.toH(elem, ns.html, "a");
-            res.href = '';
+            let rawHref = '';
             if (elem.id) {
                 const rel = this.document.documentPart.rels.find(it => it.id == elem.id && it.targetMode === "External");
-                res.href = rel?.target ?? res.href;
+                rawHref = rel?.target ?? '';
             }
+            if (rawHref && !isSafeHyperlinkHref(rawHref)) {
+                return this.h({
+                    ns: ns.html,
+                    tagName: "span",
+                    className: res.className,
+                    style: res.style,
+                    children: res.children,
+                });
+            }
+            let href = rawHref;
             if (elem.anchor) {
-                res.href += `#${elem.anchor}`;
+                href += `#${elem.anchor}`;
             }
+            res.href = href;
             return this.h(res);
         }
         renderSmartTag(elem) {
@@ -4053,15 +4141,6 @@ section.${c}>footer { z-index: 1; }
                     commentRefEl,
                     commentsContainerEl
                 ] });
-        }
-        renderAltChunk(elem) {
-            if (!this.options.renderAltChunks)
-                return null;
-            var result = this.h({ tagName: "iframe" });
-            this.tasks.push(this.document.loadAltChunk(elem.id, this.currentPart).then(x => {
-                result.srcdoc = x;
-            }));
-            return result;
         }
         renderDrawing(elem) {
             var result = this.toHTML(elem, ns.html, "div");
@@ -4515,11 +4594,26 @@ section.${c}>footer { z-index: 1; }
                 "tab": "\\9",
                 "space": "\\a0",
             };
-            var result = text.replace(/%\d*/g, s => {
-                let lvl = parseInt(s.substring(1), 10) - 1;
-                return `"counter(${this.numberingCounter(id, lvl)}, ${numformat})"`;
-            });
-            return `"${result}${suffMap[suff] ?? ""}"`;
+            const parts = [];
+            let last = 0;
+            const re = /%\d+/g;
+            let m;
+            while ((m = re.exec(text)) !== null) {
+                if (m.index > last) {
+                    parts.push(`"${escapeCssStringContent(text.slice(last, m.index))}"`);
+                }
+                const lvl = parseInt(m[0].substring(1), 10) - 1;
+                parts.push(`counter(${this.numberingCounter(id, lvl)}, ${numformat})`);
+                last = re.lastIndex;
+            }
+            if (last < text.length) {
+                parts.push(`"${escapeCssStringContent(text.slice(last))}"`);
+            }
+            const suffToken = suffMap[suff];
+            if (suffToken) {
+                parts.push(`"${suffToken}"`);
+            }
+            return parts.length > 0 ? parts.join(' ') : '""';
         }
         numFormatToCssValue(format) {
             var mapping = {
@@ -4558,7 +4652,7 @@ section.${c}>footer { z-index: 1; }
                 taiwaneseCountingThousand: "cjk-ideographic",
                 taiwaneseDigital: "cjk-decimal",
             };
-            return mapping[format] ?? format;
+            return mapping[format] ?? 'decimal';
         }
         refreshTabStops() {
             if (!this.options.experimental)
@@ -4971,7 +5065,6 @@ section.${c}>footer { z-index: 1; }
         useBase64URL: false,
         renderChanges: false,
         renderComments: false,
-        renderAltChunks: true,
         comments: {
             sidebar: true,
             highlight: true,
@@ -5020,10 +5113,17 @@ section.${c}>footer { z-index: 1; }
     }
 
     exports.defaultOptions = defaultOptions;
+    exports.escapeCssStringContent = escapeCssStringContent;
+    exports.isSafeCssIdent = isSafeCssIdent;
+    exports.isSafeHyperlinkHref = isSafeHyperlinkHref;
+    exports.keyBy = keyBy;
+    exports.mergeDeep = mergeDeep;
     exports.parseAsync = parseAsync;
     exports.renderAsync = renderAsync;
     exports.renderDocument = renderDocument;
     exports.renderThumbnails = renderThumbnails;
+    exports.sanitizeCssColor = sanitizeCssColor;
+    exports.sanitizeFontFamily = sanitizeFontFamily;
 
 }));
 //# sourceMappingURL=docx-preview.js.map

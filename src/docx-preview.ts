@@ -6,6 +6,19 @@ import { h } from './html';
 export { renderThumbnails } from './thumbnails';
 export type { ThumbnailsOptions, ThumbnailsHandle } from './thumbnails';
 
+// Security helpers re-exported so they can be unit-tested and (optionally)
+// reused by embedding code. Pure functions; see SECURITY_REVIEW.md for
+// context and the behaviours each one enforces.
+export { isSafeHyperlinkHref } from './html-renderer';
+export {
+    sanitizeCssColor,
+    sanitizeFontFamily,
+    isSafeCssIdent,
+    escapeCssStringContent,
+    keyBy,
+    mergeDeep,
+} from './utils';
+
 export interface CommentsOptions {
     sidebar?: boolean;
     highlight?: boolean;
@@ -51,7 +64,6 @@ export interface Options {
 	useBase64URL: boolean;
 	renderChanges: boolean;
     renderComments: boolean;
-    renderAltChunks: boolean;
     comments: CommentsOptions;
     changes: ChangesOptions;
     h: typeof h;
@@ -76,7 +88,6 @@ export const defaultOptions: Options = {
 	useBase64URL: false,
 	renderChanges: false,
     renderComments: false,
-    renderAltChunks: true,
     comments: {
         sidebar: true,
         highlight: true,

@@ -3,13 +3,15 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlSmartTag,
-	WmlAltChunk,
 	WmlTableRow
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
 import { WmlParagraph } from './document/paragraph';
-import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
+import {
+	asArray, encloseFontFamily, escapeClassName, escapeCssStringContent,
+	isSafeCssIdent, isString, keyBy, mergeDeep, sanitizeCssColor, sanitizeFontFamily,
+} from './utils';
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
 import { FooterHeaderReference, SectionProperties } from './document/section';
@@ -23,6 +25,39 @@ import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
+
+// URL schemes safe to emit as the `href` of a rendered hyperlink in a
+// read-only document viewer. Anything outside this list (most importantly
+// `javascript:`, `data:`, `vbscript:`, `blob:`, `file:`) is rejected — the
+// link is rendered as inert plain text instead. Fragment-only (`#foo`) and
+// scheme-relative / path-relative URLs are treated as safe because they can't
+// carry script. See SECURITY_REVIEW.md #2.
+const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
+
+/**
+ * Returns `true` iff `raw` can be safely emitted as the `href` of an `<a>` in
+ * a read-only docx viewer. The allowlist accepts absolute URLs with known
+ * safe schemes, fragment-only URLs (`#anchor`), and relative paths. All
+ * other schemes — notably `javascript:` — are rejected.
+ */
+export function isSafeHyperlinkHref(raw: string | null | undefined): boolean {
+	if (raw == null) return true; // empty href is inert
+	if (typeof raw !== 'string') return false;
+	const trimmed = raw.trim();
+	if (trimmed === '') return true;
+	if (trimmed.startsWith('#')) return true;
+	try {
+		// Resolve against a synthetic base so relative URLs parse but never
+		// inherit the host document's base URI (which could be file:// in
+		// embedding apps and pass the scheme allowlist accidentally).
+		const parsed = new URL(trimmed, 'http://docxjs.invalid/');
+		return SAFE_HREF_SCHEMES.has(parsed.protocol);
+	} catch {
+		// Non-URL strings that aren't fragments are almost always relative
+		// paths like `foo/bar.html`. Treat as safe — no scheme, no sink.
+		return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+	}
+}
 
 // Internal-only — addresses a rendered change element via data-change-kind.
 // Not exported; the library is read-only so consumers never see this.
@@ -213,24 +248,35 @@ export class HtmlRenderer {
 	}
 
 	renderTheme(themePart: ThemePart) {
-		const variables = {};
+		// All string fields here come from DOCX theme XML; every interpolation
+		// point is sanitized before it reaches CSS. Invalid values are dropped
+		// rather than coerced to a default, so a malformed theme produces
+		// fewer custom properties instead of unsafe ones. See
+		// SECURITY_REVIEW.md #4.
+		const variables: Record<string, string> = {};
 		const fontScheme = themePart.theme?.fontScheme;
 
 		if (fontScheme) {
-			if (fontScheme.majorFont) {
-				variables['--docx-majorHAnsi-font'] = fontScheme.majorFont.latinTypeface;
+			if (fontScheme.majorFont?.latinTypeface) {
+				variables['--docx-majorHAnsi-font'] = sanitizeFontFamily(fontScheme.majorFont.latinTypeface);
 			}
 
-			if (fontScheme.minorFont) {
-				variables['--docx-minorHAnsi-font'] = fontScheme.minorFont.latinTypeface;
+			if (fontScheme.minorFont?.latinTypeface) {
+				variables['--docx-minorHAnsi-font'] = sanitizeFontFamily(fontScheme.minorFont.latinTypeface);
 			}
 		}
 
 		const colorScheme = themePart.theme?.colorScheme;
 
 		if (colorScheme) {
-			for (let [k, v] of Object.entries(colorScheme.colors)) {
-				variables[`--docx-${k}-color`] = `#${v}`;
+			for (const [k, v] of Object.entries(colorScheme.colors)) {
+				// Both key and value are attacker-controlled: key becomes part
+				// of the custom-property name, value becomes the color. Bail on
+				// anything that isn't a safe identifier / hex color.
+				if (!isSafeCssIdent(k)) continue;
+				const color = sanitizeCssColor(v);
+				if (!color) continue;
+				variables[`--docx-${k}-color`] = color;
 			}
 		}
 
@@ -502,6 +548,7 @@ export class HtmlRenderer {
 				const s = this.findStyle((elem as WmlParagraph).styleName);
 
 				if (s?.paragraphProps?.pageBreakBefore) {
+					// TODO(correctness): see SECURITY_REVIEW.md #7
 					current.sectProps = sectProps;
 					current.pageBreak = true;
 					current = { sectProps: null, elements: [], pageBreak: false };
@@ -956,17 +1003,32 @@ section.${c}>footer { z-index: 1; }
 		var resetCounters = [];
 
 		for (var num of numberings) {
+			// `num.id` / `num.level` / `num.bullet.src` land in CSS selectors
+			// and custom-property names. Skip any entry whose identifiers
+			// aren't plain alphanumeric/underscore — otherwise an attacker
+			// DOCX could break out of the selector. See SECURITY_REVIEW.md #3.
+			if (!isSafeCssIdent(String(num.id)) || !Number.isInteger(num.level)) {
+				continue;
+			}
+
 			var selector = `p.${this.numberingClass(num.id, num.level)}`;
 			var listStyleType = "none";
 
 			if (num.bullet) {
+				if (!isSafeCssIdent(String(num.bullet.src))) {
+					continue;
+				}
 				let valiable = `--${this.className}-${num.bullet.src}`.toLowerCase();
 
+				// `num.bullet.style` is a raw VML style attribute from DOCX.
+				// Dropping it entirely is safest; width/height can still be
+				// expressed via the sanitized `num.pStyle` path on the
+				// selector below. See SECURITY_REVIEW.md #3.
 				styleText += this.styleToString(`${selector}:before`, {
 					"content": "' '",
 					"display": "inline-block",
 					"background": `var(${valiable})`
-				}, num.bullet.style);
+				});
 
 				try {
 					const imgData = await this.document.loadNumberingImage(num.bullet.src);
@@ -986,6 +1048,9 @@ section.${c}>footer { z-index: 1; }
 				// reset all level counters with start value
 				resetCounters.push(counterReset);
 
+				// `levelTextToContent` escapes the attacker-controlled literal
+				// chunks before composing the `content` expression; counter
+				// names / numformat are validated above.
 				styleText += this.styleToString(`${selector}:before`, {
 					"content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
 					"counter-increment": counter,
@@ -1228,7 +1293,12 @@ section.${c}>footer { z-index: 1; }
 				return this.renderCommentReference(elem);
 
 			case DomType.AltChunk:
-				return this.renderAltChunk(elem);
+				// AltChunk rendering removed for security — the old implementation
+				// assigned attacker-controlled HTML to iframe.srcdoc (same-origin,
+				// no sandbox). The read-only viewer does not need alt chunks; the
+				// parser still produces a node so consumers can detect them.
+				// See SECURITY_REVIEW.md #1.
+				return null;
 		}
 
 		return null;
@@ -1307,17 +1377,38 @@ section.${c}>footer { z-index: 1; }
 
 	renderHyperlink(elem: WmlHyperlink) {
 		const res = this.toH(elem, ns.html, "a");
-		res.href = '';
+		let rawHref = '';
 
 		if (elem.id) {
 			const rel = this.document.documentPart.rels.find(it => it.id == elem.id && it.targetMode === "External");
-			res.href = rel?.target ?? res.href;
+			rawHref = rel?.target ?? '';
 		}
 
+		// Validate the scheme before emitting. DOCX hyperlink targets are
+		// attacker-controlled, so `javascript:` / `data:` / etc. must never
+		// land in an `<a href>`. Unsafe targets drop the href entirely and
+		// render the visible link text as an inert span. See
+		// SECURITY_REVIEW.md #2.
+		if (rawHref && !isSafeHyperlinkHref(rawHref)) {
+			// Render the children without wrapping them in <a> — produces plain
+			// text (or whatever runs the hyperlink contained) with no sink.
+			return this.h({
+				ns: ns.html,
+				tagName: "span",
+				className: res.className,
+				style: res.style,
+				children: res.children,
+			});
+		}
+
+		let href = rawHref;
+		// Anchor fragments are opaque to the URL parser from the host page's
+		// perspective; safe to append. See SECURITY_REVIEW.md #2 note.
 		if (elem.anchor) {
-			res.href += `#${elem.anchor}`;
+			href += `#${elem.anchor}`;
 		}
 
+		res.href = href;
 		return this.h(res);
 	}
 	
@@ -1419,19 +1510,6 @@ section.${c}>footer { z-index: 1; }
 			commentRefEl,
 			commentsContainerEl
 		] });
-	}
-
-	renderAltChunk(elem: WmlAltChunk) {
-		if (!this.options.renderAltChunks)
-			return null;
-
-		var result = this.h({ tagName: "iframe" }) as HTMLIFrameElement;
-		
-		this.tasks.push(this.document.loadAltChunk(elem.id, this.currentPart).then(x => {
-			result.srcdoc = x;
-		}));
-
-		return result;
 	}
 
 	renderDrawing(elem: OpenXmlElement) {
@@ -1808,6 +1886,8 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderVmlElement(elem: VmlElement): SVGElement {
+		// TODO(correctness): see SECURITY_REVIEW.md #8
+		// TODO(security): sanitize cssStyleText before emitting to style attribute — see SECURITY_REVIEW.md #5
 		var container = this.h({ ns: ns.svg, tagName: "svg", style: elem.cssStyleText }) as SVGElement;
 
 		const result = this.renderVmlChildElement(elem);
@@ -1984,17 +2064,45 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	levelTextToContent(text: string, suff: string, id: string, numformat: string) {
+		// text, id, and numformat are all derived from DOCX. Callers have
+		// already validated `id` and `numformat`; the `text` body is the last
+		// DOCX-controlled value that lands inside a CSS `content` string, so
+		// we escape `\` and `"` before embedding. Without this, a crafted
+		// levelText of `"}a{background:url(…)}"` would break out of the
+		// declaration block. See SECURITY_REVIEW.md #3.
 		const suffMap = {
 			"tab": "\\9",
 			"space": "\\a0",
 		};
 
-		var result = text.replace(/%\d*/g, s => {
-			let lvl = parseInt(s.substring(1), 10) - 1;
-			return `"counter(${this.numberingCounter(id, lvl)}, ${numformat})"`;
-		});
+		// Split literal text from counter placeholders (`%1`, `%2`, ...) so we
+		// can escape each literal segment without touching the generated
+		// `counter(...)` function. The placeholder regex matches the original
+		// behaviour.
+		const parts: string[] = [];
+		let last = 0;
+		const re = /%\d+/g;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(text)) !== null) {
+			if (m.index > last) {
+				parts.push(`"${escapeCssStringContent(text.slice(last, m.index))}"`);
+			}
+			const lvl = parseInt(m[0].substring(1), 10) - 1;
+			parts.push(`counter(${this.numberingCounter(id, lvl)}, ${numformat})`);
+			last = re.lastIndex;
+		}
+		if (last < text.length) {
+			parts.push(`"${escapeCssStringContent(text.slice(last))}"`);
+		}
 
-		return `"${result}${suffMap[suff] ?? ""}"`;
+		const suffToken = suffMap[suff];
+		if (suffToken) {
+			parts.push(`"${suffToken}"`);
+		}
+
+		// CSS `content` values can be composed of multiple space-separated
+		// string / counter() fragments.
+		return parts.length > 0 ? parts.join(' ') : '""';
 	}
 
 	numFormatToCssValue(format: string) {
@@ -2040,7 +2148,11 @@ section.${c}>footer { z-index: 1; }
 			taiwaneseDigital:  "cjk-decimal",
 		};
 
-		return mapping[format] ?? format;
+		// `format` comes from DOCX. Only emit values from the explicit allow
+		// list — dropping an unknown format to "decimal" prevents raw DOCX
+		// strings from landing inside a CSS `counter(..., <fmt>)` expression
+		// or `list-style-type:` declaration. See SECURITY_REVIEW.md #3.
+		return mapping[format] ?? 'decimal';
 	}
 
 	refreshTabStops() {

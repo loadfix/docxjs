@@ -49,7 +49,8 @@ export function parseVmlElement(elem: Element, parser: DocumentParser): VmlEleme
 
 	for (const at of xml.attrs(elem)) {
 		switch(at.localName) {
-			case "style": 
+			case "style":
+				// TODO(security): sanitize cssStyleText before emitting to style attribute — see SECURITY_REVIEW.md #5
 				result.cssStyleText = at.value;
 				break;
 
