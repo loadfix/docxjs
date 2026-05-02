@@ -676,13 +676,13 @@ export class HtmlRenderer {
 		}) as HTMLElement;
 
 		this.later(() => {
-			this.setupSidebarScrollSync(docContainer, contentArea);
+			this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
 		});
 
 		return wrapper;
 	}
 
-	setupSidebarScrollSync(docContainer: HTMLElement, sidebarContent: HTMLElement) {
+	setupSidebarScrollSync(docContainer: HTMLElement, sidebarContent: HTMLElement, wrapper?: HTMLElement) {
 		// Packed mode: natural CSS flow already stacks cards flush with zero
 		// gaps. No measurement or scroll listener needed.
 		if (this.sidebarLayout === 'packed') return;
@@ -710,28 +710,52 @@ export class HtmlRenderer {
 			}
 			if (anchored.length === 0) return;
 
+			// Clear all previous positioning before measuring, and make every
+			// card position:absolute so siblings don't influence each other's
+			// flow. Positioning is relative to sidebar-content, which is the
+			// scroll ancestor in anchored mode.
+			const previousPosition = sidebarContent.style.position;
+			if (previousPosition !== 'relative' && previousPosition !== 'absolute') {
+				sidebarContent.style.position = 'relative';
+			}
+			for (const { el } of anchored) {
+				el.style.marginTop = '';
+				el.style.position = 'absolute';
+				el.style.top = '0';
+				el.style.left = '0';
+				el.style.right = '0';
+			}
+
 			// Compute each card's target Y in sidebar-content coordinate space.
-			// The sidebar rides the doc scroll in anchored mode, so this math
-			// is scroll-invariant and only needs to run once after layout.
+			// Using getBoundingClientRect on both anchor and sidebar-content
+			// gives us a viewport-relative delta that's stable regardless of
+			// scroll.
 			const sidebarRect = sidebarContent.getBoundingClientRect();
 			for (const entry of anchored) {
 				const r = entry.anchor.getBoundingClientRect();
 				entry.desiredTop = r.top - sidebarRect.top + sidebarContent.scrollTop;
 			}
 
-			// Sort by document order and push down on collision so cards
-			// never overlap. Dense clusters end up below their anchors.
+			// Sort by desired position and push later cards down to avoid
+			// overlap. Because cards are position:absolute, assigning top on
+			// one doesn't perturb another's measurement — much more robust
+			// than the margin-top approach.
 			anchored.sort((a, b) => a.desiredTop - b.desiredTop);
-			for (const { el } of anchored) el.style.marginTop = "";
 
 			let floor = -Infinity;
+			let maxBottom = 0;
 			for (const entry of anchored) {
 				const target = Math.max(entry.desiredTop, floor);
-				const naturalTop = entry.el.offsetTop;
-				const offset = target - naturalTop;
-				if (offset > 0) entry.el.style.marginTop = `${offset}px`;
-				floor = target + entry.el.offsetHeight + CARD_GAP;
+				entry.el.style.top = `${target}px`;
+				const bottom = target + entry.el.offsetHeight;
+				floor = bottom + CARD_GAP;
+				if (bottom > maxBottom) maxBottom = bottom;
 			}
+
+			// Because children are absolute, sidebar-content collapses to
+			// zero height. Give it a min-height so it still matches the
+			// wrapper and any background/border remain correctly sized.
+			sidebarContent.style.minHeight = `${maxBottom}px`;
 		};
 
 		let rafId: number;
@@ -742,14 +766,25 @@ export class HtmlRenderer {
 
 		if (typeof ResizeObserver !== "undefined") {
 			const ro = new ResizeObserver(schedule);
+			// Observe the wrapper: it grows vertically as content is paginated
+			// (applyVisualPageBreaks inserts new sections), so its height
+			// reliably reflects late-arriving layout. `docContainer` is a
+			// fixed-size scroll viewport and wouldn't fire for content growth.
+			if (wrapper) ro.observe(wrapper);
 			ro.observe(docContainer);
 			for (const el of Object.values(this.sidebarCommentElements)) {
 				if (el.isConnected) ro.observe(el);
 			}
 		}
 
-		// Initial pass after layout settles (fonts, images).
+		// Initial pass and a few follow-ups, since font/image loading and
+		// `applyVisualPageBreaks` can change anchor positions well after the
+		// initial render resolves. ResizeObserver catches most of this, but
+		// not everything — e.g. lazy image decode doesn't always fire a
+		// wrapper resize. These passes are cheap and idempotent.
 		setTimeout(positionCards, 100);
+		setTimeout(positionCards, 500);
+		setTimeout(positionCards, 1500);
 	}
 
 	renderSidebarComments(container: HTMLElement) {
