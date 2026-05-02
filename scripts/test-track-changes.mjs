@@ -153,7 +153,44 @@ async function renderFixture(path, options) {
     );
 }
 
-// ── 6. Readonly / accept-reject plumbing ──────────────────────────────────
+// ── 6. Rich fixture: formatting revisions (w:rPrChange) ────────────────────
+{
+    const { container } = await renderFixture('revision-rich', {
+        changes: { show: true, showFormatting: true },
+    });
+    const formatting = container.querySelectorAll('.docx-formatting-revision');
+    note(`6·: revision-rich produced ${formatting.length} formatting revision(s)`);
+    assert(
+        formatting.length > 0,
+        '6a: revision-rich fixture should produce at least one formatting-revision element',
+    );
+    for (const el of formatting) {
+        assert(
+            el.dataset.changeKind === 'formatting',
+            '6b: formatting-revision element missing data-change-kind=formatting',
+        );
+        assert(
+            el.getAttribute('title') && el.getAttribute('title').includes(':'),
+            '6c: formatting-revision should have a title summarising the change',
+        );
+    }
+    // Change bars should light up on the paragraphs touched by rPrChange even
+    // though there's no <ins>/<del> in the doc.
+    assert(
+        container.querySelectorAll('.docx-change-bar').length > 0,
+        '6d: formatting-only revisions should still trigger change bars',
+    );
+    // showFormatting:false should suppress them.
+    const { container: hidden } = await renderFixture('revision-rich', {
+        changes: { show: true, showFormatting: false },
+    });
+    assert(
+        hidden.querySelectorAll('.docx-formatting-revision').length === 0,
+        '6e: showFormatting:false should suppress formatting revisions',
+    );
+}
+
+// ── 7. Readonly / accept-reject plumbing ──────────────────────────────────
 {
     const calls = [];
     const { container } = await renderFixture('revision', {
@@ -167,7 +204,7 @@ async function renderFixture(path, options) {
     const actions = container.querySelectorAll('.docx-change-actions');
     assert(
         actions.length > 0,
-        '6a: with readOnly:false, change action buttons should be injected',
+        '7a: with readOnly:false, change action buttons should be injected',
     );
     // Simulate a click on the first Accept.
     const firstAccept = container.querySelector('.docx-change-accept');
@@ -177,7 +214,7 @@ async function renderFixture(path, options) {
     }
     assert(
         calls.length === 1 && calls[0][0] === 'accept',
-        `6b: clicking ✓ should invoke onChangeAccept once (got ${JSON.stringify(calls)})`,
+        `7b: clicking ✓ should invoke onChangeAccept once (got ${JSON.stringify(calls)})`,
     );
 }
 
@@ -189,5 +226,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${6} scenarios passed`);
+    console.log(`\n✓ all ${7} scenarios passed`);
 }
