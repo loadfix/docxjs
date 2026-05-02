@@ -112,6 +112,36 @@
                 addToggle(key, () => docxOptions[key], (v) => { docxOptions[key] = v; });
             });
 
+        // Nested options for Comments.
+        const commentsSeparator = document.createElement("li");
+        commentsSeparator.innerHTML = '<hr class="dropdown-divider"><h6 class="dropdown-header">comments.*</h6>';
+        menu.appendChild(commentsSeparator);
+        for (const key of ['sidebar','highlight','readOnly']) {
+            addToggle(`comments.${key}`,
+                () => docxOptions.comments?.[key] ?? false,
+                (v) => { docxOptions.comments = { ...docxOptions.comments, [key]: v }; });
+        }
+        // comments.layout is a string, not a boolean — render as a radio pair.
+        const layoutItem = document.createElement("li");
+        layoutItem.innerHTML = `
+            <div class="dropdown-item">
+                <div>comments.layout</div>
+                <div class="form-check form-check-inline">
+                    <label><input type="radio" name="layout-mode" value="anchored"> anchored</label>
+                </div>
+                <div class="form-check form-check-inline">
+                    <label><input type="radio" name="layout-mode" value="packed"> packed</label>
+                </div>
+            </div>`;
+        menu.appendChild(layoutItem);
+        for (const radio of layoutItem.querySelectorAll('input[name="layout-mode"]')) {
+            radio.checked = (docxOptions.comments?.layout ?? 'anchored') === radio.value;
+            radio.addEventListener('change', () => {
+                docxOptions.comments = { ...docxOptions.comments, layout: radio.value };
+                renderDocx(currentDocument);
+            });
+        }
+
         // Nested options for Track Changes (see #3, #4, #5).
         const changesSeparator = document.createElement("li");
         changesSeparator.innerHTML = '<hr class="dropdown-divider"><h6 class="dropdown-header">changes.*</h6>';

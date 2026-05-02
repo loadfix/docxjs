@@ -14,6 +14,15 @@ export interface CommentsOptions {
     sidebar?: boolean;
     highlight?: boolean;
     readOnly?: boolean;
+    /**
+     * Sidebar card layout mode.
+     * - 'anchored' (default): each card aligns vertically with its anchor
+     *   text, pushing down on collision, re-flowing as the document scrolls.
+     *   Matches Word's "All Markup" convention.
+     * - 'packed': cards stack flush in document order with no gaps. Simpler
+     *   and more compact; no scroll re-flow.
+     */
+    layout?: 'anchored' | 'packed';
 }
 
 export type ChangeKind =
@@ -96,6 +105,7 @@ export const defaultOptions: Options = {
         sidebar: true,
         highlight: true,
         readOnly: true,
+        layout: 'anchored',
     },
     commentCallbacks: {},
     changes: {
