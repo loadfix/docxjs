@@ -3136,6 +3136,8 @@
             this.footnoteMap = {};
             this.endnoteMap = {};
             this.currentEndnoteIds = [];
+            this.footnoteRefCount = 0;
+            this.endnoteRefCount = 0;
             this.usedHederFooterParts = [];
             this.currentTabs = [];
             this.commentMap = {};
@@ -3179,6 +3181,8 @@
             this.changeElements = [];
             this.changeMeta = [];
             this.moveElements = new Map();
+            this.footnoteRefCount = 0;
+            this.endnoteRefCount = 0;
             if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
             }
@@ -4342,10 +4346,11 @@ section.${c}>footer { z-index: 1; }
         }
         renderFootnoteReference(elem) {
             this.currentFootnoteIds.push(elem.id);
+            this.footnoteRefCount++;
             const sup = this.h({
                 tagName: "sup",
                 className: `${this.className}-footnote-ref`,
-                children: [`${this.currentFootnoteIds.length}`]
+                children: [`${this.footnoteRefCount}`]
             });
             if (elem.id)
                 sup.dataset.footnoteId = elem.id;
@@ -4353,10 +4358,11 @@ section.${c}>footer { z-index: 1; }
         }
         renderEndnoteReference(elem) {
             this.currentEndnoteIds.push(elem.id);
+            this.endnoteRefCount++;
             const sup = this.h({
                 tagName: "sup",
                 className: `${this.className}-endnote-ref`,
-                children: [`${this.currentEndnoteIds.length}`]
+                children: [`${this.endnoteRefCount}`]
             });
             if (elem.id)
                 sup.dataset.footnoteId = elem.id;
@@ -4379,7 +4385,7 @@ section.${c}>footer { z-index: 1; }
                 return null;
             let children = this.renderElements(elem.children);
             if (elem.verticalAlign) {
-                children = [this.h({ tagName: elem.verticalAlign, children: this.renderElements(elem.children) })];
+                children = [this.h({ tagName: elem.verticalAlign, children })];
             }
             const result = this.toHTML(elem, ns.html, "span", children);
             if (elem.id)

@@ -103,6 +103,16 @@ export class HtmlRenderer {
 	endnoteMap: Record<string, WmlFootnote> = {};
 	currentFootnoteIds: string[];
 	currentEndnoteIds: string[] = [];
+	// Document-wide footnote/endnote reference counters. Word's default
+	// numbering is continuous 1..N across the whole document; per-section
+	// restart (via <w:footnotePr><w:numRestart w:val="eachSect"/> in
+	// settings.xml or sectPr) is an edge case that is not yet parsed
+	// (TODO: thread settings.footnoteProps through so we can honour it).
+	// currentFootnoteIds still resets per section because it controls
+	// which notes the section's trailing <ol> lists; the counter below
+	// controls the superscript number shown at each in-body reference.
+	footnoteRefCount: number = 0;
+	endnoteRefCount: number = 0;
 	usedHederFooterParts: any[] = [];
 
 	defaultTabSize: string;
@@ -175,6 +185,11 @@ export class HtmlRenderer {
 		this.changeElements = [];
 		this.changeMeta = [];
 		this.moveElements = new Map();
+		// Reset per-render so document-wide footnote/endnote numbering starts
+		// at 1 for each render() invocation but continues monotonically across
+		// all sections within that render.
+		this.footnoteRefCount = 0;
+		this.endnoteRefCount = 0;
 
 		if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
 			this.commentHighlight = new Highlight();
@@ -1726,10 +1741,14 @@ section.${c}>footer { z-index: 1; }
 
 	renderFootnoteReference(elem: WmlNoteReference) {
 		this.currentFootnoteIds.push(elem.id);
+		// Document-wide counter so numbering is continuous across sections.
+		// `currentFootnoteIds.length` would restart at 1 per section because
+		// that list drives which notes appear in the section's trailing <ol>.
+		this.footnoteRefCount++;
 		const sup = this.h({
 			tagName: "sup",
 			className: `${this.className}-footnote-ref`,
-			children: [`${this.currentFootnoteIds.length}`]
+			children: [`${this.footnoteRefCount}`]
 		}) as HTMLElement;
 		// Expose the footnote id so the visual-page split pass can match
 		// body references to the corresponding `<ol><li>` by identity rather
@@ -1743,10 +1762,12 @@ section.${c}>footer { z-index: 1; }
 
 	renderEndnoteReference(elem: WmlNoteReference) {
 		this.currentEndnoteIds.push(elem.id);
+		// Document-wide counter — see renderFootnoteReference for rationale.
+		this.endnoteRefCount++;
 		const sup = this.h({
 			tagName: "sup",
 			className: `${this.className}-endnote-ref`,
-			children: [`${this.currentEndnoteIds.length}`]
+			children: [`${this.endnoteRefCount}`]
 		}) as HTMLElement;
 		// Same reasoning as renderFootnoteReference — attribute-encoded data
 		// attribute, never a CSS sink. Endnotes are not currently touched by
@@ -1779,7 +1800,12 @@ section.${c}>footer { z-index: 1; }
 		let children = this.renderElements(elem.children);
 
 		if (elem.verticalAlign) {
-			children = [this.h({ tagName: elem.verticalAlign, children: this.renderElements(elem.children) })];
+			// Reuse the already-rendered children — rendering them a second
+			// time is wasteful and, for stateful render methods, actively
+			// wrong. Example: renderFootnoteReference increments a
+			// document-wide counter, so a double-render produced a
+			// footnote sup whose number had skipped forward by one.
+			children = [this.h({ tagName: elem.verticalAlign, children })];
 		}
 
 		const result = this.toHTML(elem, ns.html, "span", children);
