@@ -190,32 +190,33 @@ async function renderFixture(path, options) {
     );
 }
 
-// ── 7. Readonly / accept-reject plumbing ──────────────────────────────────
+// ── 7. Read-only: no mutation UI on comment cards or change elements ──────
 {
-    const calls = [];
     const { container } = await renderFixture('revision', {
-        changes: { show: true, readOnly: false },
-        changeCallbacks: {
-            onChangeAccept: (id, kind) => calls.push(['accept', id, kind]),
-            onChangeReject: (id, kind) => calls.push(['reject', id, kind]),
-        },
+        renderComments: true,
+        changes: { show: true },
     });
-    // Each change element should have an injected ✓/✕ button wrapper.
-    const actions = container.querySelectorAll('.docx-change-actions');
-    assert(
-        actions.length > 0,
-        '7a: with readOnly:false, change action buttons should be injected',
-    );
-    // Simulate a click on the first Accept.
-    const firstAccept = container.querySelector('.docx-change-accept');
-    if (firstAccept) {
-        // bubble so the delegated listener on the wrapper picks it up
-        firstAccept.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    // Edit / Delete / Reply buttons should never appear — the library is
+    // read-only. Same for inline ✓/✕ change-accept/reject buttons and the
+    // sidebar Accept-all / Reject-all toolbar buttons.
+    const forbidden = [
+        '.docx-comment-edit-btn',
+        '.docx-comment-delete-btn',
+        '.docx-comment-reply-btn',
+        '.docx-comment-add-btn',
+        '.docx-change-accept',
+        '.docx-change-reject',
+        '.docx-change-actions',
+        '.docx-comment-editor',
+        '.docx-comment-reply-composer',
+        '.docx-new-comment-composer',
+    ];
+    for (const sel of forbidden) {
+        assert(
+            container.querySelectorAll(sel).length === 0,
+            `7a: no ${sel} element should ever be rendered`,
+        );
     }
-    assert(
-        calls.length === 1 && calls[0][0] === 'accept',
-        `7b: clicking ✓ should invoke onChangeAccept once (got ${JSON.stringify(calls)})`,
-    );
 }
 
 // ── 8. Sidebar layout modes ────────────────────────────────────────────────
