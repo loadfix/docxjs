@@ -5003,6 +5003,16 @@ section.${c}>footer { z-index: 1; }
             if (originalOl.children.length === 0) {
                 originalOl.remove();
             }
+            let cumulative = 0;
+            for (const page of subPages) {
+                const ol = targetOls.get(page);
+                if (!ol)
+                    continue;
+                if (cumulative > 0) {
+                    ol.setAttribute('start', String(cumulative + 1));
+                }
+                cumulative += ol.children.length;
+            }
         }
     }
     function offsetWithinSection(child, ancestor, measureFn) {
