@@ -3562,11 +3562,11 @@
                 children: [docContainer, this.sidebarContainer]
             });
             this.later(() => {
-                this.setupSidebarScrollSync(docContainer, contentArea);
+                this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
             });
             return wrapper;
         }
-        setupSidebarScrollSync(docContainer, sidebarContent) {
+        setupSidebarScrollSync(docContainer, sidebarContent, wrapper) {
             if (this.sidebarLayout === 'packed')
                 return;
             const CARD_GAP = 8;
@@ -3588,23 +3588,34 @@
                 }
                 if (anchored.length === 0)
                     return;
+                const previousPosition = sidebarContent.style.position;
+                if (previousPosition !== 'relative' && previousPosition !== 'absolute') {
+                    sidebarContent.style.position = 'relative';
+                }
+                for (const { el } of anchored) {
+                    el.style.marginTop = '';
+                    el.style.position = 'absolute';
+                    el.style.top = '0';
+                    el.style.left = '0';
+                    el.style.right = '0';
+                }
                 const sidebarRect = sidebarContent.getBoundingClientRect();
                 for (const entry of anchored) {
                     const r = entry.anchor.getBoundingClientRect();
                     entry.desiredTop = r.top - sidebarRect.top + sidebarContent.scrollTop;
                 }
                 anchored.sort((a, b) => a.desiredTop - b.desiredTop);
-                for (const { el } of anchored)
-                    el.style.marginTop = "";
                 let floor = -Infinity;
+                let maxBottom = 0;
                 for (const entry of anchored) {
                     const target = Math.max(entry.desiredTop, floor);
-                    const naturalTop = entry.el.offsetTop;
-                    const offset = target - naturalTop;
-                    if (offset > 0)
-                        entry.el.style.marginTop = `${offset}px`;
-                    floor = target + entry.el.offsetHeight + CARD_GAP;
+                    entry.el.style.top = `${target}px`;
+                    const bottom = target + entry.el.offsetHeight;
+                    floor = bottom + CARD_GAP;
+                    if (bottom > maxBottom)
+                        maxBottom = bottom;
                 }
+                sidebarContent.style.minHeight = `${maxBottom}px`;
             };
             let rafId;
             const schedule = () => {
@@ -3613,6 +3624,8 @@
             };
             if (typeof ResizeObserver !== "undefined") {
                 const ro = new ResizeObserver(schedule);
+                if (wrapper)
+                    ro.observe(wrapper);
                 ro.observe(docContainer);
                 for (const el of Object.values(this.sidebarCommentElements)) {
                     if (el.isConnected)
@@ -3620,6 +3633,8 @@
                 }
             }
             setTimeout(positionCards, 100);
+            setTimeout(positionCards, 500);
+            setTimeout(positionCards, 1500);
         }
         renderSidebarComments(container) {
             const commentsPart = this.document.commentsPart;
