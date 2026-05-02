@@ -695,45 +695,47 @@ async function renderFixture(path, options) {
 // <section>, not <article>) used to stay on the original sub-page, so all
 // footnotes ended up bunched on the first visual page of the group. The fix
 // walks footnote <li>s after the split and moves each one to the sub-page
-// whose <article> contains its matching <sup> reference. Conservation
-// invariant: the total number of footnote <li>s across every sub-page after
-// the split equals the pre-split count.
+// whose <article> cites its id. Conservation invariant: the total number of
+// footnote <li>s across every sub-page after the split equals the pre-split
+// count (modulo unmatched ones that stay on the first sub-page as a sink).
 {
     // Build a synthetic section with 6 paragraphs in <article> and a
     // footnote <ol> of 4 items as a sibling of <article>. Each paragraph
-    // owns one or two <sup> references; no paragraph owns more than one
-    // footnote number but two references share footnote 2 (mirrors the
-    // ins/del double-sup pattern seen in real documents).
+    // owns one or two <sup data-footnote-id> references; two references
+    // share footnote id "fn-2" (mirrors the ins/del double-sup pattern and
+    // academic duplicate-citation shape).
     const root = document.createElement('div');
     const section = document.createElement('section');
     section.className = 'docx';
     const article = document.createElement('article');
 
-    // Paragraph/footnote plan:
-    //   p0 → footnote 1
-    //   p1 → footnote 2 (appears twice — duplicate reference)
-    //   p2 → footnote 3
+    // Paragraph/footnote plan (ids):
+    //   p0 → fn-1
+    //   p1 → fn-2, fn-2   (duplicate reference to the same footnote)
+    //   p2 → fn-3
     //   p3 → (no reference)
-    //   p4 → footnote 4
+    //   p4 → fn-4
     //   p5 → (no reference)
-    const plan = [[1], [2, 2], [3], [], [4], []];
+    const plan = [['fn-1'], ['fn-2', 'fn-2'], ['fn-3'], [], ['fn-4'], []];
     for (let i = 0; i < plan.length; i++) {
         const p = document.createElement('p');
         p.textContent = `paragraph ${i} `;
-        for (const n of plan[i]) {
+        for (const id of plan[i]) {
             const sup = document.createElement('sup');
-            sup.textContent = String(n);
+            sup.textContent = id.replace(/\D/g, '');
+            sup.dataset.footnoteId = id;
             p.appendChild(sup);
         }
         article.appendChild(p);
     }
     section.appendChild(article);
 
-    // Footnote list with 4 items, one per footnote number.
+    // Footnote list with 4 items, one per id.
     const footnoteOl = document.createElement('ol');
-    for (let n = 1; n <= 4; n++) {
+    for (const id of ['fn-1', 'fn-2', 'fn-3', 'fn-4']) {
         const li = document.createElement('li');
-        li.textContent = `footnote ${n} content`;
+        li.textContent = `footnote ${id} content`;
+        li.setAttribute('data-footnote-id', id);
         footnoteOl.appendChild(li);
     }
     section.appendChild(footnoteOl);
@@ -780,21 +782,24 @@ async function renderFixture(path, options) {
         `18e: expected footnotes spread across ≥2 sub-pages (got ${subPagesWithFootnotes})`,
     );
 
-    // Correctness: each <li>'s 1-based index in the ORIGINAL ol must land on
-    // the sub-page that contains a matching <sup>. We can check this by
-    // inspecting each sub-page's <ol>: footnote 1 should sit on the sub-page
-    // whose article cites `1`, and so on.
-    for (let n = 1; n <= 4; n++) {
+    // Correctness: every <li> must land on a sub-page whose article cites
+    // its id via a <sup data-footnote-id>.
+    for (const id of ['fn-1', 'fn-2', 'fn-3', 'fn-4']) {
         const owner = subPages.find((s) => {
-            return Array.from(s.querySelectorAll('article sup')).some((sup) => sup.textContent?.trim() === String(n));
+            return !!s.querySelector(':scope > ol > li[data-footnote-id="' + id.replace(/"/g, '\\"') + '"]');
         });
         assert(
             !!owner,
-            `18f: footnote ${n} should have an owning sub-page with a matching <sup>`,
+            `18f: footnote ${id} should have an owning sub-page holding its <li>`,
         );
-        // The owning sub-page should have at least one <li>.
-        const ownerLis = owner.querySelectorAll(':scope > ol > li').length;
-        assert(ownerLis >= 1, `18g: sub-page owning footnote ${n} should have at least one <li>`);
+        if (owner) {
+            const cites = Array.from(owner.querySelectorAll('article [data-footnote-id]'))
+                .some((sup) => sup.dataset.footnoteId === id);
+            assert(
+                cites,
+                `18g: owning sub-page of ${id} must also contain a <sup> citing ${id}`,
+            );
+        }
     }
 
     // If the original sub-page ended up with no footnotes, its <ol> should
@@ -810,6 +815,106 @@ async function renderFixture(path, options) {
     root.remove();
 }
 
+// ── 19. Per-sub-page footnote id set equality with duplicate refs (#34) ───
+// After applyVisualPageBreaks splits a section, each sub-page must satisfy:
+//   { ids on <sup data-footnote-id> inside article }
+//     == { ids on <li data-footnote-id> inside this sub-page's <ol> }
+// The important corner case is duplicate refs: when a sub-page cites the
+// same footnote id twice, exactly one <li> should land on it (not two).
+// Previously the matching pass was positional, which over-counted duplicate
+// refs and stole <li>s from later sub-pages; issue #34.
+{
+    const root = document.createElement('div');
+    const section = document.createElement('section');
+    section.className = 'docx';
+    const article = document.createElement('article');
+
+    // Plan (one paragraph per row → 6 paragraphs, 2 per sub-page = 3 pages):
+    //   p0 cites f-A once
+    //   p1 cites f-A again (DUPLICATE on sub-page 0) and f-B once
+    //   p2 cites f-C once
+    //   p3 cites f-C twice (duplicate on sub-page 1)
+    //   p4 cites f-D once
+    //   p5 cites f-D once (duplicate on sub-page 2)
+    const plan = [['f-A'], ['f-A', 'f-B'], ['f-C'], ['f-C', 'f-C'], ['f-D'], ['f-D']];
+    for (let i = 0; i < plan.length; i++) {
+        const p = document.createElement('p');
+        p.textContent = `p${i} `;
+        for (const id of plan[i]) {
+            const sup = document.createElement('sup');
+            sup.textContent = '*';
+            sup.dataset.footnoteId = id;
+            p.appendChild(sup);
+        }
+        article.appendChild(p);
+    }
+    section.appendChild(article);
+
+    const ol = document.createElement('ol');
+    for (const id of ['f-A', 'f-B', 'f-C', 'f-D']) {
+        const li = document.createElement('li');
+        li.textContent = `footnote ${id}`;
+        li.setAttribute('data-footnote-id', id);
+        ol.appendChild(li);
+    }
+    section.appendChild(ol);
+    root.appendChild(section);
+    document.body.appendChild(root);
+
+    const PAGE = 300;
+    const PARA = 150;
+    const heights = new Map();
+    heights.set(section, { width: 800, height: PAGE * 6, minHeight: PAGE });
+    heights.set(article, { width: 800, height: PAGE * 6, minHeight: 0 });
+    for (const p of article.children) heights.set(p, { width: 800, height: PARA, minHeight: 0 });
+
+    applyVisualPageBreaks(root, { className: 'docx' }, (el) => {
+        return heights.get(el) ?? { width: 0, height: 0, minHeight: 0 };
+    });
+
+    const subPages = Array.from(root.querySelectorAll('section.docx'));
+    assert(subPages.length >= 3, `19a: expected >= 3 sub-pages (got ${subPages.length})`);
+
+    // Per-sub-page set equality: refs on <sup> == li ids in the sub-page's <ol>.
+    const snapshot = subPages.map((s, i) => {
+        const refIds = new Set(
+            Array.from(s.querySelectorAll('article [data-footnote-id]'))
+                .map((el) => el.dataset.footnoteId),
+        );
+        const liIds = new Set(
+            Array.from(s.querySelectorAll(':scope > ol > li[data-footnote-id]'))
+                .map((el) => el.getAttribute('data-footnote-id')),
+        );
+        return { index: i, refIds, liIds };
+    });
+    note(
+        `19·: per-page snapshot = ` +
+        JSON.stringify(snapshot.map((s) => ({ i: s.index, refs: [...s.refIds], lis: [...s.liIds] }))),
+    );
+    for (const { index, refIds, liIds } of snapshot) {
+        assert(
+            refIds.size === liIds.size && [...refIds].every((id) => liIds.has(id)),
+            `19b·${index}: refIds=${JSON.stringify([...refIds])} ` +
+            `liIds=${JSON.stringify([...liIds])} — set equality expected`,
+        );
+    }
+
+    // Duplicate refs must not produce duplicate <li>s on the same sub-page.
+    for (const { index, liIds } of snapshot) {
+        const liEls = subPages[index].querySelectorAll(':scope > ol > li[data-footnote-id]');
+        assert(
+            liEls.length === liIds.size,
+            `19c·${index}: duplicate <li>s found — count=${liEls.length}, unique=${liIds.size}`,
+        );
+    }
+
+    // Conservation across the split (4 original footnotes).
+    const totalLis = snapshot.reduce((a, s) => a + s.liIds.size, 0);
+    assert(totalLis === 4, `19d: total <li> count should be 4 (got ${totalLis})`);
+
+    root.remove();
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -818,5 +923,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${18} scenarios passed`);
+    console.log(`\n✓ all ${19} scenarios passed`);
 }

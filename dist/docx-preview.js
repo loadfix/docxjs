@@ -3882,9 +3882,25 @@ section.${c}>footer { z-index: 1; }
             ];
         }
         renderNotes(noteIds, notesMap) {
-            var notes = noteIds.map(id => notesMap[id]).filter(x => x);
+            const seenIds = new Set();
+            const uniqueIds = [];
+            for (const id of noteIds) {
+                if (!seenIds.has(id)) {
+                    seenIds.add(id);
+                    uniqueIds.push(id);
+                }
+            }
+            var notes = uniqueIds.map(id => notesMap[id]).filter(x => x);
             if (notes.length > 0) {
-                return this.h({ tagName: "ol", children: this.renderElements(notes) });
+                const renderedChildren = this.renderElements(notes);
+                for (let i = 0; i < notes.length && i < renderedChildren.length; i++) {
+                    const node = renderedChildren[i];
+                    const id = notes[i]?.id;
+                    if (node && typeof node.setAttribute === 'function' && id) {
+                        node.setAttribute('data-footnote-id', id);
+                    }
+                }
+                return this.h({ tagName: "ol", children: renderedChildren });
             }
         }
         renderElement(elem) {
@@ -4325,11 +4341,17 @@ section.${c}>footer { z-index: 1; }
         }
         renderFootnoteReference(elem) {
             this.currentFootnoteIds.push(elem.id);
-            return this.h({ tagName: "sup", children: [`${this.currentFootnoteIds.length}`] });
+            const sup = this.h({ tagName: "sup", children: [`${this.currentFootnoteIds.length}`] });
+            if (elem.id)
+                sup.dataset.footnoteId = elem.id;
+            return sup;
         }
         renderEndnoteReference(elem) {
             this.currentEndnoteIds.push(elem.id);
-            return this.h({ tagName: "sup", children: [`${this.currentEndnoteIds.length}`] });
+            const sup = this.h({ tagName: "sup", children: [`${this.currentEndnoteIds.length}`] });
+            if (elem.id)
+                sup.dataset.footnoteId = elem.id;
+            return sup;
         }
         renderTab(elem) {
             var tabSpan = this.h({ tagName: "span", children: ["\u2003"] });
@@ -4923,15 +4945,14 @@ section.${c}>footer { z-index: 1; }
         if (originalOls.length === 0)
             return;
         const refsBySubPage = subPages.map((page) => {
-            const nums = new Set();
-            const sups = page.querySelectorAll('article sup');
+            const ids = new Set();
+            const sups = page.querySelectorAll('article [data-footnote-id]');
             for (const sup of Array.from(sups)) {
-                const t = (sup.textContent ?? '').trim();
-                if (!/^\d+$/.test(t))
-                    continue;
-                nums.add(parseInt(t, 10));
+                const id = sup.dataset.footnoteId;
+                if (id)
+                    ids.add(id);
             }
-            return nums;
+            return ids;
         });
         for (const originalOl of originalOls) {
             const firstLi = originalOl.querySelector(':scope > li');
@@ -4941,12 +4962,13 @@ section.${c}>footer { z-index: 1; }
             const lis = Array.from(originalOl.children);
             const targetOls = new Map();
             targetOls.set(original, originalOl);
-            for (let i = 0; i < lis.length; i++) {
-                const li = lis[i];
-                const footnoteNumber = i + 1;
+            for (const li of lis) {
+                const id = li.dataset.footnoteId;
+                if (!id)
+                    continue;
                 let ownerIdx = -1;
                 for (let p = 0; p < subPages.length; p++) {
-                    if (refsBySubPage[p].has(footnoteNumber)) {
+                    if (refsBySubPage[p].has(id)) {
                         ownerIdx = p;
                         break;
                     }

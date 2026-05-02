@@ -1119,10 +1119,35 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderNotes(noteIds: string[], notesMap: Record<string, WmlBaseNote>) {
-		var notes = noteIds.map(id => notesMap[id]).filter(x => x);
+		// Dedupe noteIds — the body can cite the same footnote id multiple
+		// times (common in academic writing) and currentFootnoteIds tracks
+		// each citation. The footnote list renders one <li> per note, not
+		// one <li> per citation, so each id must appear only once.
+		const seenIds = new Set<string>();
+		const uniqueIds: string[] = [];
+		for (const id of noteIds) {
+			if (!seenIds.has(id)) { seenIds.add(id); uniqueIds.push(id); }
+		}
+		var notes = uniqueIds.map(id => notesMap[id]).filter(x => x);
 
 		if (notes.length > 0) {
-			return this.h({ tagName: "ol", children: this.renderElements(notes) });
+			const renderedChildren = this.renderElements(notes);
+			// Tag each rendered `<li>` with its note id so the visual-page
+			// split pass can match body `<sup data-footnote-id>` refs to
+			// their matching footnote entry by identity (see page-break.ts).
+			// Each note in `notes` renders as one top-level node via the
+			// DomType.Footnote/Endnote branch of renderElement (→ <li>), so
+			// the rendered-child order mirrors `notes`. The note id is a
+			// DOCX-derived string; using `setAttribute` attribute-encodes it
+			// so it's safe (no CSS or innerHTML sink).
+			for (let i = 0; i < notes.length && i < renderedChildren.length; i++) {
+				const node = renderedChildren[i] as HTMLElement | null;
+				const id = notes[i]?.id;
+				if (node && typeof (node as HTMLElement).setAttribute === 'function' && id) {
+					(node as HTMLElement).setAttribute('data-footnote-id', id);
+				}
+			}
+			return this.h({ tagName: "ol", children: renderedChildren });
 		}
 	}
 
@@ -1700,12 +1725,26 @@ section.${c}>footer { z-index: 1; }
 
 	renderFootnoteReference(elem: WmlNoteReference) {
 		this.currentFootnoteIds.push(elem.id);
-		return this.h({ tagName: "sup", children: [`${this.currentFootnoteIds.length}`] });
+		const sup = this.h({ tagName: "sup", children: [`${this.currentFootnoteIds.length}`] }) as HTMLElement;
+		// Expose the footnote id so the visual-page split pass can match
+		// body references to the corresponding `<ol><li>` by identity rather
+		// than by position. `elem.id` is a DOCX-derived string and therefore
+		// untrusted — `dataset.*` sets it as an attribute value, which the
+		// browser attribute-encodes. Never interpolate it into a class or
+		// CSS selector (see CLAUDE.md security constraints).
+		if (elem.id) sup.dataset.footnoteId = elem.id;
+		return sup;
 	}
 
 	renderEndnoteReference(elem: WmlNoteReference) {
 		this.currentEndnoteIds.push(elem.id);
-		return this.h({ tagName: "sup", children: [`${this.currentEndnoteIds.length}`] });
+		const sup = this.h({ tagName: "sup", children: [`${this.currentEndnoteIds.length}`] }) as HTMLElement;
+		// Same reasoning as renderFootnoteReference — attribute-encoded data
+		// attribute, never a CSS sink. Endnotes are not currently touched by
+		// the visual-page split pass, but emitting the attribute is harmless
+		// and keeps body refs symmetric with footnote refs.
+		if (elem.id) sup.dataset.footnoteId = elem.id;
+		return sup;
 	}
 
 	renderTab(elem: OpenXmlElement) {
