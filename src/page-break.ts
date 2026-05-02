@@ -260,6 +260,23 @@ function redistributeFootnotes(subPages: HTMLElement[]): void {
         if (originalOl.children.length === 0) {
             originalOl.remove();
         }
+
+        // Set `start` on each per-sub-page `<ol>` so the rendered numbering
+        // is continuous across pages. Without this, each `<ol>` would begin
+        // at 1 because the browser's ordered-list counter is per-list —
+        // so a doc with 15 footnotes split across 8 pages would render the
+        // trailing lists as "1.", "1." 2.", "1." 2." 3." 4.", … instead of
+        // "1.", "2." 3.", "4." 5." 6." 7.", … Walk sub-pages in document
+        // order and accumulate the number of <li>s seen so far.
+        let cumulative = 0;
+        for (const page of subPages) {
+            const ol = targetOls.get(page);
+            if (!ol) continue;
+            if (cumulative > 0) {
+                ol.setAttribute('start', String(cumulative + 1));
+            }
+            cumulative += ol.children.length;
+        }
     }
 }
 
