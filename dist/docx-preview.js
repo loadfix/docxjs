@@ -4866,7 +4866,11 @@ section.${c}>footer { z-index: 1; }
         for (const section of sections) {
             if (section.hasAttribute(VISUAL_PAGE_MARKER$1))
                 continue;
-            inserted += splitSection(section, measureFn, slack);
+            const subPages = splitSection(section, measureFn, slack);
+            if (subPages.length > 1) {
+                inserted += subPages.length - 1;
+                redistributeFootnotes(subPages);
+            }
         }
         return inserted;
     }
@@ -4874,17 +4878,17 @@ section.${c}>footer { z-index: 1; }
         const { height, minHeight } = measureFn(section);
         const pageHeight = minHeight > 0 ? minHeight : 0;
         if (pageHeight <= 0)
-            return 0;
+            return [section];
         if (height <= pageHeight * slack)
-            return 0;
+            return [section];
         const article = section.querySelector(':scope > article');
         if (!article)
-            return 0;
+            return [section];
         const children = Array.from(article.children);
         if (children.length === 0)
-            return 0;
+            return [section];
         const articleTopOffset = offsetWithinSection(article, section);
-        let inserted = 0;
+        const subPages = [section];
         let currentArticle = article;
         let currentTop = articleTopOffset;
         let runningHeight = 0;
@@ -4899,7 +4903,7 @@ section.${c}>footer { z-index: 1; }
                 const newArticle = cloneArticleShell(currentArticle);
                 newSection.appendChild(newArticle);
                 currentSection.parentNode.insertBefore(newSection, currentSection.nextSibling);
-                inserted++;
+                subPages.push(newSection);
                 for (let j = i; j < children.length; j++) {
                     newArticle.appendChild(children[j]);
                 }
@@ -4911,7 +4915,58 @@ section.${c}>footer { z-index: 1; }
             }
             runningHeight += ch;
         }
-        return inserted;
+        return subPages;
+    }
+    function redistributeFootnotes(subPages) {
+        const original = subPages[0];
+        const originalOls = Array.from(original.querySelectorAll(':scope > ol'));
+        if (originalOls.length === 0)
+            return;
+        const refsBySubPage = subPages.map((page) => {
+            const nums = new Set();
+            const sups = page.querySelectorAll('article sup');
+            for (const sup of Array.from(sups)) {
+                const t = (sup.textContent ?? '').trim();
+                if (!/^\d+$/.test(t))
+                    continue;
+                nums.add(parseInt(t, 10));
+            }
+            return nums;
+        });
+        for (const originalOl of originalOls) {
+            const firstLi = originalOl.querySelector(':scope > li');
+            if (firstLi && firstLi.id && /^docx-endnote/i.test(firstLi.id)) {
+                continue;
+            }
+            const lis = Array.from(originalOl.children);
+            const targetOls = new Map();
+            targetOls.set(original, originalOl);
+            for (let i = 0; i < lis.length; i++) {
+                const li = lis[i];
+                const footnoteNumber = i + 1;
+                let ownerIdx = -1;
+                for (let p = 0; p < subPages.length; p++) {
+                    if (refsBySubPage[p].has(footnoteNumber)) {
+                        ownerIdx = p;
+                        break;
+                    }
+                }
+                if (ownerIdx <= 0)
+                    continue;
+                const owner = subPages[ownerIdx];
+                let ol = targetOls.get(owner);
+                if (!ol) {
+                    ol = originalOl.cloneNode(false);
+                    ol.removeAttribute('id');
+                    owner.appendChild(ol);
+                    targetOls.set(owner, ol);
+                }
+                ol.appendChild(li);
+            }
+            if (originalOl.children.length === 0) {
+                originalOl.remove();
+            }
+        }
     }
     function offsetWithinSection(child, ancestor, measureFn) {
         const cRect = child.getBoundingClientRect();
