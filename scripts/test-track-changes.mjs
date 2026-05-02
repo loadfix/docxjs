@@ -600,6 +600,40 @@ async function renderFixture(path, options) {
     );
 }
 
+// ── 16. w14:paraId exposed as data-para-id on rendered paragraphs (#128) ──
+// The parser reads w14:paraId via getAttributeNS; the renderer copies it to
+// dataset.paraId when present. Use a fixture whose paragraphs carry w14:paraId
+// attributes (underlines — 5 paraIds). The value must match SAFE_PARA_ID.
+{
+    const SAFE_PARA_ID = /^[A-Za-z0-9_-]+$/;
+    const { container } = await renderFixture('underlines');
+    const withParaId = container.querySelectorAll('p[data-para-id]');
+    note(`16·: underlines fixture produced ${withParaId.length} paragraph(s) with data-para-id`);
+    assert(
+        withParaId.length > 0,
+        '16a: at least one <p> should carry data-para-id when the DOCX declares w14:paraId',
+    );
+    for (const p of withParaId) {
+        const v = p.getAttribute('data-para-id');
+        assert(
+            typeof v === 'string' && v.length > 0,
+            '16b: data-para-id value should be a non-empty string',
+        );
+        assert(
+            SAFE_PARA_ID.test(v),
+            `16c: data-para-id="${v}" should match SAFE_PARA_ID /^[A-Za-z0-9_-]+$/`,
+        );
+    }
+    // The dataset.paraId camelCase round-trips through the attribute.
+    const first = withParaId[0];
+    if (first) {
+        assert(
+            first.dataset.paraId === first.getAttribute('data-para-id'),
+            '16d: dataset.paraId should equal the data-para-id attribute',
+        );
+    }
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -608,5 +642,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${15} scenarios passed`);
+    console.log(`\n✓ all ${16} scenarios passed`);
 }
