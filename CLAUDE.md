@@ -23,16 +23,18 @@ Follow this order for any change that affects rendering:
 npm run serve &                  # Node static server on :8765 (PORT=… to override)
 #   — or `npm run dev` to rebuild first
 # then, via Playwright MCP:
-#   browser_navigate → http://localhost:8765/?test=<fixture>
+#   browser_navigate → http://localhost:8765/
+#   browser_file_upload → tests/render-test/<fixture>/document.docx
+#     (uploaded to the `#files` input; fileInput.change fires renderDocx)
 #   browser_evaluate → set docxOptions.*, call renderDocx(currentDocument)
 #   browser_evaluate → querySelectorAll and assert
 #   browser_take_screenshot for visual evidence
 #   kill %1 when done
 ```
 
-The `index.html` demo exposes `docxOptions`, `renderDocx`, and `currentDocument` as globals, so the Playwright flow is driven almost entirely through `browser_evaluate`.
+The `index.html` demo exposes `docxOptions`, `renderDocx`, and `currentDocument` as globals, so the Playwright flow is driven almost entirely through `browser_evaluate` once a file is loaded.
 
-Fixtures live in `tests/render-test/<name>/document.docx`. The demo's test dropdown is populated from a hardcoded list in `index.html` — add new fixture names there if you want them selectable via `?test=<name>`.
+Fixtures live in `tests/render-test/<name>/document.docx`. The demo has no in-UI fixture picker — load a DOCX via the file input or drag-drop (users of a production viewer shouldn't see test scaffolding).
 
 ## Architecture touch points
 

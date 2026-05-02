@@ -37,11 +37,6 @@
     <div class="hstack p-2 gap-2 bg-light no-print">
 
         <input id="files" type="file" class="form-control" style="width: 50ch;" accept=".docx" />
-        <div class="col-2">
-            <select id="testDocuments" class="form-select">
-                <option disabled selected>-- Test Documents --</option>
-            </select>
-        </div>
         <button id="loadButton" class="btn btn-primary px-4">Reload</button>
         <div class="dropdown">
             <button class="btn btn-secondary dropdown-toggle" type="button" id="optionsMenuButton"
@@ -51,7 +46,6 @@
             <ul id="optionsMenu" class="dropdown-menu" aria-labelledby="optionsMenuButton">
             </ul>
         </div>
-        <button id="saveTestButton" class="btn btn-primary px-4" style="display: none">Save Test</button>
     </div>
 
     <div class="flex-grow-1 d-flex flex-row" style="height: 0;">
@@ -73,7 +67,6 @@
         const container = document.querySelector("#document-container");
         const fileInput = document.querySelector("#files");
         const loadButton = document.querySelector("#loadButton");
-        const testDocuments = document.querySelector("#testDocuments");
 
         async function renderDocx(file) {
             currentDocument = file; 
@@ -90,10 +83,7 @@
             console.log(res);
         }
         
-        fileInput.addEventListener("change", ev => {
-            renderDocx(fileInput.files[0]);
-            testDocuments.selectedIndex = 0;
-        });
+        fileInput.addEventListener("change", ev => renderDocx(fileInput.files[0]));
         loadButton.addEventListener("click", ev => renderDocx(fileInput.files[0]));
 
         const menu = document.querySelector("#optionsMenu");
@@ -137,36 +127,6 @@
             ev.preventDefault();
             renderDocx(ev.dataTransfer.files[0]);
         });
-
-        const selectedTest = new URLSearchParams(location.search).get('test');
-
-        for (let testName of ['text','underlines','text-break','line-spacing','numbering','page-layout','table','table-spans','footnote','header-footer','revision','revision-rich','equation'])
-        {
-            var op = document.createElement("option");
-            op.value = testName;
-            op.label = testName;
-            op.selected = testName == selectedTest;
-            testDocuments.add(op);
-        }
-
-        testDocuments.addEventListener("change", e => tryLoadTest(testDocuments.value));
-
-        tryLoadTest(selectedTest);
-
-        document.querySelector("#saveTestButton").addEventListener("click", async () => {
-            const file = await showSaveFilePicker({ types: [ { description: "HTML File", accept: { "text/html": [".html"] } }] });
-            const stream = await file.createWritable();
-            await stream.write(container.innerHTML);
-            await stream.close();
-        });
-
-        async function tryLoadTest(testName) {
-            if (testName) {
-                let resp = await fetch(`tests/render-test/${testName}/document.docx`);
-                renderDocx(await resp.blob());
-                fileInput.value = "";
-            }
-        }
     </script>
 </body>
 
