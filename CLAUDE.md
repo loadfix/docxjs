@@ -28,9 +28,11 @@ npm run serve &                  # Node static server on :8765 (PORT=… to over
 #     (uploaded to the `#files` input; fileInput.change fires renderDocx)
 #   browser_evaluate → set docxOptions.*, call renderDocx(currentDocument)
 #   browser_evaluate → querySelectorAll and assert
-#   browser_take_screenshot for visual evidence
+#   browser_take_screenshot with filename="./.screenshots/<name>.png"
 #   kill %1 when done
 ```
+
+**Screenshot convention**: always pass `filename="./.screenshots/<descriptive-name>.png"` to `browser_take_screenshot` so images don't pile up in the repo root. `.screenshots/` is gitignored. `.playwright-mcp/` (auto-created by the MCP for console/snapshot logs) is also gitignored — leave it alone.
 
 The `index.html` demo exposes `docxOptions`, `renderDocx`, and `currentDocument` as globals, so the Playwright flow is driven almost entirely through `browser_evaluate` once a file is loaded.
 
