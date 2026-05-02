@@ -3709,6 +3709,7 @@ section.${c}>footer { z-index: 1; }
 .${c} span { white-space: pre-wrap; overflow-wrap: break-word; }
 .${c} a { color: inherit; text-decoration: inherit; }
 .${c} svg { fill: transparent; }
+.${c}-footnote-ref, .${c}-endnote-ref { font-size: 0.65em; line-height: 0; vertical-align: super; }
 `;
             if (this.options.renderComments) {
                 if (this.useSidebar) {
@@ -4341,14 +4342,22 @@ section.${c}>footer { z-index: 1; }
         }
         renderFootnoteReference(elem) {
             this.currentFootnoteIds.push(elem.id);
-            const sup = this.h({ tagName: "sup", children: [`${this.currentFootnoteIds.length}`] });
+            const sup = this.h({
+                tagName: "sup",
+                className: `${this.className}-footnote-ref`,
+                children: [`${this.currentFootnoteIds.length}`]
+            });
             if (elem.id)
                 sup.dataset.footnoteId = elem.id;
             return sup;
         }
         renderEndnoteReference(elem) {
             this.currentEndnoteIds.push(elem.id);
-            const sup = this.h({ tagName: "sup", children: [`${this.currentEndnoteIds.length}`] });
+            const sup = this.h({
+                tagName: "sup",
+                className: `${this.className}-endnote-ref`,
+                children: [`${this.currentEndnoteIds.length}`]
+            });
             if (elem.id)
                 sup.dataset.footnoteId = elem.id;
             return sup;
