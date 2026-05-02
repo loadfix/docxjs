@@ -884,11 +884,11 @@ section.${c}>ol>li::before {
 .${c}-wrapper { flex-flow: row !important; align-items: flex-start !important; }
 .${c}-doc-container { flex: 1; display: flex; flex-flow: column; align-items: center; min-width: 0; overflow: auto; padding: 30px; padding-bottom: 0; }
 .${c}-doc-container>section.${c} { background: white; box-shadow: 0 0 10px rgba(0, 0, 0, 0.5); margin-bottom: 30px; }
-.${c}-comment-sidebar { width: 320px; min-width: 260px; background: #fafafa; border-left: 1px solid #ddd; display: flex; flex-direction: column; transition: width 0.2s, min-width 0.2s, padding 0.2s; }
-/* packed mode: panel stays pinned as a short compact list at the top of the viewport. */
-.${c}-comment-sidebar.${c}-sidebar-packed { position: sticky; top: 0; height: 100vh; overflow: hidden; align-self: flex-start; }
-/* anchored mode: panel grows to match the document height and rides the same scroll container so each card stays next to its anchor. The toolbar inside it is sticky so it's always visible. */
-.${c}-comment-sidebar.${c}-sidebar-anchored { align-self: stretch; }
+.${c}-comment-sidebar { width: 320px; min-width: 260px; display: flex; flex-direction: column; transition: width 0.2s, min-width 0.2s, padding 0.2s; }
+/* packed mode: panel stays pinned as a short compact list at the top of the viewport. Background + border frame the compact list. */
+.${c}-comment-sidebar.${c}-sidebar-packed { position: sticky; top: 0; height: 100vh; overflow: hidden; align-self: flex-start; background: #fafafa; border-left: 1px solid #ddd; }
+/* anchored mode: panel grows to match the document height and rides the same scroll container so each card stays next to its anchor. No background/border — cards float on the page backdrop. */
+.${c}-comment-sidebar.${c}-sidebar-anchored { align-self: stretch; background: transparent; border-left: none; }
 .${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
 .${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
 .${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
