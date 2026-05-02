@@ -65,3 +65,76 @@ All string content in a DOCX is attacker-controlled. Treat `author`, `id`, `para
 - Open one PR per logical change. Large features can stack PRs, but GitHub auto-closes stacked PRs when the base branch is deleted on merge — expect to recreate intermediate PRs if you merge bottom-up.
 - `.github/workflows/` is intentionally empty (removed 2026-05-01). No automated checks run on PRs; rely on local build + harness + Playwright.
 - `dist/` is committed. Rebuild before any commit that touches `src/`.
+
+## Parallelising work with subagents
+
+When there are multiple independent tasks (bug fixes on different files, triage of many issues, a set of small low-risk patches), prefer spawning **multiple subagents in parallel** over working through them sequentially. The Agent tool accepts `run_in_background: true` — use it. Typical win: 5 small fixes in ~2 minutes wall-clock instead of 10 minutes sequential.
+
+**When to fan out**:
+- The tasks don't depend on each other's outputs.
+- Each task is self-contained enough to explain in a short prompt.
+- The scope is bounded (you can predict the files touched).
+
+**When NOT to fan out**:
+- Tasks are sequential by nature (e.g., "write the parser, then have the renderer use it").
+- You need to maintain a single coherent narrative across the work (design docs, major refactors).
+- One task's output changes the inputs to another.
+
+### Required: isolated git worktrees
+
+Each subagent MUST work in its own git worktree. Multiple agents operating on the same working tree at `/home/ben/code/docxjs` will silently overwrite each other's edits — observed repeatedly in practice. The pattern each subagent should follow:
+
+```bash
+git fetch origin
+git worktree add /tmp/docxjs-<task-name> origin/master -b <branch-name>
+cd /tmp/docxjs-<task-name>
+ln -s /home/ben/code/docxjs/node_modules node_modules   # reuse deps
+# ...do work, commit, push...
+cd /home/ben/code/docxjs
+git worktree remove /tmp/docxjs-<task-name>
+```
+
+Include this recipe in every subagent prompt for parallel work.
+
+### Integration pass (yours, not the subagents')
+
+Subagents should **not** rebuild `dist/`, add harness scenarios, or open PRs. Instead, reserve those for a single integration pass after all subagents complete:
+
+1. Pull each branch into an umbrella branch (`chore/follow-ups` or similar).
+2. Rebuild `dist/` once.
+3. Add any new harness scenarios in one coherent pass (avoids scenario-numbering conflicts — observed earlier in this project's history when multiple branches each tried to claim "scenario 9").
+4. Run `npm run test:track-changes` and Playwright verification.
+5. Open one combined PR, or merge the subagent PRs in dependency order.
+
+### Prompt template for a fan-out subagent
+
+```
+You're fixing <issue> in the docxjs project at /home/ben/code/docxjs.
+
+## Context
+Read: <files>
+Start by creating an isolated worktree (see CLAUDE.md "Parallelising work
+with subagents"). Do all work there. Do NOT touch the main checkout.
+
+## The fix
+<scope>
+
+## Constraints
+- Do NOT rebuild dist/.
+- Do NOT add harness scenarios in scripts/test-track-changes.mjs.
+- Do NOT open a PR.
+
+## Verification
+npm run build must succeed.
+
+## Commit
+One commit on <branch-name>:
+<message>
+
+## Report back (under 150 words)
+- Files changed.
+- Whether npm run build passed.
+- Any decisions worth flagging.
+```
+
+Keep the "Do NOT" list explicit — agents happily do all three by default, which creates conflicts you then have to untangle.
