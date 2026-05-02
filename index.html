@@ -13,9 +13,6 @@
     <script crossorigin src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
     <!--library-->
     <script src="dist/docx-preview.js"></script>
-    <!--thumbnail example-->
-    <script src="./demo/thumbnail.example.js"></script>
-    <link href="./demo/thumbnail.example.css" rel="stylesheet">
     <script crossorigin src="https://unpkg.com/tiff.js@1.0.0/tiff.min.js"></script>
     <script crossorigin src="https://unpkg.com/rtf.js@3.0.9/dist/WMFJS.bundle.js"></script>
     <script src="./demo/docx-preprocessor.js"></script>
@@ -29,6 +26,38 @@
             .overflow-auto {
                 overflow: initial !important;
             }
+        }
+
+        /* Demo-side thumbnail drawer chrome. Per-thumbnail styles ship
+           with docx.renderThumbnails. */
+        details.docx-thumbnails {
+            position: relative;
+            background-color: rgb(101, 101, 101);
+            border-right: 1px solid black;
+            min-width: 1rem;
+        }
+        details.docx-thumbnails[open] {
+            min-width: 140px;
+        }
+        details.docx-thumbnails summary {
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: 1rem;
+            padding-left: 3px;
+        }
+        details.docx-thumbnails summary:hover {
+            background-color: rgb(0 0 0 / 50%);
+        }
+        details.docx-thumbnails summary::marker {
+            color: white;
+        }
+        .docx-thumbnails-container {
+            height: 100%;
+            overflow: auto;
+            scrollbar-gutter: stable both-edges;
+            padding: 0.25rem 0.25rem 0.25rem 1.25rem;
         }
     </style>
 </head>
@@ -79,7 +108,7 @@
             // render document
             let res = await docx.renderAsync(docxBlob, container, null, docxOptions)
             // optional - render thumbnails
-            renderThumbnails(container, document.querySelector("#thumbnails-container"));
+            docx.renderThumbnails(container, document.querySelector("#thumbnails-container"));
             console.log(res);
         }
         

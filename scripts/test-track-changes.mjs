@@ -42,7 +42,7 @@ const umd = readFileSync(`${repo}/dist/docx-preview.js`, 'utf8');
 // present it attaches to `globalThis` under the `name` configured in rollup
 // ("docx"). We run it as a Function so it sees our globals.
 new Function('require', umd)(() => ({})); // require stub for any node fallback
-const { parseAsync, renderDocument } = globalThis.docx;
+const { parseAsync, renderDocument, renderThumbnails } = globalThis.docx;
 
 const failures = [];
 const warnings = [];
@@ -262,6 +262,59 @@ async function renderFixture(path, options) {
     );
 }
 
+// ── 10. Thumbnail API ─────────────────────────────────────────────────────
+// Thumbnails-per-page: the API should produce at least one thumbnail per
+// rendered <section>. In jsdom there's no layout so paginateSection falls
+// back to 1 thumbnail per section, which is what we assert here. The
+// multi-page path is covered by Playwright in-browser checks.
+{
+    assert(typeof renderThumbnails === 'function', '10a: docx.renderThumbnails export should be a function');
+
+    const { container: main } = await renderFixture('text');
+    document.body.appendChild(main);
+    const thumbs = document.createElement('div');
+    document.body.appendChild(thumbs);
+
+    const sectionCount = main.querySelectorAll('section.docx').length;
+    note(`10·: text fixture produced ${sectionCount} section(s)`);
+    assert(sectionCount > 0, '10b: fixture should render at least one section');
+
+    const handle = renderThumbnails(main, thumbs);
+    assert(typeof handle?.dispose === 'function', '10c: renderThumbnails should return { dispose }');
+
+    const thumbEls = thumbs.querySelectorAll('.docx-thumbnail');
+    assert(
+        thumbEls.length >= sectionCount,
+        `10d: expected >= ${sectionCount} thumbnails (one per page), got ${thumbEls.length}`,
+    );
+    for (let i = 0; i < thumbEls.length; i++) {
+        const t = thumbEls[i];
+        assert(!!t.querySelector('.docx-thumbnail-preview'), `10e·${i}: missing preview element`);
+        assert(t.querySelector('.docx-thumbnail-label')?.textContent === String(i + 1), `10f·${i}: label should be "${i + 1}"`);
+        assert(t.getAttribute('tabindex') === '0', `10g·${i}: tabindex=0 expected`);
+    }
+
+    // Idempotent re-run: should replace, not append.
+    const handle2 = renderThumbnails(main, thumbs);
+    assert(
+        thumbs.querySelectorAll('.docx-thumbnail').length === thumbEls.length,
+        '10h: re-running should replace (not append)',
+    );
+
+    // Style injected once.
+    assert(
+        document.head.querySelectorAll('style[data-docxjs-thumbnails]').length === 1,
+        '10i: exactly one injected <style> expected',
+    );
+
+    // dispose clears the thumbnail container.
+    handle2.dispose();
+    assert(thumbs.children.length === 0, '10j: dispose() should clear the thumbnail container');
+
+    main.remove();
+    thumbs.remove();
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -270,5 +323,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${9} scenarios passed`);
+    console.log(`\n✓ all ${10} scenarios passed`);
 }
