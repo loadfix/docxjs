@@ -246,6 +246,22 @@ async function renderFixture(path, options) {
     );
 }
 
+// ── 9. Comments sidebar has no Comments collapse/expand toggle ─────────────
+{
+    const { container } = await renderFixture('revision', {
+        renderComments: true,
+        comments: { sidebar: true },
+    });
+    assert(
+        container.querySelectorAll('.docx-sidebar-toggle').length === 0,
+        '9a: no .docx-sidebar-toggle elements should exist',
+    );
+    assert(
+        container.querySelectorAll('.docx-sidebar-collapsed').length === 0,
+        '9b: no .docx-sidebar-collapsed elements should exist',
+    );
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -254,5 +270,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${8} scenarios passed`);
+    console.log(`\n✓ all ${9} scenarios passed`);
 }
