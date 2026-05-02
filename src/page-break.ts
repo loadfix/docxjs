@@ -82,8 +82,9 @@ export function applyVisualPageBreaks(
             inserted += subPages.length - 1;
             // After the content split, footnotes still live on the original
             // section (they're children of <section>, not <article>). Move
-            // each <li> to whichever sub-page contains its matching <sup>
-            // reference so footnotes appear on the page that cites them.
+            // each <li> to whichever sub-page cites its footnote id (via
+            // matching `data-footnote-id` on <sup> and <li>), so footnotes
+            // appear on the page that references them.
             redistributeFootnotes(subPages);
         }
     }
@@ -170,16 +171,23 @@ function splitSection(section: HTMLElement, measureFn: MeasureFn, slack: number)
 
 // After splitting, the footnote `<ol>` emitted by the renderer still lives on
 // the original section (subPages[0]) because it's a child of `<section>`, not
-// of the split `<article>`. Each `<li>` corresponds to a footnote whose number
-// (1-based index in the `<ol>`) matches the text of some `<sup>` reference
-// inside one of the sub-page articles. Move each `<li>` to the sub-page that
-// cites it so footnotes appear on the visual page containing their reference.
+// of the split `<article>`. Each `<li>` carries `data-footnote-id` from
+// renderNotes and each body `<sup>` carries the same from
+// renderFootnoteReference — move each `<li>` to the sub-page whose body cites
+// its id.
 //
-// The original `<ol>` may have no class or inline style (the renderer emits a
-// bare `<ol>`) — we still clone its attribute shape with cloneNode(false) so
-// if customisation is added later it's preserved on every sub-page. No DOCX
-// strings are interpolated; all operations are DOM moves between rendered
-// nodes, with reference matching on the rendered numeric text content.
+// Matching by id (not by `<sup>` position) avoids two bugs: (1) duplicate
+// citations of the same footnote id — common in academic writing — would
+// previously double-count and steal footnotes from later sub-pages; (2) stray
+// `<sup>` elements that aren't footnote refs (e.g. superscript formatting)
+// would inflate the count.
+//
+// Security: `data-footnote-id` values originate from DOCX (elem.id on
+// footnote refs / notes), i.e. attacker-controlled per CLAUDE.md. We never
+// interpolate them into a CSS selector. Instead we iterate the wildcard
+// `[data-footnote-id]` selector and compare values via `dataset.footnoteId`
+// in JS. (If a future change wants the selector form, wrap the id with
+// `CSS.escape` before interpolation.)
 function redistributeFootnotes(subPages: HTMLElement[]): void {
     const original = subPages[0];
     const originalOls = Array.from(
@@ -187,29 +195,25 @@ function redistributeFootnotes(subPages: HTMLElement[]): void {
     );
     if (originalOls.length === 0) return;
 
-    // Collect the set of footnote-reference numbers cited in each sub-page.
-    // Matching by `<sup>` text content inside the section's `<article>`. The
-    // renderer's `renderFootnoteReference` emits `<sup>N</sup>` where N is
-    // the 1-based footnote index; the same number can appear in multiple
-    // `<sup>`s (e.g. inside an ins/del wrapper) but we only need to know
-    // *which* sub-page owns each footnote number.
-    const refsBySubPage: Set<number>[] = subPages.map((page) => {
-        const nums = new Set<number>();
-        const sups = page.querySelectorAll<HTMLElement>('article sup');
+    // Collect the set of unique footnote ids cited in each sub-page's
+    // article. Deduping is important: academic writing cites the same
+    // footnote id multiple times and we want one `<li>` per id, not N.
+    const refsBySubPage: Set<string>[] = subPages.map((page) => {
+        const ids = new Set<string>();
+        const sups = page.querySelectorAll<HTMLElement>('article [data-footnote-id]');
         for (const sup of Array.from(sups)) {
-            const t = (sup.textContent ?? '').trim();
-            if (!/^\d+$/.test(t)) continue;
-            nums.add(parseInt(t, 10));
+            const id = sup.dataset.footnoteId;
+            if (id) ids.add(id);
         }
-        return nums;
+        return ids;
     });
 
     for (const originalOl of originalOls) {
         // Skip endnote lists if we can detect them. The renderer emits
-        // footnotes and endnotes as bare `<ol>` siblings with no class, so
-        // there's nothing to discriminate on in today's output. If the
-        // element or its items carry an `docx-endnote` id prefix, leave it
-        // alone out of caution.
+        // footnotes and endnotes as bare `<ol>` siblings; the endnote list
+        // comes last and sits on the final visual page only (see
+        // renderSections in html-renderer.ts). If the first `<li>`'s id
+        // prefix indicates an endnote, leave the list alone.
         const firstLi = originalOl.querySelector<HTMLLIElement>(':scope > li');
         if (firstLi && firstLi.id && /^docx-endnote/i.test(firstLi.id)) {
             continue;
@@ -221,20 +225,23 @@ function redistributeFootnotes(subPages: HTMLElement[]): void {
         const targetOls = new Map<HTMLElement, HTMLOListElement>();
         targetOls.set(original, originalOl);
 
-        for (let i = 0; i < lis.length; i++) {
-            const li = lis[i];
-            const footnoteNumber = i + 1; // 1-based, matches <sup> text
-            // Find the first sub-page whose article cites this number.
+        for (const li of lis) {
+            const id = li.dataset.footnoteId;
+            if (!id) continue; // No identity → can't match; leave in sink.
+
+            // Find the first sub-page whose article cites this id.
             let ownerIdx = -1;
             for (let p = 0; p < subPages.length; p++) {
-                if (refsBySubPage[p].has(footnoteNumber)) {
+                if (refsBySubPage[p].has(id)) {
                     ownerIdx = p;
                     break;
                 }
             }
 
             // No reference found → leave the li in the original `<ol>` as a
-            // safe sink so no footnote content is lost.
+            // safe sink so no footnote content is lost. ownerIdx === 0
+            // means the first sub-page (i.e. the original) already owns it;
+            // the `<li>` is already in originalOl, no move required.
             if (ownerIdx <= 0) continue;
 
             const owner = subPages[ownerIdx];
