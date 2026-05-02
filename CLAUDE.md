@@ -20,7 +20,8 @@ Follow this order for any change that affects rendering:
 ### Browser-test recipe
 
 ```bash
-python3 -m http.server 8765 &    # serve repo root
+npm run serve &                  # Node static server on :8765 (PORT=… to override)
+#   — or `npm run dev` to rebuild first
 # then, via Playwright MCP:
 #   browser_navigate → http://localhost:8765/?test=<fixture>
 #   browser_evaluate → set docxOptions.*, call renderDocx(currentDocument)

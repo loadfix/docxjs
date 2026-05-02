@@ -34,6 +34,8 @@
     "build": "rollup --config rollup.config.mjs",
     "build-prod": "rollup --config rollup.config.mjs --environment BUILD:production",
     "watch": "rollup --config rollup.config.mjs --watch",
+    "serve": "node scripts/dev-server.mjs",
+    "dev": "npm run build && npm run serve",
     "e2e": "karma start karma.conf.cjs --single-run",
     "e2e-watch": "karma start karma.conf.cjs",
     "test:track-changes": "npm run build && node scripts/test-track-changes.mjs"
