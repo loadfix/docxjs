@@ -102,24 +102,39 @@
 
         const menu = document.querySelector("#optionsMenu");
 
-        Object.keys(docxOptions).filter(key => !/^(className|h)$/i.test(key)).forEach(function(key) {
+        function addToggle(label, getter, setter) {
             const listItem = document.createElement("li");
             listItem.innerHTML = `
             <div class="dropdown-item">
                 <div class="form-check">
-                    <label class="form-check-name"><input type="checkbox" class="form-check-input" ${docxOptions[key] ? 'checked' : ''}> ${key}</label>
+                    <label class="form-check-name"><input type="checkbox" class="form-check-input" ${getter() ? 'checked' : ''}> ${label}</label>
                 </div>
             </div>`;
 
             const checkInput = listItem.querySelector("input");
-
-            checkInput.addEventListener("click", (e) => {
-                docxOptions[key] = checkInput.checked;
+            checkInput.addEventListener("click", () => {
+                setter(checkInput.checked);
                 renderDocx(currentDocument);
             });
-
             menu.appendChild(listItem);
-        });
+        }
+
+        Object.keys(docxOptions)
+            .filter(key => !/^(className|h)$/i.test(key))
+            .filter(key => typeof docxOptions[key] === 'boolean')
+            .forEach(function(key) {
+                addToggle(key, () => docxOptions[key], (v) => { docxOptions[key] = v; });
+            });
+
+        // Nested options for Track Changes (see #3, #4, #5).
+        const changesSeparator = document.createElement("li");
+        changesSeparator.innerHTML = '<hr class="dropdown-divider"><h6 class="dropdown-header">changes.*</h6>';
+        menu.appendChild(changesSeparator);
+        for (const key of ['show','showInsertions','showDeletions','showMoves','showFormatting','colorByAuthor','changeBar','legend','readOnly','sidebarCards']) {
+            addToggle(`changes.${key}`,
+                () => docxOptions.changes?.[key] ?? false,
+                (v) => { docxOptions.changes = { ...docxOptions.changes, [key]: v }; });
+        }
 
         container.addEventListener("dragover", ev => ev.preventDefault());
         container.addEventListener("drop", ev => {
@@ -129,7 +144,7 @@
 
         const selectedTest = new URLSearchParams(location.search).get('test');
 
-        for (let testName of ['text','underlines','text-break','line-spacing','numbering','page-layout','table','table-spans','footnote','header-footer','revision','equation'])
+        for (let testName of ['text','underlines','text-break','line-spacing','numbering','page-layout','table','table-spans','footnote','header-footer','revision','revision-rich','equation'])
         {
             var op = document.createElement("option");
             op.value = testName;
