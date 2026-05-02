@@ -488,6 +488,67 @@ async function renderFixture(path, options) {
     root.remove();
 }
 
+// ── 14. Thumbnails short-circuit when page-break splitter has run ─────────
+// When src/page-break.ts splits a section into multiple visual pages, each
+// injected sibling is a separate `<section class="docx">` carrying
+// `data-docxjs-visual-page`. In that state, renderThumbnails must emit one
+// thumbnail per section (no re-pagination) — otherwise thumbnails would
+// double-count once per splitter page and once per paginateSection pass.
+{
+    // Baseline: no splitter marker → one thumbnail per section (jsdom has no
+    // layout so paginateSection short-circuits to one-per-section anyway).
+    const { container: baselineMain } = await renderFixture('text');
+    document.body.appendChild(baselineMain);
+    const baselineThumbs = document.createElement('div');
+    document.body.appendChild(baselineThumbs);
+    const baselineSections = baselineMain.querySelectorAll('section.docx').length;
+    renderThumbnails(baselineMain, baselineThumbs);
+    const baselineThumbCount = baselineThumbs.querySelectorAll('.docx-thumbnail').length;
+    note(`14·: baseline text fixture → ${baselineSections} section(s), ${baselineThumbCount} thumbnail(s)`);
+    assert(
+        baselineThumbCount === baselineSections,
+        `14a: baseline expected ${baselineSections} thumbnails (one per section), got ${baselineThumbCount}`,
+    );
+    baselineMain.remove();
+    baselineThumbs.remove();
+
+    // Simulated post-splitter state: two sections, second carries the
+    // visual-page marker. renderThumbnails must short-circuit and emit
+    // exactly 2 thumbnails even if the jsdom fallback in paginateSection
+    // would otherwise still hand back one page per section (identical
+    // count here, but the short-circuit path runs — verified in-browser).
+    const synthMain = document.createElement('div');
+    const s1 = document.createElement('section');
+    s1.className = 'docx';
+    s1.appendChild(document.createElement('article'));
+    const s2 = document.createElement('section');
+    s2.className = 'docx';
+    s2.setAttribute('data-docxjs-visual-page', '');
+    s2.appendChild(document.createElement('article'));
+    synthMain.appendChild(s1);
+    synthMain.appendChild(s2);
+    document.body.appendChild(synthMain);
+    const synthThumbs = document.createElement('div');
+    document.body.appendChild(synthThumbs);
+
+    renderThumbnails(synthMain, synthThumbs);
+    const synthThumbCount = synthThumbs.querySelectorAll('.docx-thumbnail').length;
+    note(`14·: synthetic post-splitter (2 sections, 1 marked) → ${synthThumbCount} thumbnail(s)`);
+    assert(
+        synthThumbCount === 2,
+        `14b: post-splitter state should emit exactly 2 thumbnails (no re-pagination), got ${synthThumbCount}`,
+    );
+    // No page-anchor elements should have been injected: singlePage short-
+    // circuit skips paginateSection entirely.
+    assert(
+        synthMain.querySelectorAll('[data-docxjs-page-anchor]').length === 0,
+        '14c: short-circuit path should not inject page-anchor elements',
+    );
+
+    synthMain.remove();
+    synthThumbs.remove();
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -496,5 +557,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${13} scenarios passed`);
+    console.log(`\n✓ all ${14} scenarios passed`);
 }

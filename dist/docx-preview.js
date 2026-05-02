@@ -4831,14 +4831,14 @@ section.${c}>footer { z-index: 1; }
         const minHeight = cs ? parseFloat(cs.minHeight) || 0 : 0;
         return { width, height, minHeight };
     };
-    const VISUAL_PAGE_MARKER = 'data-docxjs-visual-page';
+    const VISUAL_PAGE_MARKER$1 = 'data-docxjs-visual-page';
     function applyVisualPageBreaks(bodyContainer, options = {}, measureFn = defaultMeasure) {
         const className = options.className ?? 'docx';
         const slack = options.slack ?? 1.1;
         const sections = Array.from(bodyContainer.querySelectorAll(`section.${className}`));
         let inserted = 0;
         for (const section of sections) {
-            if (section.hasAttribute(VISUAL_PAGE_MARKER))
+            if (section.hasAttribute(VISUAL_PAGE_MARKER$1))
                 continue;
             inserted += splitSection(section, measureFn, slack);
         }
@@ -4898,7 +4898,7 @@ section.${c}>footer { z-index: 1; }
     function cloneSectionShell(source) {
         const shell = source.cloneNode(false);
         shell.removeAttribute('id');
-        shell.setAttribute(VISUAL_PAGE_MARKER, '');
+        shell.setAttribute(VISUAL_PAGE_MARKER$1, '');
         return shell;
     }
     function cloneArticleShell(source) {
@@ -4908,6 +4908,7 @@ section.${c}>footer { z-index: 1; }
     }
 
     const STYLE_MARKER = 'data-docxjs-thumbnails';
+    const VISUAL_PAGE_MARKER = 'data-docxjs-visual-page';
     function findScrollingAncestor(el) {
         let cur = el?.parentElement ?? null;
         while (cur) {
@@ -4971,6 +4972,14 @@ section.${c}>footer { z-index: 1; }
         const minHeight = cs ? parseFloat(cs.minHeight) || 0 : 0;
         return { width, height, minHeight };
     }
+    function singlePage(section, win) {
+        const { width, height, minHeight } = measure(section, win);
+        const pageHeight = minHeight > 0 ? minHeight : height;
+        return [{
+                section, scrollTarget: section,
+                topOffset: 0, pageWidth: width, pageHeight,
+            }];
+    }
     function paginateSection(section, win) {
         const { width, height, minHeight } = measure(section, win);
         const pageHeight = minHeight > 0 ? minHeight : height;
@@ -5028,9 +5037,13 @@ section.${c}>footer { z-index: 1; }
         ensureStyle(mainContainer.ownerDocument, className, activeClassName);
         thumbnailContainer.innerHTML = '';
         const sections = Array.from(mainContainer.querySelectorAll(`section.${className}`));
+        const splitterRan = mainContainer.querySelector(`section[${VISUAL_PAGE_MARKER}]`) !== null;
         const pages = [];
         for (const section of sections) {
-            for (const p of paginateSection(section, win)) {
+            const sectionPages = splitterRan
+                ? singlePage(section, win)
+                : paginateSection(section, win);
+            for (const p of sectionPages) {
                 pages.push(p);
             }
         }
