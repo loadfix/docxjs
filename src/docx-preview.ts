@@ -132,18 +132,18 @@ function mergeOptions(userOptions?: Partial<Options>): Options {
     return ops;
 }
 
-export function parseAsync(data: Blob | any, userOptions?: Partial<Options>): Promise<any>  {
+export function parseAsync(data: Blob | any, userOptions?: Partial<Options>): Promise<WordDocument>  {
     const ops = mergeOptions(userOptions);
     return WordDocument.load(data, new DocumentParser(ops), ops);
 }
 
-export async function renderDocument(document: any, userOptions?: Partial<Options>): Promise<any> {
+export async function renderDocument(document: any, userOptions?: Partial<Options>): Promise<Node[]> {
     const ops = mergeOptions(userOptions);
     const renderer = new HtmlRenderer();
     return await renderer.render(document, ops);
 }
 
-export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, styleContainer?: HTMLElement, userOptions?: Partial<Options>): Promise<any> {
+export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, styleContainer?: HTMLElement, userOptions?: Partial<Options>): Promise<WordDocument> {
 	const doc = await parseAsync(data, userOptions);
 	const nodes = await renderDocument(doc, userOptions);
 
