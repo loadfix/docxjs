@@ -1354,6 +1354,12 @@
         };
     }
 
+    function sanitizeVmlColor(value) {
+        if (typeof value !== 'string')
+            return null;
+        const stripped = value.replace(/\s*\[\d+\]\s*$/, '');
+        return sanitizeCssColor(stripped);
+    }
     class VmlElement extends OpenXmlElementBase {
         constructor() {
             super(...arguments);
@@ -1390,9 +1396,12 @@
                 case "style":
                     result.cssStyleText = at.value;
                     break;
-                case "fillcolor":
-                    result.attrs.fill = at.value;
+                case "fillcolor": {
+                    const fill = sanitizeVmlColor(at.value);
+                    if (fill)
+                        result.attrs.fill = fill;
                     break;
+                }
                 case "from":
                     const [x1, y1] = parsePoint(at.value);
                     Object.assign(result.attrs, { x1, y1 });
@@ -1431,10 +1440,13 @@
         return result;
     }
     function parseStroke(el) {
-        return {
-            'stroke': globalXmlParser.attr(el, "color"),
+        const result = {
             'stroke-width': globalXmlParser.lengthAttr(el, "weight", LengthUsage.Emu) ?? '1px'
         };
+        const stroke = sanitizeVmlColor(globalXmlParser.attr(el, "color"));
+        if (stroke)
+            result['stroke'] = stroke;
+        return result;
     }
     function parseFill(el) {
         return {};
@@ -5228,6 +5240,7 @@ section.${c}>footer { z-index: 1; }
     exports.renderThumbnails = renderThumbnails;
     exports.sanitizeCssColor = sanitizeCssColor;
     exports.sanitizeFontFamily = sanitizeFontFamily;
+    exports.sanitizeVmlColor = sanitizeVmlColor;
 
 }));
 //# sourceMappingURL=docx-preview.js.map

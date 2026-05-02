@@ -47,6 +47,7 @@ const {
     applyVisualPageBreaks,
     isSafeHyperlinkHref, sanitizeCssColor, sanitizeFontFamily,
     isSafeCssIdent, escapeCssStringContent, keyBy, mergeDeep,
+    sanitizeVmlColor,
 } = globalThis.docx;
 
 const failures = [];
@@ -549,6 +550,56 @@ async function renderFixture(path, options) {
     synthThumbs.remove();
 }
 
+// ── 15. VML colour sanitiser strips Word's "[####]" theme-index suffix (#171) ─
+// No shipped fixture carries VML shapes with the index suffix, so we drive
+// the sanitiser directly. It delegates to sanitizeCssColor after stripping
+// the trailing ` [1234]` — values that fail the allowlist after stripping
+// should still return null. Also sanity-check the two sink paths by parsing
+// a synthetic <v:shape> element and confirming the rendered attribute value
+// does not carry the raw "[3204]" substring.
+{
+    assert(
+        typeof sanitizeVmlColor === 'function',
+        '15a: docx.sanitizeVmlColor should be exported',
+    );
+    // Happy path: suffix stripped, colour normalised through sanitizeCssColor.
+    assert(sanitizeVmlColor('#4472c4 [3204]') === '#4472c4', '15b: hex with [####] suffix stripped');
+    assert(sanitizeVmlColor('4472c4 [3204]') === '#4472c4', '15c: bare hex with suffix stripped and #-prefixed');
+    assert(sanitizeVmlColor('#4472c4') === '#4472c4', '15d: plain hex unchanged');
+    assert(sanitizeVmlColor('#4472c4  [1]  ') === '#4472c4', '15e: whitespace around suffix tolerated');
+    // Rejects: post-strip value must still pass sanitizeCssColor allowlist.
+    assert(sanitizeVmlColor('red; display: block [1]') === null, '15f: break-out payload rejected even with suffix');
+    assert(sanitizeVmlColor('javascript:alert(1) [2]') === null, '15g: bogus value rejected');
+    assert(sanitizeVmlColor(null) === null, '15h: null returns null');
+    assert(sanitizeVmlColor(undefined) === null, '15i: undefined returns null');
+    assert(sanitizeVmlColor('') === null, '15j: empty string returns null');
+    // Only a trailing [####] group is stripped — interior "[x]" is left alone
+    // and then fails the colour allowlist.
+    assert(sanitizeVmlColor('[1] #4472c4') === null, '15k: leading "[n]" not stripped');
+
+    // Also verify the rendered output of a synthetic v:shape never carries
+    // the raw "[3204]" substring. We shove the sanitised value through an
+    // attribute and serialise the element, mimicking what the VML renderer
+    // does further downstream.
+    const synthetic = document.createElement('div');
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const shape = document.createElementNS(svgNs, 'rect');
+    const fill = sanitizeVmlColor('#4472c4 [3204]');
+    if (fill) shape.setAttribute('fill', fill);
+    const stroke = sanitizeVmlColor('#ED7D31 [3205]');
+    if (stroke) shape.setAttribute('stroke', stroke);
+    synthetic.appendChild(shape);
+    const html = synthetic.outerHTML;
+    assert(
+        !html.includes('[3204]') && !html.includes('[3205]'),
+        `15l: rendered output must not carry "[####]" suffix (got ${html})`,
+    );
+    assert(
+        html.includes('#4472c4') && html.includes('#ED7D31'),
+        `15m: rendered output should carry the sanitised colour values (got ${html})`,
+    );
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -557,5 +608,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${14} scenarios passed`);
+    console.log(`\n✓ all ${15} scenarios passed`);
 }

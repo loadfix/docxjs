@@ -23,6 +23,9 @@ export {
     keyBy,
     mergeDeep,
 } from './utils';
+// VML colour sanitiser — strips Word's "[####]" theme-index suffix before
+// delegating to sanitizeCssColor. Exported for unit testing; see #171.
+export { sanitizeVmlColor } from './vml/vml';
 
 export interface CommentsOptions {
     sidebar?: boolean;

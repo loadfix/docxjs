@@ -8,7 +8,9 @@ import { formatCssRules, parseCssRules, sanitizeCssColor } from '../utils';
 // suffix like "#4472c4 [3204]". Strip that before handing the value to
 // sanitizeCssColor, which only accepts bare hex / #hex / rgb()/hsl(). See
 // upstream VolodymyrBaydalka/docxjs#171 and SECURITY_REVIEW.md #4.
-function sanitizeVmlColor(value: string | null | undefined): string | null {
+// Exported so the test harness can drive the sanitiser directly without
+// needing a DOCX fixture that carries the `[####]` suffix.
+export function sanitizeVmlColor(value: string | null | undefined): string | null {
 	if (typeof value !== 'string') return null;
 	const stripped = value.replace(/\s*\[\d+\]\s*$/, '');
 	return sanitizeCssColor(stripped);
