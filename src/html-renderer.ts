@@ -68,6 +68,9 @@ export class HtmlRenderer {
 	commentAnchorElements: Record<string, HTMLElement[]> = {};
 	sidebarContainer: HTMLElement = null;
 	sidebarCommentElements: Record<string, HTMLElement> = {};
+	// Track-changes revision cards in the sidebar, keyed by change id. Used by
+	// the anchored layout pass alongside sidebarCommentElements.
+	revisionCardElements: Map<string, HTMLElement> = new Map();
 
 	// Track-changes (#3): per-render author → palette index, plus all rendered
 	// change elements so the post-render change-bar pass can walk them.
@@ -107,6 +110,10 @@ export class HtmlRenderer {
 		return this.options.comments?.readOnly !== false;
 	}
 
+	get sidebarLayout(): 'anchored' | 'packed' {
+		return this.options.comments?.layout === 'packed' ? 'packed' : 'anchored';
+	}
+
 	get showChanges(): boolean {
 		return !!this.options.changes?.show;
 	}
@@ -121,6 +128,7 @@ export class HtmlRenderer {
 		this.tasks = [];
 		this.commentAnchorElements = {};
 		this.sidebarCommentElements = {};
+		this.revisionCardElements = new Map();
 		this.sidebarContainer = null;
 		this.changeAuthorIndex = new Map();
 		this.changeElements = [];
@@ -664,61 +672,103 @@ export class HtmlRenderer {
 	}
 
 	setupSidebarScrollSync(docContainer: HTMLElement, sidebarContent: HTMLElement) {
-		const wrapper = docContainer.parentElement;
-		if (!wrapper) return;
+		// Packed mode: natural CSS flow already stacks cards flush with zero
+		// gaps. No measurement or scroll listener needed.
+		if (this.sidebarLayout === 'packed') return;
 
+		// Anchored mode: each card follows its anchor's vertical position,
+		// pushing subsequent cards down on collision. Re-run on scroll + resize.
+		const scroller = this.findScrollingAncestor(docContainer);
 		const CARD_GAP = 8;
 
-		const positionComments = () => {
-			const sidebarRect = sidebarContent.getBoundingClientRect();
-			const ordered: Array<{ el: HTMLElement; desiredTop: number }> = [];
-
-			for (const [commentId, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
+		const positionCards = () => {
+			const anchored: Array<{ el: HTMLElement; anchor: HTMLElement; desiredTop: number }> = [];
+			// Gather every card (comment or revision) that has a known anchor.
+			// The anchor map is populated during render; revision cards store
+			// their anchor element directly on the card via dataset/metadata.
+			for (const [id, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
 				if (!sidebarEl.isConnected) continue;
-				const anchors = this.commentAnchorElements[commentId];
-				const firstAnchor = anchors?.[0];
-				if (!firstAnchor || !firstAnchor.isConnected) continue;
+				const anchor = this.commentAnchorElements[id]?.[0];
+				if (!anchor?.isConnected) continue;
+				anchored.push({ el: sidebarEl, anchor, desiredTop: 0 });
+			}
+			for (const meta of this.changeMeta) {
+				const card = this.revisionCardElements.get(meta.id ?? '');
+				if (!card?.isConnected || !meta.el.isConnected) continue;
+				anchored.push({ el: card, anchor: meta.el, desiredTop: 0 });
+			}
+			if (anchored.length === 0) return;
 
-				const anchorRect = firstAnchor.getBoundingClientRect();
-				const desiredTop = anchorRect.top - sidebarRect.top + sidebarContent.scrollTop;
-				ordered.push({ el: sidebarEl, desiredTop });
+			const sidebarRect = sidebarContent.getBoundingClientRect();
+			for (const entry of anchored) {
+				const r = entry.anchor.getBoundingClientRect();
+				// getBoundingClientRect is viewport-relative, so subtracting
+				// sidebarRect.top gives the anchor's top in the sidebar's
+				// coordinate space, and adding scrollTop converts that to the
+				// sidebar's content-coordinate space (where offsetTop lives).
+				entry.desiredTop = r.top - sidebarRect.top + sidebarContent.scrollTop;
 			}
 
-			// Sort by desired vertical position so cards stack in document order even
-			// if the comments dictionary insertion order disagrees.
-			ordered.sort((a, b) => a.desiredTop - b.desiredTop);
-
-			// Clear prior offsets so offsetTop reflects the natural flow position.
-			for (const { el } of ordered) el.style.marginTop = "";
+			// Sort by document order (i.e. anchor Y). Clear prior offsets first
+			// so offsetTop reflects the natural flow position.
+			anchored.sort((a, b) => a.desiredTop - b.desiredTop);
+			for (const { el } of anchored) el.style.marginTop = "";
 
 			let floor = -Infinity;
-			for (const { el, desiredTop } of ordered) {
-				const target = Math.max(desiredTop, floor);
-				const naturalTop = el.offsetTop;
+			for (const entry of anchored) {
+				const target = Math.max(entry.desiredTop, floor);
+				const naturalTop = entry.el.offsetTop;
 				const offset = target - naturalTop;
-				if (offset > 0) el.style.marginTop = `${offset}px`;
-				floor = target + el.offsetHeight + CARD_GAP;
+				if (offset > 0) entry.el.style.marginTop = `${offset}px`;
+				floor = target + entry.el.offsetHeight + CARD_GAP;
 			}
 		};
 
 		let rafId: number;
-		const throttledPosition = () => {
+		const schedule = () => {
 			cancelAnimationFrame(rafId);
-			rafId = requestAnimationFrame(positionComments);
+			rafId = requestAnimationFrame(positionCards);
 		};
 
-		wrapper.addEventListener("scroll", throttledPosition, { passive: true });
-		docContainer.addEventListener("scroll", throttledPosition, { passive: true });
+		if (scroller) {
+			scroller.addEventListener("scroll", schedule, { passive: true });
+		}
+		// Also watch window scrolls for the case where the scroller is the
+		// document (e.g. when inWrapper: false).
+		globalThis.addEventListener?.("scroll", schedule, { passive: true });
 
 		if (typeof ResizeObserver !== "undefined") {
-			const ro = new ResizeObserver(throttledPosition);
+			const ro = new ResizeObserver(schedule);
 			ro.observe(docContainer);
 			for (const el of Object.values(this.sidebarCommentElements)) {
 				if (el.isConnected) ro.observe(el);
 			}
 		}
 
-		setTimeout(positionComments, 100);
+		// Initial pass after layout settles (fonts, images).
+		setTimeout(positionCards, 100);
+	}
+
+	// Walks up from the rendered doc container looking for an ancestor whose
+	// overflow-y creates a scroll viewport. The demo puts the doc in a
+	// `#document-container` with overflow:auto; consumers may wrap differently.
+	private findScrollingAncestor(el: HTMLElement): HTMLElement | null {
+		// `getComputedStyle` is only available in a real browser (or jsdom with
+		// the default window). Route through the owner document's window so the
+		// renderer can still run in environments that only expose part of the
+		// DOM.
+		const win = (el.ownerDocument as any)?.defaultView ?? (globalThis as any).window;
+		const getStyle = win?.getComputedStyle;
+		if (typeof getStyle !== 'function') return null;
+		let cur: HTMLElement | null = el;
+		while (cur && cur !== (el.ownerDocument?.body ?? null)) {
+			const overflowY = getStyle.call(win, cur).overflowY;
+			if ((overflowY === 'auto' || overflowY === 'scroll') && cur.scrollHeight > cur.clientHeight) {
+				return cur;
+			}
+			cur = cur.parentElement;
+		}
+		return null;
 	}
 
 	renderSidebarComments(container: HTMLElement) {
@@ -2448,7 +2498,9 @@ section.${c}>footer { z-index: 1; }
 		const callbacks = this.options.changeCallbacks ?? {};
 
 		for (const meta of unique) {
-			content.appendChild(this.buildRevisionCard(meta, callbacks));
+			const card = this.buildRevisionCard(meta, callbacks);
+			content.appendChild(card);
+			if (meta.id) this.revisionCardElements.set(meta.id, card);
 		}
 
 		if (toolbar && opts.readOnly === false) {

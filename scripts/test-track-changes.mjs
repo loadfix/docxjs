@@ -218,6 +218,33 @@ async function renderFixture(path, options) {
     );
 }
 
+// ── 8. Sidebar layout modes ────────────────────────────────────────────────
+{
+    // Packed: no marginTop offsets on any card. No scroll listener overhead.
+    const { container: packed } = await renderFixture('revision', {
+        renderComments: true,
+        comments: { sidebar: true, layout: 'packed' },
+    });
+    const packedMargins = [...packed.querySelectorAll('.docx-sidebar-comment')]
+        .map(el => el.style.marginTop || '');
+    assert(
+        packedMargins.every(m => m === ''),
+        `8a: packed mode should leave marginTop untouched (got ${JSON.stringify(packedMargins)})`,
+    );
+
+    // Anchored: setupSidebarScrollSync runs. In jsdom layout is trivial so we
+    // don't assert specific offsets — just that the pass doesn't throw.
+    // (Real alignment is verified in the browser via Playwright.)
+    const { container: anchored } = await renderFixture('revision', {
+        renderComments: true,
+        comments: { sidebar: true, layout: 'anchored' },
+    });
+    assert(
+        !!anchored.querySelector('.docx-comment-sidebar'),
+        '8b: anchored mode should still render the sidebar',
+    );
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -226,5 +253,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${7} scenarios passed`);
+    console.log(`\n✓ all ${8} scenarios passed`);
 }

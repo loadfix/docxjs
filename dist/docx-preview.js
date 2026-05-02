@@ -3053,6 +3053,7 @@
             this.commentAnchorElements = {};
             this.sidebarContainer = null;
             this.sidebarCommentElements = {};
+            this.revisionCardElements = new Map();
             this.changeAuthorIndex = new Map();
             this.changeElements = [];
             this.changeMeta = [];
@@ -3070,6 +3071,9 @@
         get isReadOnly() {
             return this.options.comments?.readOnly !== false;
         }
+        get sidebarLayout() {
+            return this.options.comments?.layout === 'packed' ? 'packed' : 'anchored';
+        }
         get showChanges() {
             return !!this.options.changes?.show;
         }
@@ -3083,6 +3087,7 @@
             this.tasks = [];
             this.commentAnchorElements = {};
             this.sidebarCommentElements = {};
+            this.revisionCardElements = new Map();
             this.sidebarContainer = null;
             this.changeAuthorIndex = new Map();
             this.changeElements = [];
@@ -3522,53 +3527,79 @@
             return wrapper;
         }
         setupSidebarScrollSync(docContainer, sidebarContent) {
-            const wrapper = docContainer.parentElement;
-            if (!wrapper)
+            if (this.sidebarLayout === 'packed')
                 return;
+            const scroller = this.findScrollingAncestor(docContainer);
             const CARD_GAP = 8;
-            const positionComments = () => {
-                const sidebarRect = sidebarContent.getBoundingClientRect();
-                const ordered = [];
-                for (const [commentId, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
+            const positionCards = () => {
+                const anchored = [];
+                for (const [id, sidebarEl] of Object.entries(this.sidebarCommentElements)) {
                     if (!sidebarEl.isConnected)
                         continue;
-                    const anchors = this.commentAnchorElements[commentId];
-                    const firstAnchor = anchors?.[0];
-                    if (!firstAnchor || !firstAnchor.isConnected)
+                    const anchor = this.commentAnchorElements[id]?.[0];
+                    if (!anchor?.isConnected)
                         continue;
-                    const anchorRect = firstAnchor.getBoundingClientRect();
-                    const desiredTop = anchorRect.top - sidebarRect.top + sidebarContent.scrollTop;
-                    ordered.push({ el: sidebarEl, desiredTop });
+                    anchored.push({ el: sidebarEl, anchor, desiredTop: 0 });
                 }
-                ordered.sort((a, b) => a.desiredTop - b.desiredTop);
-                for (const { el } of ordered)
+                for (const meta of this.changeMeta) {
+                    const card = this.revisionCardElements.get(meta.id ?? '');
+                    if (!card?.isConnected || !meta.el.isConnected)
+                        continue;
+                    anchored.push({ el: card, anchor: meta.el, desiredTop: 0 });
+                }
+                if (anchored.length === 0)
+                    return;
+                const sidebarRect = sidebarContent.getBoundingClientRect();
+                for (const entry of anchored) {
+                    const r = entry.anchor.getBoundingClientRect();
+                    entry.desiredTop = r.top - sidebarRect.top + sidebarContent.scrollTop;
+                }
+                anchored.sort((a, b) => a.desiredTop - b.desiredTop);
+                for (const { el } of anchored)
                     el.style.marginTop = "";
                 let floor = -Infinity;
-                for (const { el, desiredTop } of ordered) {
-                    const target = Math.max(desiredTop, floor);
-                    const naturalTop = el.offsetTop;
+                for (const entry of anchored) {
+                    const target = Math.max(entry.desiredTop, floor);
+                    const naturalTop = entry.el.offsetTop;
                     const offset = target - naturalTop;
                     if (offset > 0)
-                        el.style.marginTop = `${offset}px`;
-                    floor = target + el.offsetHeight + CARD_GAP;
+                        entry.el.style.marginTop = `${offset}px`;
+                    floor = target + entry.el.offsetHeight + CARD_GAP;
                 }
             };
             let rafId;
-            const throttledPosition = () => {
+            const schedule = () => {
                 cancelAnimationFrame(rafId);
-                rafId = requestAnimationFrame(positionComments);
+                rafId = requestAnimationFrame(positionCards);
             };
-            wrapper.addEventListener("scroll", throttledPosition, { passive: true });
-            docContainer.addEventListener("scroll", throttledPosition, { passive: true });
+            if (scroller) {
+                scroller.addEventListener("scroll", schedule, { passive: true });
+            }
+            globalThis.addEventListener?.("scroll", schedule, { passive: true });
             if (typeof ResizeObserver !== "undefined") {
-                const ro = new ResizeObserver(throttledPosition);
+                const ro = new ResizeObserver(schedule);
                 ro.observe(docContainer);
                 for (const el of Object.values(this.sidebarCommentElements)) {
                     if (el.isConnected)
                         ro.observe(el);
                 }
             }
-            setTimeout(positionComments, 100);
+            setTimeout(positionCards, 100);
+        }
+        findScrollingAncestor(el) {
+            const win = el.ownerDocument?.defaultView ?? globalThis.window;
+            const getStyle = win?.getComputedStyle;
+            if (typeof getStyle !== 'function')
+                return null;
+            let cur = el;
+            while (cur && cur !== (el.ownerDocument?.body ?? null)) {
+                const overflowY = getStyle.call(win, cur).overflowY;
+                if ((overflowY === 'auto' || overflowY === 'scroll') && cur.scrollHeight > cur.clientHeight) {
+                    return cur;
+                }
+                cur = cur.parentElement;
+            }
+            return null;
         }
         renderSidebarComments(container) {
             const commentsPart = this.document.commentsPart;
@@ -4953,7 +4984,10 @@ section.${c}>footer { z-index: 1; }
             });
             const callbacks = this.options.changeCallbacks ?? {};
             for (const meta of unique) {
-                content.appendChild(this.buildRevisionCard(meta, callbacks));
+                const card = this.buildRevisionCard(meta, callbacks);
+                content.appendChild(card);
+                if (meta.id)
+                    this.revisionCardElements.set(meta.id, card);
             }
             if (toolbar && opts.readOnly === false) {
                 const acceptAll = this.h({
@@ -5104,6 +5138,7 @@ section.${c}>footer { z-index: 1; }
             sidebar: true,
             highlight: true,
             readOnly: true,
+            layout: 'anchored',
         },
         commentCallbacks: {},
         changes: {
