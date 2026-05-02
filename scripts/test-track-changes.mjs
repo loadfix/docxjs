@@ -915,6 +915,43 @@ async function renderFixture(path, options) {
     root.remove();
 }
 
+// ── 20. Footnote reference <sup> markers tagged + CSS injected (#26) ──────
+// Word renders footnote / endnote reference markers via the
+// FootnoteReference / EndnoteReference character styles (~65% of body text).
+// Our <sup> was inheriting the browser's default `font-size: smaller`, so
+// markers rendered visibly oversized next to body text. The fix tags body
+// refs with .docx-footnote-ref / .docx-endnote-ref and injects a CSS rule
+// setting font-size: 0.65em so markers match Word's size.
+{
+    const { container } = await renderFixture('footnote');
+    const refs = container.querySelectorAll('sup.docx-footnote-ref');
+    note(`20·: footnote fixture produced ${refs.length} body <sup.docx-footnote-ref>`);
+    assert(
+        refs.length > 0,
+        '20a: footnote fixture should render at least one body <sup.docx-footnote-ref>',
+    );
+    for (const sup of refs) {
+        assert(
+            sup.tagName.toLowerCase() === 'sup',
+            '20b: tagged element should be a <sup>',
+        );
+    }
+    // Default-style injection carries the sizing rule for both footnote and
+    // endnote markers. We find it by scanning the <style> nodes rendered by
+    // renderDocument (they're appended to the container in this harness).
+    const styleTexts = [...container.querySelectorAll('style')].map((s) => s.textContent || '');
+    const hasFootnoteRule = styleTexts.some((t) => t.includes('docx-footnote-ref') && t.includes('0.65em'));
+    assert(
+        hasFootnoteRule,
+        '20c: injected <style> should include the .docx-footnote-ref sizing rule (font-size: 0.65em)',
+    );
+    const hasEndnoteRule = styleTexts.some((t) => t.includes('docx-endnote-ref'));
+    assert(
+        hasEndnoteRule,
+        '20d: injected <style> should include the .docx-endnote-ref sizing rule',
+    );
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -923,5 +960,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${19} scenarios passed`);
+    console.log(`\n✓ all ${20} scenarios passed`);
 }

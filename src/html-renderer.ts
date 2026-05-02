@@ -845,6 +845,7 @@ section.${c}>footer { z-index: 1; }
 .${c} span { white-space: pre-wrap; overflow-wrap: break-word; }
 .${c} a { color: inherit; text-decoration: inherit; }
 .${c} svg { fill: transparent; }
+.${c}-footnote-ref, .${c}-endnote-ref { font-size: 0.65em; line-height: 0; vertical-align: super; }
 `;
 
 		if (this.options.renderComments) {
@@ -1725,7 +1726,11 @@ section.${c}>footer { z-index: 1; }
 
 	renderFootnoteReference(elem: WmlNoteReference) {
 		this.currentFootnoteIds.push(elem.id);
-		const sup = this.h({ tagName: "sup", children: [`${this.currentFootnoteIds.length}`] }) as HTMLElement;
+		const sup = this.h({
+			tagName: "sup",
+			className: `${this.className}-footnote-ref`,
+			children: [`${this.currentFootnoteIds.length}`]
+		}) as HTMLElement;
 		// Expose the footnote id so the visual-page split pass can match
 		// body references to the corresponding `<ol><li>` by identity rather
 		// than by position. `elem.id` is a DOCX-derived string and therefore
@@ -1738,7 +1743,11 @@ section.${c}>footer { z-index: 1; }
 
 	renderEndnoteReference(elem: WmlNoteReference) {
 		this.currentEndnoteIds.push(elem.id);
-		const sup = this.h({ tagName: "sup", children: [`${this.currentEndnoteIds.length}`] }) as HTMLElement;
+		const sup = this.h({
+			tagName: "sup",
+			className: `${this.className}-endnote-ref`,
+			children: [`${this.currentEndnoteIds.length}`]
+		}) as HTMLElement;
 		// Same reasoning as renderFootnoteReference — attribute-encoded data
 		// attribute, never a CSS sink. Endnotes are not currently touched by
 		// the visual-page split pass, but emitting the attribute is harmless
