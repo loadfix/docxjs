@@ -1119,7 +1119,16 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderNotes(noteIds: string[], notesMap: Record<string, WmlBaseNote>) {
-		var notes = noteIds.map(id => notesMap[id]).filter(x => x);
+		// Dedupe noteIds — the body can cite the same footnote id multiple
+		// times (common in academic writing) and currentFootnoteIds tracks
+		// each citation. The footnote list renders one <li> per note, not
+		// one <li> per citation, so each id must appear only once.
+		const seenIds = new Set<string>();
+		const uniqueIds: string[] = [];
+		for (const id of noteIds) {
+			if (!seenIds.has(id)) { seenIds.add(id); uniqueIds.push(id); }
+		}
+		var notes = uniqueIds.map(id => notesMap[id]).filter(x => x);
 
 		if (notes.length > 0) {
 			const renderedChildren = this.renderElements(notes);

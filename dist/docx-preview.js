@@ -3882,7 +3882,15 @@ section.${c}>footer { z-index: 1; }
             ];
         }
         renderNotes(noteIds, notesMap) {
-            var notes = noteIds.map(id => notesMap[id]).filter(x => x);
+            const seenIds = new Set();
+            const uniqueIds = [];
+            for (const id of noteIds) {
+                if (!seenIds.has(id)) {
+                    seenIds.add(id);
+                    uniqueIds.push(id);
+                }
+            }
+            var notes = uniqueIds.map(id => notesMap[id]).filter(x => x);
             if (notes.length > 0) {
                 const renderedChildren = this.renderElements(notes);
                 for (let i = 0; i < notes.length && i < renderedChildren.length; i++) {
