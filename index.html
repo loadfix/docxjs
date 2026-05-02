@@ -116,7 +116,7 @@
         const commentsSeparator = document.createElement("li");
         commentsSeparator.innerHTML = '<hr class="dropdown-divider"><h6 class="dropdown-header">comments.*</h6>';
         menu.appendChild(commentsSeparator);
-        for (const key of ['sidebar','highlight','readOnly']) {
+        for (const key of ['sidebar','highlight']) {
             addToggle(`comments.${key}`,
                 () => docxOptions.comments?.[key] ?? false,
                 (v) => { docxOptions.comments = { ...docxOptions.comments, [key]: v }; });
@@ -146,7 +146,7 @@
         const changesSeparator = document.createElement("li");
         changesSeparator.innerHTML = '<hr class="dropdown-divider"><h6 class="dropdown-header">changes.*</h6>';
         menu.appendChild(changesSeparator);
-        for (const key of ['show','showInsertions','showDeletions','showMoves','showFormatting','colorByAuthor','changeBar','legend','readOnly','sidebarCards']) {
+        for (const key of ['show','showInsertions','showDeletions','showMoves','showFormatting','colorByAuthor','changeBar','legend','sidebarCards']) {
             addToggle(`changes.${key}`,
                 () => docxOptions.changes?.[key] ?? false,
                 (v) => { docxOptions.changes = { ...docxOptions.changes, [key]: v }; });

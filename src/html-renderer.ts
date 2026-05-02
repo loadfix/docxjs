@@ -23,7 +23,17 @@ import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
-import { CommentEventCallbacks } from './docx-preview';
+
+// Internal-only — addresses a rendered change element via data-change-kind.
+// Not exported; the library is read-only so consumers never see this.
+type ChangeKind =
+	| 'insertion'
+	| 'deletion'
+	| 'formatting'
+	| 'move'
+	| 'paragraphMark'
+	| 'rowInsertion'
+	| 'rowDeletion';
 
 interface CellPos {
 	col: number;
@@ -82,7 +92,7 @@ export class HtmlRenderer {
 	changeMeta: Array<{
 		el: HTMLElement;
 		id?: string;
-		kind: import('./docx-preview').ChangeKind;
+		kind: ChangeKind;
 		author?: string;
 		date?: string;
 		summary: string;
@@ -104,10 +114,6 @@ export class HtmlRenderer {
 
 	get useHighlight(): boolean {
 		return this.options.renderComments && (this.options.comments?.highlight !== false);
-	}
-
-	get isReadOnly(): boolean {
-		return this.options.comments?.readOnly !== false;
 	}
 
 	get sidebarLayout(): 'anchored' | 'packed' {
@@ -605,26 +611,6 @@ export class HtmlRenderer {
 		const toolbarChildren: Node[] = [toggleBtn];
 		if (highlightToggle) toolbarChildren.push(highlightToggle);
 
-		if (!this.isReadOnly) {
-			const addBtn = this.h({
-				tagName: "button",
-				className: `${c}-comment-add-btn`,
-				children: ["+ Comment"],
-				title: "Add a comment on selected text"
-			}) as HTMLButtonElement;
-			toolbarChildren.push(addBtn);
-
-			this.later(() => {
-				addBtn.addEventListener("click", () => {
-					const sel = document.getSelection();
-					if (!sel || sel.isCollapsed) return;
-					const range = sel.getRangeAt(0).cloneRange();
-					if (!docContainer.contains(range.commonAncestorContainer)) return;
-					this.showNewCommentComposer(contentArea, range);
-				});
-			});
-		}
-
 		const toolbar = this.h({
 			tagName: "div",
 			className: `${c}-comment-toolbar`,
@@ -760,8 +746,6 @@ export class HtmlRenderer {
 
 	renderSidebarComment(comment: WmlComment, isReply: boolean): HTMLElement {
 		const c = this.className;
-		const callbacks = this.options.commentCallbacks ?? {};
-		const readOnly = this.isReadOnly;
 
 		const headerChildren: Node[] = [
 			this.h({ tagName: "span", className: `${c}-comment-author`, children: [comment.author ?? "Unknown"] }),
@@ -786,68 +770,12 @@ export class HtmlRenderer {
 
 		const children: Node[] = [header, bodyEl];
 
-		let replyContainerRef: HTMLElement = null;
-
-		if (!readOnly) {
-			const actionsEl = this.h({
-				tagName: "div",
-				className: `${c}-comment-actions`,
-				children: []
-			}) as HTMLElement;
-
-			const editBtn = this.h({ tagName: "button", className: `${c}-comment-edit-btn`, children: ["Edit"] }) as HTMLButtonElement;
-			const deleteBtn = this.h({ tagName: "button", className: `${c}-comment-delete-btn`, children: ["Delete"] }) as HTMLButtonElement;
-			actionsEl.appendChild(editBtn);
-			actionsEl.appendChild(deleteBtn);
-
-			let replyBtn: HTMLButtonElement = null;
-			if (!isReply) {
-				replyBtn = this.h({ tagName: "button", className: `${c}-comment-reply-btn`, children: ["Reply"] }) as HTMLButtonElement;
-				actionsEl.appendChild(replyBtn);
-			}
-
-			children.push(actionsEl);
-
-			this.later(() => {
-				editBtn.addEventListener("click", (ev) => {
-					ev.stopPropagation();
-					this.openInlineEditor(bodyEl, bodyEl.textContent ?? "", (newText) => {
-						callbacks.onCommentEdit?.(comment.id, newText);
-					});
-				});
-
-				deleteBtn.addEventListener("click", (ev) => {
-					ev.stopPropagation();
-					this.openInlineConfirm(actionsEl, "Delete this comment?", () => {
-						callbacks.onCommentDelete?.(comment.id);
-					});
-				});
-
-				if (replyBtn) {
-					replyBtn.addEventListener("click", (ev) => {
-						ev.stopPropagation();
-						const host = replyContainerRef ?? (() => {
-							const el = this.h({ tagName: "div", className: `${c}-comment-replies` }) as HTMLElement;
-							commentEl.insertBefore(el, null);
-							replyContainerRef = el;
-							return el;
-						})();
-						this.openReplyComposer(host, (text) => {
-							callbacks.onCommentReply?.(comment.id, text);
-						});
-					});
-				}
-			});
-		}
-
 		if (comment.replies && comment.replies.length > 0) {
 			const repliesContainer = this.h({
 				tagName: "div",
 				className: `${c}-comment-replies`,
 				children: comment.replies.map(r => this.renderSidebarComment(r, true))
 			}) as HTMLElement;
-
-			replyContainerRef = repliesContainer;
 
 			const threadToggle = this.h({
 				tagName: "button",
@@ -891,121 +819,6 @@ export class HtmlRenderer {
 		return commentEl;
 	}
 
-	private openInlineEditor(bodyEl: HTMLElement, currentText: string, onSave: (text: string) => void) {
-		const c = this.className;
-		if (bodyEl.querySelector(`.${c}-comment-editor`)) return;
-
-		const originalContent = Array.from(bodyEl.childNodes);
-		const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` }) as HTMLTextAreaElement;
-		textarea.value = currentText;
-
-		const save = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Save"] }) as HTMLButtonElement;
-		const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] }) as HTMLButtonElement;
-		const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [save, cancel] }) as HTMLElement;
-
-		bodyEl.replaceChildren(textarea, actions);
-		textarea.focus();
-		textarea.select();
-
-		const restore = () => bodyEl.replaceChildren(...originalContent);
-
-		save.addEventListener("click", (ev) => {
-			ev.stopPropagation();
-			const next = textarea.value;
-			if (next !== currentText) onSave(next);
-			restore();
-		});
-		cancel.addEventListener("click", (ev) => {
-			ev.stopPropagation();
-			restore();
-		});
-		textarea.addEventListener("click", (ev) => ev.stopPropagation());
-		textarea.addEventListener("keydown", (ev) => {
-			if (ev.key === "Escape") { ev.preventDefault(); restore(); }
-			if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save.click(); }
-		});
-	}
-
-	private openInlineConfirm(hostEl: HTMLElement, message: string, onConfirm: () => void) {
-		const c = this.className;
-		if (hostEl.querySelector(`.${c}-comment-confirm`)) return;
-
-		const msg = this.h({ tagName: "span", className: `${c}-comment-confirm-msg`, children: [message] }) as HTMLElement;
-		const yes = this.h({ tagName: "button", className: `${c}-comment-confirm-yes`, children: ["Yes"] }) as HTMLButtonElement;
-		const no = this.h({ tagName: "button", className: `${c}-comment-confirm-no`, children: ["No"] }) as HTMLButtonElement;
-		const wrap = this.h({ tagName: "div", className: `${c}-comment-confirm`, children: [msg, yes, no] }) as HTMLElement;
-
-		hostEl.appendChild(wrap);
-
-		yes.addEventListener("click", (ev) => {
-			ev.stopPropagation();
-			wrap.remove();
-			onConfirm();
-		});
-		no.addEventListener("click", (ev) => {
-			ev.stopPropagation();
-			wrap.remove();
-		});
-	}
-
-	private openReplyComposer(hostEl: HTMLElement, onSubmit: (text: string) => void) {
-		const c = this.className;
-		if (hostEl.querySelector(`.${c}-comment-reply-composer`)) return;
-
-		const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` }) as HTMLTextAreaElement;
-		textarea.placeholder = "Write a reply...";
-		const submit = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Reply"] }) as HTMLButtonElement;
-		const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] }) as HTMLButtonElement;
-		const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [submit, cancel] }) as HTMLElement;
-		const composer = this.h({ tagName: "div", className: `${c}-comment-reply-composer`, children: [textarea, actions] }) as HTMLElement;
-
-		hostEl.appendChild(composer);
-		textarea.focus();
-
-		submit.addEventListener("click", (ev) => {
-			ev.stopPropagation();
-			const text = textarea.value.trim();
-			if (text) onSubmit(text);
-			composer.remove();
-		});
-		cancel.addEventListener("click", (ev) => {
-			ev.stopPropagation();
-			composer.remove();
-		});
-		textarea.addEventListener("click", (ev) => ev.stopPropagation());
-		textarea.addEventListener("keydown", (ev) => {
-			if (ev.key === "Escape") { ev.preventDefault(); composer.remove(); }
-			if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit.click(); }
-		});
-	}
-
-	private showNewCommentComposer(contentArea: HTMLElement, range: Range) {
-		const c = this.className;
-		const existing = contentArea.querySelector(`.${c}-new-comment-composer`);
-		if (existing) existing.remove();
-
-		const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` }) as HTMLTextAreaElement;
-		textarea.placeholder = "Write a comment on the selected text...";
-		const submit = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Add"] }) as HTMLButtonElement;
-		const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] }) as HTMLButtonElement;
-		const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [submit, cancel] }) as HTMLElement;
-		const composer = this.h({ tagName: "div", className: `${c}-new-comment-composer`, children: [textarea, actions] }) as HTMLElement;
-
-		contentArea.insertBefore(composer, contentArea.firstChild);
-		textarea.focus();
-
-		submit.addEventListener("click", () => {
-			const text = textarea.value.trim();
-			if (text) this.options.commentCallbacks?.onCommentAdd?.(range, text);
-			composer.remove();
-		});
-		cancel.addEventListener("click", () => composer.remove());
-		textarea.addEventListener("keydown", (ev) => {
-			if (ev.key === "Escape") { ev.preventDefault(); composer.remove(); }
-			if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit.click(); }
-		});
-	}
-
 	renderDefaultStyle() {
 		var c = this.className;
 		var wrapperStyle = `
@@ -1046,8 +859,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-sidebar-toggle { cursor: pointer; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
 .${c}-sidebar-toggle:hover { background: #e8e8e8; }
 .${c}-highlight-toggle { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
-.${c}-comment-add-btn { cursor: pointer; background: #4a90d9; color: white; border: none; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
-.${c}-comment-add-btn:hover { background: #357abd; }
 .${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
 .${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
 .${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
@@ -1059,10 +870,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-done { font-size: 0.7rem; background: #4caf50; color: white; padding: 1px 6px; border-radius: 3px; }
 .${c}-comment-body { font-size: 0.85rem; color: #444; margin-bottom: 6px; line-height: 1.4; }
 .${c}-comment-body p { margin: 2px 0; }
-.${c}-comment-actions { display: flex; gap: 6px; }
-.${c}-comment-actions button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; color: #666; }
-.${c}-comment-actions button:hover { background: #f0f0f0; border-color: #bbb; }
-.${c}-comment-delete-btn:hover { color: #d32f2f !important; border-color: #d32f2f !important; }
 .${c}-comment-replies { margin-top: 6px; }
 .${c}-replies-collapsed { display: none; }
 .${c}-thread-toggle { background: none; border: none; color: #4a90d9; cursor: pointer; font-size: 0.8rem; padding: 2px 0; margin-top: 4px; }
@@ -1073,16 +880,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-anchor-start { cursor: pointer; }
 ::highlight(${c}-comments) { background-color: rgba(255, 212, 0, 0.35); }
 .${c}-no-highlight .${c}-comment-anchor-start { cursor: default; }
-.${c}-comment-editor { width: 100%; min-height: 60px; box-sizing: border-box; font: inherit; font-size: 0.85rem; padding: 6px; border: 1px solid #bbb; border-radius: 4px; resize: vertical; }
-.${c}-comment-editor-actions { display: flex; gap: 6px; margin-top: 6px; }
-.${c}-comment-editor-actions button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 10px; font-size: 0.75rem; cursor: pointer; color: #666; }
-.${c}-comment-editor-save { background: #4a90d9 !important; color: white !important; border-color: #4a90d9 !important; }
-.${c}-comment-editor-save:hover { background: #357abd !important; }
-.${c}-comment-confirm { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 0.75rem; color: #d32f2f; }
-.${c}-comment-confirm button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; }
-.${c}-comment-confirm-yes { color: white !important; background: #d32f2f !important; border-color: #d32f2f !important; }
-.${c}-new-comment-composer,.${c}-comment-reply-composer { background: white; border: 1px solid #4a90d9; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
-.${c}-comment-reply-composer { margin: 6px 0; }
 `;
 			} else {
 				styleText += `
@@ -1122,15 +919,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-paragraph-mark-deleted { text-decoration: line-through; }
 .${c}-row-inserted > td { background: color-mix(in srgb, currentColor 8%, transparent); }
 .${c}-row-deleted > td { background: color-mix(in srgb, currentColor 10%, transparent); text-decoration: line-through; text-decoration-color: currentColor; text-decoration-thickness: 2px; }
-.${c}-change-actions { display: none; margin-left: 4px; user-select: none; vertical-align: baseline; font-size: 0.75em; }
-.${c}-change-actions button { border: 1px solid currentColor; background: white; color: currentColor; cursor: pointer; padding: 0 4px; border-radius: 3px; line-height: 1; margin-right: 2px; }
-.${c}-change-actions button:hover { background: currentColor; color: white; }
-.${c} ins:hover > .${c}-change-actions,
-.${c} del:hover > .${c}-change-actions,
-.${c} .${c}-move-from:hover > .${c}-change-actions,
-.${c} .${c}-move-to:hover > .${c}-change-actions,
-.${c} .${c}-formatting-revision:hover > .${c}-change-actions,
-.${c}-paragraph-mark:hover > .${c}-change-actions { display: inline-flex; gap: 2px; }
 .${c}-revision-kind { margin-left: auto; font-size: 0.7rem; padding: 1px 6px; border: 1px solid currentColor; border-radius: 3px; text-transform: uppercase; }
 .${c}-revision-card { border-left: 3px solid currentColor; }
 .${c}-change-bar { position: relative; }
@@ -1805,7 +1593,7 @@ section.${c}>footer { z-index: 1; }
 
 	// Populates data-change-id/author/date and a palette-index class on a
 	// rendered <ins>/<del>/move/etc. See Track Changes Phase 1 (#3).
-	applyChangeAttributes(node: HTMLElement, elem: OpenXmlElement, kind: import('./docx-preview').ChangeKind) {
+	applyChangeAttributes(node: HTMLElement, elem: OpenXmlElement, kind: ChangeKind) {
 		const rev = elem.revision;
 		if (!rev) return;
 
@@ -1830,7 +1618,7 @@ section.${c}>footer { z-index: 1; }
 		});
 	}
 
-	private summarizeChange(node: HTMLElement, kind: import('./docx-preview').ChangeKind): string {
+	private summarizeChange(node: HTMLElement, kind: ChangeKind): string {
 		const MAX = 80;
 		const truncate = (s: string) => {
 			const clean = s.replace(/\s+/g, " ").trim();
@@ -2019,7 +1807,7 @@ section.${c}>footer { z-index: 1; }
 		if (rev?.id) tr.dataset.changeId = rev.id;
 		if (rev?.author) tr.dataset.author = rev.author;
 		if (rev?.date) tr.dataset.date = rev.date;
-		const metaKind: import('./docx-preview').ChangeKind = kind === "inserted" ? "rowInsertion" : "rowDeletion";
+		const metaKind: ChangeKind = kind === "inserted" ? "rowInsertion" : "rowDeletion";
 		tr.dataset.changeKind = metaKind;
 
 		if (rev?.author && this.options.changes?.colorByAuthor !== false) {
@@ -2375,87 +2163,13 @@ section.${c}>footer { z-index: 1; }
 			}
 		}
 
-		if (opts.readOnly === false) {
-			this.wireChangeActionDelegate(result);
-			this.injectInlineChangeActions();
-			this.extendSidebarWithChanges();
-		}
+		this.extendSidebarWithChanges();
 	}
 
-	// Inject ✓/✕ buttons into each change element with an id. Uses a single
-	// delegated listener attached to the wrapper; this avoids N listeners on a
-	// large document and keeps us resilient to elements being moved by CSS.
-	private injectInlineChangeActions() {
-		const c = this.className;
-		for (const meta of this.changeMeta) {
-			if (!meta.id) continue;
-			if (meta.el.querySelector(`.${c}-change-actions`)) continue;
-			// Row revisions are <tr> — inserting <span> children is invalid.
-			// Skip inline buttons for rows; the sidebar card still works.
-			if (meta.el.tagName === "TR") continue;
-
-			const accept = this.h({
-				tagName: "button",
-				className: `${c}-change-accept`,
-				children: ["✓"],
-				title: "Accept change"
-			}) as HTMLButtonElement;
-			const reject = this.h({
-				tagName: "button",
-				className: `${c}-change-reject`,
-				children: ["✕"],
-				title: "Reject change"
-			}) as HTMLButtonElement;
-			const wrap = this.h({
-				tagName: "span",
-				className: `${c}-change-actions`,
-				children: [accept, reject]
-			}) as HTMLElement;
-			meta.el.appendChild(wrap);
-		}
-	}
-
-	private wireChangeActionDelegate(result: Node[]) {
-		const c = this.className;
-		const wrapper = this.findWrapper(result);
-		const root = wrapper ?? this.findFirstElementRoot(result);
-		if (!root) return;
-		const callbacks = this.options.changeCallbacks ?? {};
-
-		root.addEventListener("click", (ev) => {
-			const target = ev.target as HTMLElement | null;
-			if (!target) return;
-			const btn = target.closest(`.${c}-change-accept, .${c}-change-reject`) as HTMLElement | null;
-			if (!btn) return;
-
-			// Find the owning change element via dataset.changeKind.
-			const owner = btn.closest<HTMLElement>("[data-change-id][data-change-kind]");
-			if (!owner) return;
-
-			ev.preventDefault();
-			ev.stopPropagation();
-
-			const id = owner.dataset.changeId!;
-			const kind = owner.dataset.changeKind as import('./docx-preview').ChangeKind;
-			if (btn.classList.contains(`${c}-change-accept`)) {
-				callbacks.onChangeAccept?.(id, kind);
-			} else {
-				callbacks.onChangeReject?.(id, kind);
-			}
-		});
-	}
-
-	// Locates the first element node in the render output so we can delegate
-	// events from its subtree when there's no wrapper.
-	private findFirstElementRoot(result: Node[]): HTMLElement | null {
-		for (const n of result) {
-			if (n instanceof HTMLElement) return n;
-		}
-		return null;
-	}
-
-	// Adds revision cards to the comments sidebar (if active) and wires up
-	// the "Accept all" / "Reject all" toolbar buttons.
+	// Appends a read-only revision card per unique change id to the comments
+	// sidebar (when the sidebar is active and changes.sidebarCards isn't
+	// disabled). Cards carry author, date, kind badge, and a short summary.
+	// Clicking a card scrolls the document to the change.
 	private extendSidebarWithChanges() {
 		const c = this.className;
 		const opts = this.options.changes ?? {};
@@ -2463,7 +2177,6 @@ section.${c}>footer { z-index: 1; }
 		if (!this.useSidebar || !this.sidebarContainer) return;
 
 		const content = this.sidebarContainer.querySelector(`.${c}-sidebar-content`);
-		const toolbar = this.sidebarContainer.querySelector(`.${c}-comment-toolbar`);
 		if (!content) return;
 
 		// Only include top-level changes (each revision id appears once; for
@@ -2474,35 +2187,16 @@ section.${c}>footer { z-index: 1; }
 			seen.add(m.id);
 			return true;
 		});
-		const callbacks = this.options.changeCallbacks ?? {};
 
 		for (const meta of unique) {
-			const card = this.buildRevisionCard(meta, callbacks);
+			const card = this.buildRevisionCard(meta);
 			content.appendChild(card);
 			if (meta.id) this.revisionCardElements.set(meta.id, card);
-		}
-
-		if (toolbar && opts.readOnly === false) {
-			const acceptAll = this.h({
-				tagName: "button",
-				className: `${c}-sidebar-toggle`,
-				children: ["Accept all"]
-			}) as HTMLButtonElement;
-			const rejectAll = this.h({
-				tagName: "button",
-				className: `${c}-sidebar-toggle`,
-				children: ["Reject all"]
-			}) as HTMLButtonElement;
-			toolbar.appendChild(acceptAll);
-			toolbar.appendChild(rejectAll);
-			acceptAll.addEventListener("click", () => callbacks.onChangeAcceptAll?.());
-			rejectAll.addEventListener("click", () => callbacks.onChangeRejectAll?.());
 		}
 	}
 
 	private buildRevisionCard(
-		meta: { el: HTMLElement; id?: string; kind: import('./docx-preview').ChangeKind; author?: string; date?: string; summary: string },
-		callbacks: import('./docx-preview').ChangeEventCallbacks,
+		meta: { el: HTMLElement; id?: string; kind: ChangeKind; author?: string; date?: string; summary: string },
 	): HTMLElement {
 		const c = this.className;
 		const opts = this.options.changes ?? {};
@@ -2517,39 +2211,13 @@ section.${c}>footer { z-index: 1; }
 			this.h({ tagName: "span", className: `${c}-revision-kind`, children: [this.kindLabel(meta.kind)] }),
 		];
 
-		const body = this.h({
-			tagName: "div",
-			className: `${c}-comment-body`,
-			children: [meta.summary]
-		}) as HTMLElement;
-
-		const children: Node[] = [
-			this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
-			body,
-		];
-
-		if (opts.readOnly === false && meta.id) {
-			const accept = this.h({ tagName: "button", children: ["Accept"] }) as HTMLButtonElement;
-			const reject = this.h({ tagName: "button", children: ["Reject"] }) as HTMLButtonElement;
-			accept.addEventListener("click", (ev) => {
-				ev.stopPropagation();
-				callbacks.onChangeAccept?.(meta.id!, meta.kind);
-			});
-			reject.addEventListener("click", (ev) => {
-				ev.stopPropagation();
-				callbacks.onChangeReject?.(meta.id!, meta.kind);
-			});
-			children.push(this.h({
-				tagName: "div",
-				className: `${c}-comment-actions`,
-				children: [accept, reject]
-			}));
-		}
-
 		const card = this.h({
 			tagName: "div",
 			className: `${c}-sidebar-comment ${c}-revision-card`,
-			children
+			children: [
+				this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
+				this.h({ tagName: "div", className: `${c}-comment-body`, children: [meta.summary] }),
+			]
 		}) as HTMLElement;
 
 		card.addEventListener("click", () => {
@@ -2559,7 +2227,7 @@ section.${c}>footer { z-index: 1; }
 		return card;
 	}
 
-	private kindLabel(kind: import('./docx-preview').ChangeKind): string {
+	private kindLabel(kind: ChangeKind): string {
 		switch (kind) {
 			case "insertion": return "Inserted";
 			case "deletion": return "Deleted";

@@ -3,17 +3,9 @@ import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
 
-export interface CommentEventCallbacks {
-    onCommentEdit?: (commentId: string, newText: string) => void;
-    onCommentDelete?: (commentId: string) => void;
-    onCommentReply?: (parentCommentId: string, text: string) => void;
-    onCommentAdd?: (anchorRange: Range, text: string) => void;
-}
-
 export interface CommentsOptions {
     sidebar?: boolean;
     highlight?: boolean;
-    readOnly?: boolean;
     /**
      * Sidebar card layout mode.
      * - 'anchored' (default): each card aligns vertically with its anchor
@@ -25,22 +17,6 @@ export interface CommentsOptions {
     layout?: 'anchored' | 'packed';
 }
 
-export type ChangeKind =
-    | 'insertion'
-    | 'deletion'
-    | 'formatting'
-    | 'move'
-    | 'paragraphMark'
-    | 'rowInsertion'
-    | 'rowDeletion';
-
-export interface ChangeEventCallbacks {
-    onChangeAccept?: (changeId: string, kind: ChangeKind) => void;
-    onChangeReject?: (changeId: string, kind: ChangeKind) => void;
-    onChangeAcceptAll?: () => void;
-    onChangeRejectAll?: () => void;
-}
-
 export interface ChangesOptions {
     show?: boolean;
     showInsertions?: boolean;
@@ -50,7 +26,6 @@ export interface ChangesOptions {
     colorByAuthor?: boolean;
     changeBar?: boolean;
     legend?: boolean;
-    readOnly?: boolean;
     sidebarCards?: boolean;
 }
 
@@ -75,9 +50,7 @@ export interface Options {
     renderComments: boolean;
     renderAltChunks: boolean;
     comments: CommentsOptions;
-    commentCallbacks: CommentEventCallbacks;
     changes: ChangesOptions;
-    changeCallbacks: ChangeEventCallbacks;
     h: typeof h;
 }
 
@@ -104,10 +77,8 @@ export const defaultOptions: Options = {
     comments: {
         sidebar: true,
         highlight: true,
-        readOnly: true,
         layout: 'anchored',
     },
-    commentCallbacks: {},
     changes: {
         show: false,
         showInsertions: true,
@@ -117,10 +88,8 @@ export const defaultOptions: Options = {
         colorByAuthor: true,
         changeBar: true,
         legend: true,
-        readOnly: true,
         sidebarCards: true,
     },
-    changeCallbacks: {},
     h: h
 };
 
@@ -157,6 +126,6 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
         const c = n.nodeName === "STYLE" ? styleContainer : bodyContainer;
         c.appendChild(n);
     }
-    
+
     return doc;
 }

@@ -3068,9 +3068,6 @@
         get useHighlight() {
             return this.options.renderComments && (this.options.comments?.highlight !== false);
         }
-        get isReadOnly() {
-            return this.options.comments?.readOnly !== false;
-        }
         get sidebarLayout() {
             return this.options.comments?.layout === 'packed' ? 'packed' : 'anchored';
         }
@@ -3468,26 +3465,6 @@
             const toolbarChildren = [toggleBtn];
             if (highlightToggle)
                 toolbarChildren.push(highlightToggle);
-            if (!this.isReadOnly) {
-                const addBtn = this.h({
-                    tagName: "button",
-                    className: `${c}-comment-add-btn`,
-                    children: ["+ Comment"],
-                    title: "Add a comment on selected text"
-                });
-                toolbarChildren.push(addBtn);
-                this.later(() => {
-                    addBtn.addEventListener("click", () => {
-                        const sel = document.getSelection();
-                        if (!sel || sel.isCollapsed)
-                            return;
-                        const range = sel.getRangeAt(0).cloneRange();
-                        if (!docContainer.contains(range.commonAncestorContainer))
-                            return;
-                        this.showNewCommentComposer(contentArea, range);
-                    });
-                });
-            }
             const toolbar = this.h({
                 tagName: "div",
                 className: `${c}-comment-toolbar`,
@@ -3599,8 +3576,6 @@
         }
         renderSidebarComment(comment, isReply) {
             const c = this.className;
-            const callbacks = this.options.commentCallbacks ?? {};
-            const readOnly = this.isReadOnly;
             const headerChildren = [
                 this.h({ tagName: "span", className: `${c}-comment-author`, children: [comment.author ?? "Unknown"] }),
                 this.h({ tagName: "span", className: `${c}-comment-date`, children: [comment.date ? new Date(comment.date).toLocaleString() : ""] })
@@ -3619,59 +3594,12 @@
                 children: this.renderElements(comment.children)
             });
             const children = [header, bodyEl];
-            let replyContainerRef = null;
-            if (!readOnly) {
-                const actionsEl = this.h({
-                    tagName: "div",
-                    className: `${c}-comment-actions`,
-                    children: []
-                });
-                const editBtn = this.h({ tagName: "button", className: `${c}-comment-edit-btn`, children: ["Edit"] });
-                const deleteBtn = this.h({ tagName: "button", className: `${c}-comment-delete-btn`, children: ["Delete"] });
-                actionsEl.appendChild(editBtn);
-                actionsEl.appendChild(deleteBtn);
-                let replyBtn = null;
-                if (!isReply) {
-                    replyBtn = this.h({ tagName: "button", className: `${c}-comment-reply-btn`, children: ["Reply"] });
-                    actionsEl.appendChild(replyBtn);
-                }
-                children.push(actionsEl);
-                this.later(() => {
-                    editBtn.addEventListener("click", (ev) => {
-                        ev.stopPropagation();
-                        this.openInlineEditor(bodyEl, bodyEl.textContent ?? "", (newText) => {
-                            callbacks.onCommentEdit?.(comment.id, newText);
-                        });
-                    });
-                    deleteBtn.addEventListener("click", (ev) => {
-                        ev.stopPropagation();
-                        this.openInlineConfirm(actionsEl, "Delete this comment?", () => {
-                            callbacks.onCommentDelete?.(comment.id);
-                        });
-                    });
-                    if (replyBtn) {
-                        replyBtn.addEventListener("click", (ev) => {
-                            ev.stopPropagation();
-                            const host = replyContainerRef ?? (() => {
-                                const el = this.h({ tagName: "div", className: `${c}-comment-replies` });
-                                commentEl.insertBefore(el, null);
-                                replyContainerRef = el;
-                                return el;
-                            })();
-                            this.openReplyComposer(host, (text) => {
-                                callbacks.onCommentReply?.(comment.id, text);
-                            });
-                        });
-                    }
-                });
-            }
             if (comment.replies && comment.replies.length > 0) {
                 const repliesContainer = this.h({
                     tagName: "div",
                     className: `${c}-comment-replies`,
                     children: comment.replies.map(r => this.renderSidebarComment(r, true))
                 });
-                replyContainerRef = repliesContainer;
                 const threadToggle = this.h({
                     tagName: "button",
                     className: `${c}-thread-toggle`,
@@ -3705,128 +3633,6 @@
                 });
             }
             return commentEl;
-        }
-        openInlineEditor(bodyEl, currentText, onSave) {
-            const c = this.className;
-            if (bodyEl.querySelector(`.${c}-comment-editor`))
-                return;
-            const originalContent = Array.from(bodyEl.childNodes);
-            const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` });
-            textarea.value = currentText;
-            const save = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Save"] });
-            const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] });
-            const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [save, cancel] });
-            bodyEl.replaceChildren(textarea, actions);
-            textarea.focus();
-            textarea.select();
-            const restore = () => bodyEl.replaceChildren(...originalContent);
-            save.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                const next = textarea.value;
-                if (next !== currentText)
-                    onSave(next);
-                restore();
-            });
-            cancel.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                restore();
-            });
-            textarea.addEventListener("click", (ev) => ev.stopPropagation());
-            textarea.addEventListener("keydown", (ev) => {
-                if (ev.key === "Escape") {
-                    ev.preventDefault();
-                    restore();
-                }
-                if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-                    ev.preventDefault();
-                    save.click();
-                }
-            });
-        }
-        openInlineConfirm(hostEl, message, onConfirm) {
-            const c = this.className;
-            if (hostEl.querySelector(`.${c}-comment-confirm`))
-                return;
-            const msg = this.h({ tagName: "span", className: `${c}-comment-confirm-msg`, children: [message] });
-            const yes = this.h({ tagName: "button", className: `${c}-comment-confirm-yes`, children: ["Yes"] });
-            const no = this.h({ tagName: "button", className: `${c}-comment-confirm-no`, children: ["No"] });
-            const wrap = this.h({ tagName: "div", className: `${c}-comment-confirm`, children: [msg, yes, no] });
-            hostEl.appendChild(wrap);
-            yes.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                wrap.remove();
-                onConfirm();
-            });
-            no.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                wrap.remove();
-            });
-        }
-        openReplyComposer(hostEl, onSubmit) {
-            const c = this.className;
-            if (hostEl.querySelector(`.${c}-comment-reply-composer`))
-                return;
-            const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` });
-            textarea.placeholder = "Write a reply...";
-            const submit = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Reply"] });
-            const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] });
-            const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [submit, cancel] });
-            const composer = this.h({ tagName: "div", className: `${c}-comment-reply-composer`, children: [textarea, actions] });
-            hostEl.appendChild(composer);
-            textarea.focus();
-            submit.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                const text = textarea.value.trim();
-                if (text)
-                    onSubmit(text);
-                composer.remove();
-            });
-            cancel.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                composer.remove();
-            });
-            textarea.addEventListener("click", (ev) => ev.stopPropagation());
-            textarea.addEventListener("keydown", (ev) => {
-                if (ev.key === "Escape") {
-                    ev.preventDefault();
-                    composer.remove();
-                }
-                if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-                    ev.preventDefault();
-                    submit.click();
-                }
-            });
-        }
-        showNewCommentComposer(contentArea, range) {
-            const c = this.className;
-            const existing = contentArea.querySelector(`.${c}-new-comment-composer`);
-            if (existing)
-                existing.remove();
-            const textarea = this.h({ tagName: "textarea", className: `${c}-comment-editor` });
-            textarea.placeholder = "Write a comment on the selected text...";
-            const submit = this.h({ tagName: "button", className: `${c}-comment-editor-save`, children: ["Add"] });
-            const cancel = this.h({ tagName: "button", className: `${c}-comment-editor-cancel`, children: ["Cancel"] });
-            const actions = this.h({ tagName: "div", className: `${c}-comment-editor-actions`, children: [submit, cancel] });
-            const composer = this.h({ tagName: "div", className: `${c}-new-comment-composer`, children: [textarea, actions] });
-            contentArea.insertBefore(composer, contentArea.firstChild);
-            textarea.focus();
-            submit.addEventListener("click", () => {
-                const text = textarea.value.trim();
-                if (text)
-                    this.options.commentCallbacks?.onCommentAdd?.(range, text);
-                composer.remove();
-            });
-            cancel.addEventListener("click", () => composer.remove());
-            textarea.addEventListener("keydown", (ev) => {
-                if (ev.key === "Escape") {
-                    ev.preventDefault();
-                    composer.remove();
-                }
-                if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-                    ev.preventDefault();
-                    submit.click();
-                }
-            });
         }
         renderDefaultStyle() {
             var c = this.className;
@@ -3867,8 +3673,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-sidebar-toggle { cursor: pointer; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
 .${c}-sidebar-toggle:hover { background: #e8e8e8; }
 .${c}-highlight-toggle { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
-.${c}-comment-add-btn { cursor: pointer; background: #4a90d9; color: white; border: none; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; }
-.${c}-comment-add-btn:hover { background: #357abd; }
 .${c}-sidebar-packed .${c}-sidebar-content { flex: 1; overflow-y: auto; padding: 8px; }
 .${c}-sidebar-anchored .${c}-sidebar-content { padding: 8px; }
 .${c}-sidebar-comment { background: white; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 8px; cursor: pointer; transition: box-shadow 0.2s, border-color 0.2s; }
@@ -3880,10 +3684,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-done { font-size: 0.7rem; background: #4caf50; color: white; padding: 1px 6px; border-radius: 3px; }
 .${c}-comment-body { font-size: 0.85rem; color: #444; margin-bottom: 6px; line-height: 1.4; }
 .${c}-comment-body p { margin: 2px 0; }
-.${c}-comment-actions { display: flex; gap: 6px; }
-.${c}-comment-actions button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; color: #666; }
-.${c}-comment-actions button:hover { background: #f0f0f0; border-color: #bbb; }
-.${c}-comment-delete-btn:hover { color: #d32f2f !important; border-color: #d32f2f !important; }
 .${c}-comment-replies { margin-top: 6px; }
 .${c}-replies-collapsed { display: none; }
 .${c}-thread-toggle { background: none; border: none; color: #4a90d9; cursor: pointer; font-size: 0.8rem; padding: 2px 0; margin-top: 4px; }
@@ -3894,16 +3694,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-comment-anchor-start { cursor: pointer; }
 ::highlight(${c}-comments) { background-color: rgba(255, 212, 0, 0.35); }
 .${c}-no-highlight .${c}-comment-anchor-start { cursor: default; }
-.${c}-comment-editor { width: 100%; min-height: 60px; box-sizing: border-box; font: inherit; font-size: 0.85rem; padding: 6px; border: 1px solid #bbb; border-radius: 4px; resize: vertical; }
-.${c}-comment-editor-actions { display: flex; gap: 6px; margin-top: 6px; }
-.${c}-comment-editor-actions button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 10px; font-size: 0.75rem; cursor: pointer; color: #666; }
-.${c}-comment-editor-save { background: #4a90d9 !important; color: white !important; border-color: #4a90d9 !important; }
-.${c}-comment-editor-save:hover { background: #357abd !important; }
-.${c}-comment-confirm { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 0.75rem; color: #d32f2f; }
-.${c}-comment-confirm button { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-size: 0.75rem; cursor: pointer; }
-.${c}-comment-confirm-yes { color: white !important; background: #d32f2f !important; border-color: #d32f2f !important; }
-.${c}-new-comment-composer,.${c}-comment-reply-composer { background: white; border: 1px solid #4a90d9; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
-.${c}-comment-reply-composer { margin: 6px 0; }
 `;
                 }
                 else {
@@ -3939,15 +3729,6 @@ section.${c}>footer { z-index: 1; }
 .${c}-paragraph-mark-deleted { text-decoration: line-through; }
 .${c}-row-inserted > td { background: color-mix(in srgb, currentColor 8%, transparent); }
 .${c}-row-deleted > td { background: color-mix(in srgb, currentColor 10%, transparent); text-decoration: line-through; text-decoration-color: currentColor; text-decoration-thickness: 2px; }
-.${c}-change-actions { display: none; margin-left: 4px; user-select: none; vertical-align: baseline; font-size: 0.75em; }
-.${c}-change-actions button { border: 1px solid currentColor; background: white; color: currentColor; cursor: pointer; padding: 0 4px; border-radius: 3px; line-height: 1; margin-right: 2px; }
-.${c}-change-actions button:hover { background: currentColor; color: white; }
-.${c} ins:hover > .${c}-change-actions,
-.${c} del:hover > .${c}-change-actions,
-.${c} .${c}-move-from:hover > .${c}-change-actions,
-.${c} .${c}-move-to:hover > .${c}-change-actions,
-.${c} .${c}-formatting-revision:hover > .${c}-change-actions,
-.${c}-paragraph-mark:hover > .${c}-change-actions { display: inline-flex; gap: 2px; }
 .${c}-revision-kind { margin-left: auto; font-size: 0.7rem; padding: 1px 6px; border: 1px solid currentColor; border-radius: 3px; text-transform: uppercase; }
 .${c}-revision-card { border-left: 3px solid currentColor; }
 .${c}-change-bar { position: relative; }
@@ -4882,76 +4663,7 @@ section.${c}>footer { z-index: 1; }
                     }
                 }
             }
-            if (opts.readOnly === false) {
-                this.wireChangeActionDelegate(result);
-                this.injectInlineChangeActions();
-                this.extendSidebarWithChanges();
-            }
-        }
-        injectInlineChangeActions() {
-            const c = this.className;
-            for (const meta of this.changeMeta) {
-                if (!meta.id)
-                    continue;
-                if (meta.el.querySelector(`.${c}-change-actions`))
-                    continue;
-                if (meta.el.tagName === "TR")
-                    continue;
-                const accept = this.h({
-                    tagName: "button",
-                    className: `${c}-change-accept`,
-                    children: ["✓"],
-                    title: "Accept change"
-                });
-                const reject = this.h({
-                    tagName: "button",
-                    className: `${c}-change-reject`,
-                    children: ["✕"],
-                    title: "Reject change"
-                });
-                const wrap = this.h({
-                    tagName: "span",
-                    className: `${c}-change-actions`,
-                    children: [accept, reject]
-                });
-                meta.el.appendChild(wrap);
-            }
-        }
-        wireChangeActionDelegate(result) {
-            const c = this.className;
-            const wrapper = this.findWrapper(result);
-            const root = wrapper ?? this.findFirstElementRoot(result);
-            if (!root)
-                return;
-            const callbacks = this.options.changeCallbacks ?? {};
-            root.addEventListener("click", (ev) => {
-                const target = ev.target;
-                if (!target)
-                    return;
-                const btn = target.closest(`.${c}-change-accept, .${c}-change-reject`);
-                if (!btn)
-                    return;
-                const owner = btn.closest("[data-change-id][data-change-kind]");
-                if (!owner)
-                    return;
-                ev.preventDefault();
-                ev.stopPropagation();
-                const id = owner.dataset.changeId;
-                const kind = owner.dataset.changeKind;
-                if (btn.classList.contains(`${c}-change-accept`)) {
-                    callbacks.onChangeAccept?.(id, kind);
-                }
-                else {
-                    callbacks.onChangeReject?.(id, kind);
-                }
-            });
-        }
-        findFirstElementRoot(result) {
-            for (const n of result) {
-                if (n instanceof HTMLElement)
-                    return n;
-            }
-            return null;
+            this.extendSidebarWithChanges();
         }
         extendSidebarWithChanges() {
             const c = this.className;
@@ -4961,7 +4673,6 @@ section.${c}>footer { z-index: 1; }
             if (!this.useSidebar || !this.sidebarContainer)
                 return;
             const content = this.sidebarContainer.querySelector(`.${c}-sidebar-content`);
-            const toolbar = this.sidebarContainer.querySelector(`.${c}-comment-toolbar`);
             if (!content)
                 return;
             const seen = new Set();
@@ -4971,31 +4682,14 @@ section.${c}>footer { z-index: 1; }
                 seen.add(m.id);
                 return true;
             });
-            const callbacks = this.options.changeCallbacks ?? {};
             for (const meta of unique) {
-                const card = this.buildRevisionCard(meta, callbacks);
+                const card = this.buildRevisionCard(meta);
                 content.appendChild(card);
                 if (meta.id)
                     this.revisionCardElements.set(meta.id, card);
             }
-            if (toolbar && opts.readOnly === false) {
-                const acceptAll = this.h({
-                    tagName: "button",
-                    className: `${c}-sidebar-toggle`,
-                    children: ["Accept all"]
-                });
-                const rejectAll = this.h({
-                    tagName: "button",
-                    className: `${c}-sidebar-toggle`,
-                    children: ["Reject all"]
-                });
-                toolbar.appendChild(acceptAll);
-                toolbar.appendChild(rejectAll);
-                acceptAll.addEventListener("click", () => callbacks.onChangeAcceptAll?.());
-                rejectAll.addEventListener("click", () => callbacks.onChangeRejectAll?.());
-            }
         }
-        buildRevisionCard(meta, callbacks) {
+        buildRevisionCard(meta) {
             const c = this.className;
             const opts = this.options.changes ?? {};
             const authorIdxClass = meta.author && opts.colorByAuthor !== false
@@ -5006,36 +4700,13 @@ section.${c}>footer { z-index: 1; }
                 this.h({ tagName: "span", className: `${c}-comment-date`, children: [meta.date ? new Date(meta.date).toLocaleString() : ""] }),
                 this.h({ tagName: "span", className: `${c}-revision-kind`, children: [this.kindLabel(meta.kind)] }),
             ];
-            const body = this.h({
-                tagName: "div",
-                className: `${c}-comment-body`,
-                children: [meta.summary]
-            });
-            const children = [
-                this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
-                body,
-            ];
-            if (opts.readOnly === false && meta.id) {
-                const accept = this.h({ tagName: "button", children: ["Accept"] });
-                const reject = this.h({ tagName: "button", children: ["Reject"] });
-                accept.addEventListener("click", (ev) => {
-                    ev.stopPropagation();
-                    callbacks.onChangeAccept?.(meta.id, meta.kind);
-                });
-                reject.addEventListener("click", (ev) => {
-                    ev.stopPropagation();
-                    callbacks.onChangeReject?.(meta.id, meta.kind);
-                });
-                children.push(this.h({
-                    tagName: "div",
-                    className: `${c}-comment-actions`,
-                    children: [accept, reject]
-                }));
-            }
             const card = this.h({
                 tagName: "div",
                 className: `${c}-sidebar-comment ${c}-revision-card`,
-                children
+                children: [
+                    this.h({ tagName: "div", className: `${c}-comment-header`, children: headerChildren }),
+                    this.h({ tagName: "div", className: `${c}-comment-body`, children: [meta.summary] }),
+                ]
             });
             card.addEventListener("click", () => {
                 meta.el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -5126,10 +4797,8 @@ section.${c}>footer { z-index: 1; }
         comments: {
             sidebar: true,
             highlight: true,
-            readOnly: true,
             layout: 'anchored',
         },
-        commentCallbacks: {},
         changes: {
             show: false,
             showInsertions: true,
@@ -5139,10 +4808,8 @@ section.${c}>footer { z-index: 1; }
             colorByAuthor: true,
             changeBar: true,
             legend: true,
-            readOnly: true,
             sidebarCards: true,
         },
-        changeCallbacks: {},
         h: h
     };
     function mergeOptions(userOptions) {
