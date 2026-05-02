@@ -952,6 +952,39 @@ async function renderFixture(path, options) {
     );
 }
 
+// ── 21. Continuous footnote numbering across section/page boundaries ──────
+// Word's default is 1..N continuous across the whole document. Previously
+// renderSections reset `currentFootnoteIds` at the start of every loop
+// iteration and the superscript number was derived from that list's length,
+// so any document that splits into multiple pages inside renderSections
+// (explicit `<w:sectPr>` breaks OR a `<w:br w:type="page"/>` inside the
+// body) would restart numbering at 1 on each page. The fix introduces a
+// document-wide `footnoteRefCount` that only resets once per render().
+{
+    const { container } = await renderFixture('footnote', {});
+    const sups = Array.from(container.querySelectorAll('sup[data-footnote-id]'));
+    const numbers = sups.map((el) => el.textContent);
+    note(`21·: rendered sup numbers = [${numbers.join(',')}] across ${container.querySelectorAll('section.docx').length} section(s)`);
+    assert(
+        sups.length >= 2,
+        `21a: expected >= 2 footnote refs in the footnote fixture (got ${sups.length})`,
+    );
+    // Monotone, starts at 1, strictly increments by 1.
+    for (let i = 0; i < sups.length; i++) {
+        assert(
+            sups[i].textContent === String(i + 1),
+            `21b·${i}: expected sup #${i} to read "${i + 1}" — got "${sups[i].textContent}"`,
+        );
+    }
+    // Extra guard: numbering must not restart, i.e. the string '1' appears
+    // exactly once across the whole ref list.
+    const ones = numbers.filter((n) => n === '1').length;
+    assert(
+        ones === 1,
+        `21c: expected exactly one "1" in sup numbers (got ${ones}: [${numbers.join(',')}]) — numbering restarted per page`,
+    );
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -960,5 +993,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${20} scenarios passed`);
+    console.log(`\n✓ all ${21} scenarios passed`);
 }
