@@ -1944,6 +1944,12 @@
         }
         parseParagraph(node) {
             var result = { type: DomType.Paragraph, children: [] };
+            const paraId = node.getAttributeNS("http://schemas.microsoft.com/office/word/2010/wordml", "paraId")
+                ?? node.getAttribute("w14:paraId")
+                ?? globalXmlParser.attr(node, "paraId");
+            if (paraId) {
+                result.paraId = paraId;
+            }
             for (let el of globalXmlParser.elements(node)) {
                 switch (el.localName) {
                     case "pPr":
@@ -4020,6 +4026,9 @@ section.${c}>footer { z-index: 1; }
                 this.appendParagraphMarkRevision(result, elem);
             }
             this.applyFormattingRevision(result, elem);
+            if (elem.paraId) {
+                result.dataset.paraId = elem.paraId;
+            }
             return result;
         }
         appendParagraphMarkRevision(paragraphEl, elem) {

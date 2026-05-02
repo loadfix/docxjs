@@ -565,6 +565,16 @@ export class DocumentParser {
 	parseParagraph(node: Element): OpenXmlElement {
 		var result = <WmlParagraph>{ type: DomType.Paragraph, children: [] };
 
+		// w14:paraId is the Word-assigned stable identifier for the paragraph.
+		// Used internally by the comments threading feature; also exposed in
+		// the rendered output as data-para-id (see renderParagraph).
+		const paraId = node.getAttributeNS("http://schemas.microsoft.com/office/word/2010/wordml", "paraId")
+			?? node.getAttribute("w14:paraId")
+			?? xml.attr(node, "paraId");
+		if (paraId) {
+			result.paraId = paraId;
+		}
+
 		for (let el of xml.elements(node)) {
 			switch (el.localName) {
 				case "pPr":
