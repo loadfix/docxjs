@@ -1780,6 +1780,7 @@ class values {
 
 	static classNameOfCnfStyle(c: Element) {
 		const val = xml.attr(c, "val");
+		if (!val) return '';
 		const classes = [
 			'first-row', 'last-row', 'first-col', 'last-col',
 			'odd-col', 'even-col', 'odd-row', 'even-row',
