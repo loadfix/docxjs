@@ -2,7 +2,19 @@ import { DocumentParser } from '../document-parser';
 import { convertLength, LengthUsage } from '../document/common';
 import { OpenXmlElementBase, DomType } from '../document/dom';
 import xml from '../parser/xml-parser';
-import { formatCssRules, parseCssRules } from '../utils';
+import { formatCssRules, parseCssRules, sanitizeCssColor } from '../utils';
+
+// Word sometimes writes colour values with a trailing theme-colour-index
+// suffix like "#4472c4 [3204]". Strip that before handing the value to
+// sanitizeCssColor, which only accepts bare hex / #hex / rgb()/hsl(). See
+// upstream VolodymyrBaydalka/docxjs#171 and SECURITY_REVIEW.md #4.
+// Exported so the test harness can drive the sanitiser directly without
+// needing a DOCX fixture that carries the `[####]` suffix.
+export function sanitizeVmlColor(value: string | null | undefined): string | null {
+	if (typeof value !== 'string') return null;
+	const stripped = value.replace(/\s*\[\d+\]\s*$/, '');
+	return sanitizeCssColor(stripped);
+}
 
 export class VmlElement extends OpenXmlElementBase {
 	type: DomType = DomType.VmlElement;
@@ -54,9 +66,11 @@ export function parseVmlElement(elem: Element, parser: DocumentParser): VmlEleme
 				result.cssStyleText = at.value;
 				break;
 
-			case "fillcolor": 
-				result.attrs.fill = at.value; 
+			case "fillcolor": {
+				const fill = sanitizeVmlColor(at.value);
+				if (fill) result.attrs.fill = fill;
 				break;
+			}
 
 			case "from":
 				const [x1, y1] = parsePoint(at.value);
@@ -104,10 +118,12 @@ export function parseVmlElement(elem: Element, parser: DocumentParser): VmlEleme
 }
 
 function parseStroke(el: Element): Record<string, string> {
-	return {
-		'stroke': xml.attr(el, "color"),
+	const result: Record<string, string> = {
 		'stroke-width': xml.lengthAttr(el, "weight", LengthUsage.Emu) ?? '1px'
 	};
+	const stroke = sanitizeVmlColor(xml.attr(el, "color"));
+	if (stroke) result['stroke'] = stroke;
+	return result;
 }
 
 function parseFill(el: Element): Record<string, string> {
