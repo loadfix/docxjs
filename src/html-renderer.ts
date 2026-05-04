@@ -1661,8 +1661,14 @@ section.${c}>ol>li::before {
 	renderDrawing(elem: OpenXmlElement) {
 		var result = this.toHTML(elem, ns.html, "div");
 
-		result.style.display = "inline-block";
-		result.style.position = "relative";
+		// Respect any display/position set by parseDrawingWrapper (wrapSquare /
+		// wrapTight / wrapThrough can set float + inline-block or absolute).
+		// Fall back to the historical inline-block defaults otherwise.
+		const parsed = elem.cssStyle ?? {};
+		if (!parsed["display"] && !parsed["float"])
+			result.style.display = "inline-block";
+		if (!parsed["position"] && !parsed["float"])
+			result.style.position = "relative";
 		result.style.textIndent = "0px";
 
 		return result;
