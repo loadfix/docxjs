@@ -32,6 +32,11 @@ export { sanitizeVmlColor } from './vml/vml';
 // Field instruction tokenizer — exported for harness testing.
 export { parseFieldInstruction } from './fields/instruction';
 export type { ParsedFieldInstruction } from './fields/instruction';
+// Squarified treemap layout — exported so the jsdom harness can assert
+// on rectangle positions without needing a chartEx fixture. See
+// Bruls et al., 'Squarified Treemaps' (2000).
+export { layoutTreemap } from './charts/render';
+export type { TreemapLayoutRect } from './charts/render';
 
 export interface CommentsOptions {
     sidebar?: boolean;
