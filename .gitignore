@@ -9,4 +9,6 @@ docx.js.map
 .screenshots
 .playwright-mcp
 test-results
+test-results-interop
 playwright-report
+playwright-report-interop
