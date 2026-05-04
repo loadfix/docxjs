@@ -12,6 +12,11 @@ export interface ParsedFieldInstruction {
     code: string;
     switches: string[];
     args: string[];
+    // Full ordered token list (excluding the leading code) so callers can
+    // pair a switch with its value — e.g. HYPERLINK's \o "tooltip", \t
+    // "_blank". Kept separate from switches/args so scenario-24 assertions
+    // on those two fields stay unchanged.
+    tokens: string[];
     raw: string;
 }
 
@@ -20,6 +25,7 @@ export function parseFieldInstruction(raw: string): ParsedFieldInstruction {
         code: '',
         switches: [],
         args: [],
+        tokens: [],
         raw: raw ?? '',
     };
     if (!raw) return result;
@@ -63,6 +69,7 @@ export function parseFieldInstruction(raw: string): ParsedFieldInstruction {
     result.code = tokens[0].toUpperCase();
     for (let k = 1; k < tokens.length; k++) {
         const t = tokens[k];
+        result.tokens.push(t);
         if (t.startsWith('\\') && t.length > 1) result.switches.push(t);
         else result.args.push(t);
     }
