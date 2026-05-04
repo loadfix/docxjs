@@ -96,6 +96,33 @@ function collectInstructionText(runs: OpenXmlElement[]): string {
 	return out;
 }
 
+// OMML → MathML tag routing for n-ary operators. `limLoc` values (parsed from
+// m:limLoc/@val) are attacker-controlled; they must go through this allowlist
+// before being used as a MathML tag name. Unknown values fall back to
+// Word's rendered default, which depends on the operator character.
+function resolveNaryLimitTag(limLoc: string | undefined, opChar: string): "munderover" | "msubsup" {
+	if (limLoc === "subSup") return "msubsup";
+	if (limLoc === "undOvr") return "munderover";
+	// Default follows Word: big operators (∑ U+2211, ∏ U+220F, ⋃ U+22C3,
+	// ⋂ U+22C2, ⨁ U+2A01, ⨂ U+2A02, ⨀ U+2A00) take under/over limits;
+	// integrals (∫) and everything else take sub/sup.
+	const BIG_OP = new Set(['∑', '∏', '⋃', '⋂', '⨁', '⨂', '⨀']);
+	return BIG_OP.has(opChar) ? "munderover" : "msubsup";
+}
+
+// OMML → MathML tag routing for sGroup. pos/vertJc are attacker-controlled;
+// the switch below is an explicit allowlist. Unknown values fall back to
+// munderover (the most permissive 3-slot wrapper) which renders reasonably
+// even with empty scripts.
+function resolveGroupTag(pos: string | undefined, vertJc: string | undefined): "munder" | "mover" | "munderover" {
+	const hasTop = pos === "top" || vertJc === "top";
+	const hasBot = pos === "bot" || pos === "bottom" || vertJc === "bot" || vertJc === "bottom";
+	if (hasTop && hasBot) return "munderover";
+	if (hasTop) return "mover";
+	if (hasBot) return "munder";
+	return "munderover";
+}
+
 // Internal-only — addresses a rendered change element via data-change-kind.
 // Not exported; the library is read-only so consumers never see this.
 type ChangeKind =
@@ -1688,6 +1715,21 @@ section.${c}>ol>li::before {
 			case DomType.MmlEquationArray:
 				return this.renderMllList(elem);
 
+			case DomType.MmlAccent:
+				return this.renderMmlAccent(elem);
+
+			case DomType.MmlBorderBox:
+				return this.renderMmlBorderBox(elem);
+
+			case DomType.MmlSubSuperscript:
+				return this.renderMmlSubSuperscript(elem);
+
+			case DomType.MmlPhantom:
+				return this.renderContainerNS(elem, ns.mathML, "mphantom");
+
+			case DomType.MmlGroup:
+				return this.renderMmlGroup(elem);
+
 			case DomType.Inserted:
 				return this.renderInserted(elem);
 
@@ -2893,7 +2935,7 @@ section.${c}>ol>li::before {
 		return this.createMathMLElement("mrow", null, children);
 	}
 
-	renderMmlNary(elem: OpenXmlElement) {		
+	renderMmlNary(elem: OpenXmlElement) {
 		const children = [];
 		const grouped = keyBy(elem.children, x => x.type);
 
@@ -2902,14 +2944,26 @@ section.${c}>ol>li::before {
 		const supElem = sup ? this.createMathMLElement("mo", null, asArray(this.renderElement(sup))) : null;
 		const subElem = sub ? this.createMathMLElement("mo", null, asArray(this.renderElement(sub))) : null;
 
-		const charElem = this.createMathMLElement("mo", null, [elem.props?.char ?? '\u222B']);
+		const opChar = elem.props?.char ?? '\u222B';
+		const charElem = this.createMathMLElement("mo", null, [opChar]);
 
 		if (supElem || subElem) {
-			children.push(this.createMathMLElement("munderover", null, [charElem, subElem, supElem]));
-		} else if(supElem) {
-			children.push(this.createMathMLElement("mover", null, [charElem, supElem]));
-		} else if(subElem) {
-			children.push(this.createMathMLElement("munder", null, [charElem, subElem]));
+			// Both sub and sup present \u2192 honour limLoc if provided, otherwise fall
+			// back to Word's defaults (big operators \u2211/\u220F \u2192 munderover, \u222B and
+			// others \u2192 msubsup). The tag name goes through an allowlist so a
+			// crafted DOCX can't inject arbitrary element names.
+			if (supElem && subElem) {
+				const tag = resolveNaryLimitTag(elem.props?.limLoc, opChar);
+				children.push(this.createMathMLElement(tag, null, [charElem, subElem, supElem]));
+			} else if (supElem) {
+				// Only sup present \u2014 mirror limLoc choice for over-placement.
+				const tag = resolveNaryLimitTag(elem.props?.limLoc, opChar) === "munderover" ? "mover" : "msup";
+				children.push(this.createMathMLElement(tag, null, [charElem, supElem]));
+			} else {
+				// Only sub present.
+				const tag = resolveNaryLimitTag(elem.props?.limLoc, opChar) === "munderover" ? "munder" : "msub";
+				children.push(this.createMathMLElement(tag, null, [charElem, subElem]));
+			}
 		} else {
 			children.push(charElem);
 		}
@@ -2917,6 +2971,57 @@ section.${c}>ol>li::before {
 		children.push(...this.renderElements(grouped[DomType.MmlBase].children));
 
 		return this.createMathMLElement("mrow", null, children);
+	}
+
+	renderMmlAccent(elem: OpenXmlElement) {
+		const base = elem.children.find(el => el.type == DomType.MmlBase);
+		const baseNodes = base ? asArray(this.renderElement(base)) : [];
+		const baseElem = this.createMathMLElement("mrow", null, baseNodes);
+
+		// chr is a DOCX-derived string. It ends up as the textContent of <mo>
+		// via createTextNode, never as innerHTML or an attribute selector.
+		const accentChar = elem.props?.char ?? '\u00AF';
+		const accentElem = this.createMathMLElement("mo", null, [accentChar]);
+
+		return this.createMathMLElement("mover", null, [baseElem, accentElem]);
+	}
+
+	renderMmlBorderBox(elem: OpenXmlElement) {
+		const result = this.createMathMLElement(
+			"menclose" as any,
+			null,
+			this.renderElements(elem.children)
+		) as Element;
+		// notation is an attribute on <menclose>, not an IDL property.
+		result.setAttribute("notation", "box");
+		return result;
+	}
+
+	renderMmlSubSuperscript(elem: OpenXmlElement) {
+		const grouped = keyBy(elem.children, x => x.type);
+
+		const base = grouped[DomType.MmlBase];
+		const sub = grouped[DomType.MmlSubArgument];
+		const sup = grouped[DomType.MmlSuperArgument];
+
+		const baseElem = base
+			? this.createMathMLElement("mrow", null, asArray(this.renderElement(base)))
+			: this.createMathMLElement("mrow", null, []);
+		const subElem = sub
+			? this.createMathMLElement("mrow", null, asArray(this.renderElement(sub)))
+			: this.createMathMLElement("mrow", null, []);
+		const supElem = sup
+			? this.createMathMLElement("mrow", null, asArray(this.renderElement(sup)))
+			: this.createMathMLElement("mrow", null, []);
+
+		return this.createMathMLElement("msubsup", null, [baseElem, subElem, supElem]);
+	}
+
+	renderMmlGroup(elem: OpenXmlElement) {
+		// sGroupPr/pos and sGroupPr/vertJc drive the MathML tag. Unknown values
+		// fall back to msubsup via the allowlist in resolveGroupTag.
+		const tagName = resolveGroupTag(elem.props?.position, elem.props?.verticalJustification);
+		return this.renderContainerNS(elem, ns.mathML, tagName);
 	}
 
 	renderMmlPreSubSuper(elem: OpenXmlElement) {
