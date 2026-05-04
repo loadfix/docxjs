@@ -29,6 +29,8 @@ import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReferen
 import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
+import { DrawingShape, DrawingGroup } from './document/drawing';
+import { renderShape, renderShapeGroup } from './drawing/shapes';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -1570,6 +1572,12 @@ section.${c}>ol>li::before {
 			case DomType.Image:
 				return this.renderImage(elem as IDomImage);
 
+			case DomType.DrawingShape:
+				return this.renderDrawingShape(elem as DrawingShape);
+
+			case DomType.DrawingGroup:
+				return this.renderDrawingShapeGroup(elem as DrawingGroup);
+
 			case DomType.Text:
 				return this.renderText(elem as WmlText);
 
@@ -2179,6 +2187,39 @@ section.${c}>ol>li::before {
 		result.style.textIndent = "0px";
 
 		return result;
+	}
+
+	// EMU → CSS px. 914400 EMU = 1 inch = 96 px, so 1 px = 9525 EMU.
+	private emuToPx(emu: number): number {
+		return (emu ?? 0) / 9525;
+	}
+
+	renderDrawingShape(elem: DrawingShape): HTMLElement {
+		// The preset-geometry SVG and optional <wps:txbx> paragraphs
+		// live in src/drawing/shapes.ts. We pass a TextRenderer
+		// callback so txbx paragraphs flow through the normal
+		// renderElement pipeline (and inherit its sanitisation).
+		const result = renderShape(
+			elem,
+			(emu) => this.emuToPx(emu),
+			(paragraphs) => this.renderElements(paragraphs),
+		);
+		return result;
+	}
+
+	renderDrawingShapeGroup(elem: DrawingGroup): HTMLElement {
+		// Groups dispatch back to renderElement for each child so
+		// nested groups and pictures render through the same code.
+		return renderShapeGroup(
+			elem,
+			(emu) => this.emuToPx(emu),
+			(child) => {
+				const rendered = this.renderElement(child);
+				if (!rendered) return null;
+				if (Array.isArray(rendered)) return rendered[0] ?? null;
+				return rendered;
+			},
+		);
 	}
 
 	renderImage(elem: IDomImage) {
