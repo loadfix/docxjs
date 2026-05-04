@@ -47,6 +47,24 @@ export default defineConfig({
             use: {
                 browserName: 'chromium',
                 channel: 'chrome',
+                headless: true,
+                // The system Chrome channel shares a user-data-dir across
+                // every launch by default, so leftover tab state (an open
+                // file-input selection, a cached render) from the user's
+                // interactive Chrome session can bleed into test pages.
+                // Force a throwaway profile dir AND fresh storage state
+                // per test — between them we get hermetic isolation.
+                storageState: { cookies: [], origins: [] },
+                launchOptions: {
+                    args: [
+                        '--no-default-browser-check',
+                        '--no-first-run',
+                        '--disable-features=PersistentStorage',
+                        '--disable-background-networking',
+                        '--disable-session-crashed-bubble',
+                        '--disable-restore-session-state',
+                    ],
+                },
             },
         },
     ],
