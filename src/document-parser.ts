@@ -2,7 +2,8 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk, Revision, FormattingRevision, WmlSdt
+	WmlAltChunk, Revision, FormattingRevision, WmlSdt,
+	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
 import { DrawingShape, DrawingGroup } from './document/drawing';
 import { sanitizeCssColor } from './utils';
@@ -919,7 +920,7 @@ export class DocumentParser {
 		return result;
 	}
 
-	parseRun(node: Element, parent?: OpenXmlElement): WmlRun {
+	parseRun(node: Element, parent?: OpenXmlElement): OpenXmlElement {
 		var result: WmlRun = <WmlRun>{ type: DomType.Run, parent: parent, children: [] };
 
 		for (let c of xml.elements(node)) {
@@ -1032,9 +1033,116 @@ export class DocumentParser {
 					result.children.push(this.parseVmlPicture(c));
 					break;
 
+				case "ruby":
+					result.children.push(this.parseRuby(c, result));
+					break;
+
 				case "rPr":
 					this.parseRunProperties(c, result);
 					break;
+			}
+		}
+
+		// w:rPr/w:fitText and w:rPr/w:bdo are captured as run-level metadata
+		// by parseRunProperties. When either is set, wrap the run in a
+		// DomType.FitText / DomType.BidiOverride element so the renderer can
+		// emit the appropriate host element without touching renderRun.
+		let wrapped: OpenXmlElement = result;
+		if (result.bidiOverride) {
+			const bidi: WmlBidiOverride = {
+				type: DomType.BidiOverride,
+				dir: result.bidiOverride,
+				parent,
+				children: [wrapped]
+			};
+			wrapped.parent = bidi;
+			delete result.bidiOverride;
+			wrapped = bidi;
+		}
+		if (result.fitText) {
+			const fit: WmlFitText = {
+				type: DomType.FitText,
+				width: result.fitText.width,
+				id: result.fitText.id,
+				parent,
+				children: [wrapped]
+			};
+			wrapped.parent = fit;
+			delete result.fitText;
+			wrapped = fit;
+		}
+
+		return wrapped;
+	}
+
+	// w:ruby — East-Asian phonetic guide (furigana). Structure:
+	//   <w:ruby>
+	//     <w:rubyPr> <w:rt> <w:rubyBase>
+	// rubyPr carries layout hints (alignment, font sizes, language). The
+	// rt / rubyBase wrappers each contain one or more <w:r>. The browser
+	// renders <ruby><rb>base</rb><rt>annotation</rt></ruby> natively, so
+	// we just emit wrapper elements here. DOCX-derived strings from this
+	// branch reach the DOM only via renderElements of the child runs,
+	// which already sanitise text content and style.
+	parseRuby(node: Element, parent?: OpenXmlElement): WmlRuby {
+		const result: WmlRuby = { type: DomType.Ruby, parent, children: [] };
+
+		for (const c of xml.elements(node)) {
+			switch (c.localName) {
+				case "rubyPr": {
+					const rubyPr: WmlRuby["rubyPr"] = {};
+					for (const p of xml.elements(c)) {
+						const v = xml.attr(p, "val");
+						switch (p.localName) {
+							case "rubyAlign":
+								// Allowlist rubyAlign — it would reach a CSS value
+								// if we ever styled the ruby container.
+								if (/^(center|distributeLetter|distributeSpace|left|right|rightVertical|start|end)$/.test(v))
+									rubyPr.rubyAlign = v;
+								break;
+							case "hps": {
+								const n = xml.intAttr(p, "val");
+								if (Number.isFinite(n) && n > 0 && n < 1000) rubyPr.hps = n;
+								break;
+							}
+							case "hpsBaseText": {
+								const n = xml.intAttr(p, "val");
+								if (Number.isFinite(n) && n > 0 && n < 1000) rubyPr.hpsBaseText = n;
+								break;
+							}
+							case "hpsRaise": {
+								const n = xml.intAttr(p, "val");
+								if (Number.isFinite(n) && n >= 0 && n < 1000) rubyPr.hpsRaise = n;
+								break;
+							}
+							case "lid":
+								// Language tag — reaches `lang` attribute only,
+								// which the browser attribute-encodes.
+								if (v) rubyPr.lid = v;
+								break;
+						}
+					}
+					result.rubyPr = rubyPr;
+					break;
+				}
+				case "rubyBase": {
+					const base: OpenXmlElement = { type: DomType.RubyBase, parent: result, children: [] };
+					for (const r of xml.elements(c)) {
+						if (r.localName === "r")
+							base.children.push(this.parseRun(r, base));
+					}
+					result.children.push(base);
+					break;
+				}
+				case "rt": {
+					const rt: OpenXmlElement = { type: DomType.RubyText, parent: result, children: [] };
+					for (const r of xml.elements(c)) {
+						if (r.localName === "r")
+							rt.children.push(this.parseRun(r, rt));
+					}
+					result.children.push(rt);
+					break;
+				}
 			}
 		}
 
@@ -1094,6 +1202,28 @@ export class DocumentParser {
 				case "rPrChange":
 					run.formattingRevision = parseFormattingRevision(c);
 					break;
+
+				case "fitText": {
+					// w:fitText — run-level "fit to width" directive. val is
+					// the target width in twips. Numeric via floatAttr so the
+					// raw string never reaches CSS.
+					const w = xml.floatAttr(c, "val");
+					if (Number.isFinite(w) && w > 0) {
+						run.fitText = { width: w, id: xml.attr(c, "id") || undefined };
+					}
+					break;
+				}
+
+				case "bdo": {
+					// w:bdo — explicit bidi override. The DOCX-derived val is
+					// allowlisted against /^(ltr|rtl)$/ before being stored.
+					// Any other value is silently dropped.
+					const raw = xml.attr(c, "val");
+					if (raw === "ltr" || raw === "rtl") {
+						run.bidiOverride = raw;
+					}
+					break;
+				}
 
 				default:
 					return false;
@@ -2207,22 +2337,78 @@ export class DocumentParser {
 						style["direction"] = "rtl";
 					break;
 
+				case "cs":
+					// Run marked as "complex script". For a read-only viewer
+					// without a Unicode character-class database, the best we
+					// can do is surface a direction hint — renderRun / rPr
+					// consumers on an RTL paragraph will already have
+					// direction:rtl. We avoid forcing rtl here (cs can mean
+					// Arabic/Hebrew but also Thai/Vietnamese, which are LTR),
+					// so this is a no-op beyond acknowledgement.
+					break;
+
 				case "bCs":
+					// Complex-script bold. v1: mirror w:b.
+					style["font-weight"] = xml.boolAttr(c, "val", true) ? "bold" : "normal";
+					break;
+
 				case "iCs":
-				case "szCs":
+					// Complex-script italic. v1: mirror w:i.
+					style["font-style"] = xml.boolAttr(c, "val", true) ? "italic" : "normal";
+					break;
+
+				case "szCs": {
+					// Complex-script font size (half-points). Without a per-
+					// character script classifier we can't selectively apply
+					// szCs only to complex-script chars, so v1 treats it as
+					// a secondary font-size — recorded in the side channel
+					// $cs-font-size and also set as font-size when no w:sz
+					// has been seen. DOCX value is numeric via lengthAttr.
+					const csSize = xml.lengthAttr(c, "val", LengthUsage.FontSize);
+					if (csSize) {
+						style["$cs-font-size"] = csSize;
+						if (!style["font-size"])
+							style["font-size"] = csSize;
+					}
+					break;
+				}
+
+				case "em": {
+					// w:em — East-Asian emphasis marks (dot/comma/circle/
+					// underDot). DOCX-derived val goes through an explicit
+					// allowlist before being mapped to a hand-picked CSS
+					// string, so no raw DOCX text reaches the style sink.
+					const raw = xml.attr(c, "val");
+					switch (raw) {
+						case "dot":
+							style["text-emphasis"] = "filled dot";
+							break;
+						case "comma":
+							style["text-emphasis"] = "filled sesame";
+							break;
+						case "circle":
+							style["text-emphasis"] = "filled circle";
+							break;
+						case "underDot":
+							style["text-emphasis"] = "filled dot";
+							style["text-emphasis-position"] = "under";
+							break;
+						// "none" or anything else → no-op
+					}
+					break;
+				}
+
 				case "tabs": //ignore - tabs is parsed by other parser
 				case "outlineLvl": //TODO
 				case "contextualSpacing": //TODO
 				case "tblStyleColBandSize": //TODO
 				case "tblStyleRowBandSize": //TODO
 				case "webHidden": //TODO - maybe web-hidden should be implemented
-				case "pageBreakBefore": //TODO - maybe ignore 
+				case "pageBreakBefore": //TODO - maybe ignore
 				case "suppressLineNumbers": //TODO - maybe ignore
 				case "keepLines": //TODO - maybe ignore
 				case "keepNext": //TODO - maybe ignore
-				case "widowControl": //TODO - maybe ignore 
-				case "bidi": //TODO - maybe ignore
-				case "rtl": //TODO - maybe ignore
+				case "widowControl": //TODO - maybe ignore
 				case "noProof": //ignore spellcheck
 					//TODO ignore
 					break;
