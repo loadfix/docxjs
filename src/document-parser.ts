@@ -107,7 +107,12 @@ const mmlTagMap = {
 	"mr": DomType.MmlMatrixRow,
 	"box": DomType.MmlBox,
 	"bar": DomType.MmlBar,
-	"groupChr": DomType.MmlGroupChar
+	"groupChr": DomType.MmlGroupChar,
+	"acc": DomType.MmlAccent,
+	"borderBox": DomType.MmlBorderBox,
+	"sSubSup": DomType.MmlSubSuperscript,
+	"phant": DomType.MmlPhantom,
+	"sGroup": DomType.MmlGroup
 }
 
 export interface DocumentParserOptions {
@@ -1066,6 +1071,7 @@ export class DocumentParser {
 				case "degHide": result.hideDegree = xml.boolAttr(el, "val"); break;
 				case "begChr": result.beginChar = xml.attr(el, "val"); break;
 				case "endChr": result.endChar = xml.attr(el, "val"); break;
+				case "limLoc": result.limLoc = xml.attr(el, "val"); break;
 			}
 		}
 
