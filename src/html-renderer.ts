@@ -30,10 +30,11 @@ import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReferen
 import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
-import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt } from './document/drawing';
 import { renderShape, renderShapeGroup, ShapeRenderContext } from './drawing/shapes';
 import { ChartPart } from './charts/chart-part';
 import { ChartExPart } from './charts/chartex-part';
+import { DiagramLayoutPart } from './smartart/smartart-parts';
 import { renderChart as renderChartSvg, scheduleLegendOverflowAdjust } from './charts/render';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
@@ -1683,6 +1684,9 @@ section.${c}>ol>li::before {
 			case DomType.ChartEx:
 				return this.renderChartEx(elem as DrawingChartEx);
 
+			case DomType.SmartArt:
+				return this.renderSmartArtPlaceholder(elem as DrawingSmartArt);
+
 			case DomType.Text:
 				return this.renderText(elem as WmlText);
 
@@ -2775,6 +2779,44 @@ section.${c}>ol>li::before {
 		const noteDiv = this.createElement("div");
 		noteDiv.className = "docx-chartex-placeholder__note";
 		noteDiv.textContent = "Chart type not yet supported";
+		wrapper.appendChild(noteDiv);
+
+		return wrapper;
+	}
+
+	// SmartArt placeholder — only reached when parseSmartArtReference
+	// could not substitute a Fallback drawing (see document-parser.ts).
+	// Emits a labelled <div> tagged with data-smartart-layout so host
+	// CSS can distinguish SmartArt kinds. The layout URN is already
+	// allowlisted at part-parse time (DiagramLayoutPart) and round-
+	// tripped through the rel-id map here; no DOCX string reaches a
+	// selector or innerHTML sink.
+	renderSmartArtPlaceholder(elem: DrawingSmartArt): HTMLElement {
+		const wrapper = this.createElement("div");
+		wrapper.className = "docx-smartart-placeholder";
+
+		// Look up the layout URN via the r:lo relationship. The
+		// enclosing part is documentPart unless we're in a header /
+		// footer / footnote, in which case currentPart is set by the
+		// container renderer.
+		let layoutId = elem.layoutId ?? "";
+		const loRelId = elem.relIds?.lo;
+		if (!layoutId && loRelId && this.document) {
+			const part = this.document.findPartByRelId(
+				loRelId,
+				this.currentPart ?? this.document.documentPart,
+			);
+			if (part instanceof DiagramLayoutPart && part.layoutId) {
+				layoutId = part.layoutId;
+			}
+		}
+		if (layoutId) {
+			wrapper.setAttribute("data-smartart-layout", layoutId);
+		}
+
+		const noteDiv = this.createElement("div");
+		noteDiv.className = "docx-smartart-placeholder__note";
+		noteDiv.textContent = "SmartArt diagram not yet supported";
 		wrapper.appendChild(noteDiv);
 
 		return wrapper;

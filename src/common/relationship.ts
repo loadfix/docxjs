@@ -32,7 +32,24 @@ export enum RelationshipTypes {
     // Modern 2013+ chart parts. Relationship type differs from Chart;
     // loaded as a `ChartExPart` and rendered as a placeholder. See
     // src/charts/chartex-part.ts.
-    ChartEx = "http://schemas.microsoft.com/office/2014/relationships/chartEx"
+    ChartEx = "http://schemas.microsoft.com/office/2014/relationships/chartEx",
+    // SmartArt — five related parts referenced from <dgm:relIds>:
+    //   r:dm → /word/diagrams/data*.xml (data model)
+    //   r:lo → /word/diagrams/layout*.xml (layout definition)
+    //   r:qs → /word/diagrams/quickStyle*.xml (quick-style)
+    //   r:cs → /word/diagrams/colors*.xml (colour transform)
+    // A sixth, `diagramDrawing`, may be present on some files and points at
+    // an extra cached drawing part that Word uses to persist manual layout
+    // overrides. Registering these types makes the package resolver walk
+    // their own relationships so any images they embed get preloaded. We
+    // do not currently parse the diagram XML itself — the Fallback drawing
+    // is what reaches the DOM (see parseSmartArtReference in
+    // document-parser.ts). See also TODO.md "SmartArt (<dgm:relIds>)".
+    DiagramData = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData",
+    DiagramLayout = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout",
+    DiagramQuickStyle = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle",
+    DiagramColors = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors",
+    DiagramDrawing = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing"
 }
 
 export function parseRelationships(root: Element, xml: XmlParser): Relationship[] {

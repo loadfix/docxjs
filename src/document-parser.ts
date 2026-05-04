@@ -6,7 +6,7 @@ import {
 	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
 import {
-	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx,
+	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt,
 	GradientFill, PatternFill, ShapeEffects,
 } from './document/drawing';
 import { sanitizeCssColor } from './utils';
@@ -88,6 +88,19 @@ export var autos = {
 };
 
 const supportedNamespaceURIs = [];
+
+// Walks up parentNode links looking for an Element with a matching
+// localName. Stops at the document root. Used by parseSmartArtReference
+// to find an enclosing <mc:AlternateContent> without threading it
+// through every caller.
+function findAncestorByLocalName(start: Element | null, localName: string): Element | null {
+	let n: Node | null = start ? start.parentNode : null;
+	while (n && n.nodeType === 1) {
+		if ((n as Element).localName === localName) return n as Element;
+		n = n.parentNode;
+	}
+	return null;
+}
 
 const mmlTagMap = {
 	"oMath": DomType.MmlMath,
@@ -1631,6 +1644,20 @@ export class DocumentParser {
 		// parseChartReference.
 		const uri = graphicData ? xml.attr(graphicData, "uri") : null;
 		const CHARTEX_URI = "http://schemas.microsoft.com/office/drawingml/2014/chartex";
+		const SMARTART_URI = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+
+		// SmartArt: <a:graphicData uri="…/diagram"> contains a
+		// <dgm:relIds> pointing at the five /word/diagrams/ parts. We
+		// don't implement the layout engine, so the best user-visible
+		// outcome is to walk back up to any enclosing mc:AlternateContent
+		// and render its <mc:Fallback> drawing (which Word itself
+		// pre-renders as a picture for exactly this situation). When
+		// that fails — either no AlternateContent wrapper or no
+		// Fallback — we emit a labelled placeholder. See
+		// parseSmartArtReference for the ancestor walk.
+		if (uri === SMARTART_URI) {
+			return this.parseSmartArtReference(elem, graphicData);
+		}
 
 		for (let n of xml.elements(graphicData)) {
 			// ChartEx: the child is <cx:chart r:id="..."/>. URI gates
@@ -1687,6 +1714,89 @@ export class DocumentParser {
 		return {
 			type: DomType.ChartEx,
 			relId: relId ?? "",
+		};
+	}
+
+	// SmartArt dispatch — see the big comment in parseGraphic above.
+	//
+	// Two paths out of here:
+	//   1. If an <mc:AlternateContent> ancestor exists, re-parse the
+	//      <mc:Fallback>'s drawing (almost always a <pic:pic> of the
+	//      rendered SmartArt) and return *that* as the substitute.
+	//      checkAlternateContent usually handles this at parseRun,
+	//      but the SmartArt <a:graphic> can only reach this method
+	//      when it did NOT — e.g. the AlternateContent was deeper than
+	//      the run level, or the document doesn't wrap the SmartArt
+	//      in AlternateContent at all.
+	//   2. Otherwise emit a placeholder that a consumer can style.
+	//      The layout URN is captured from <dgm:relIds r:lo="…"> via
+	//      the layout-part relationship so a future SmartArt renderer
+	//      can dispatch on it.
+	//
+	// Security: r:dm / r:lo / r:qs / r:cs are Id tokens resolved through
+	// the part-map (never interpolated into CSS). The layout URN is
+	// allowlisted by DiagramLayoutPart before it reaches the DOM as
+	// data-smartart-layout. Fallback drawing re-enters parseDrawing*
+	// which applies the usual DOCX-string sinks (textContent /
+	// setAttribute), so no new trust boundary is introduced.
+	parseSmartArtReference(graphic: Element, graphicData: Element | null): OpenXmlElement {
+		// Walk ancestors for the nearest mc:AlternateContent. We only
+		// consider the *same* AlternateContent that owns this graphic
+		// (so we never steal a Fallback from an unrelated sibling).
+		const alt = findAncestorByLocalName(graphic, "AlternateContent");
+		if (alt) {
+			const fallback = xml.element(alt, "Fallback");
+			if (fallback) {
+				// The Fallback wraps either a <w:drawing> or a bare
+				// DrawingML element depending on the generator. The
+				// most common shape is <w:drawing><wp:inline>…</w:drawing>
+				// but some files put <wp:inline> or even <mc:Choice>-
+				// style bare content directly. Try each in order.
+				const drawing = xml.element(fallback, "drawing");
+				if (drawing) {
+					const r = this.parseDrawing(drawing);
+					if (r) return r;
+				}
+				// Bare <wp:inline>/<wp:anchor> fallback.
+				for (const c of xml.elements(fallback)) {
+					if (c.localName === "inline" || c.localName === "anchor") {
+						const r = this.parseDrawingWrapper(c);
+						if (r) return r;
+					}
+				}
+				// Some files put a raw <pic:pic> in Fallback. Extremely
+				// rare, but handle it so we don't drop content.
+				for (const c of xml.elements(fallback)) {
+					if (c.localName === "pic") {
+						return this.parsePicture(c);
+					}
+				}
+			}
+		}
+
+		// No usable Fallback — emit a placeholder. Extract <dgm:relIds>
+		// for the rel-id capture so a future layout engine can find the
+		// parts. Nothing here reaches a CSS string or selector.
+		const relIds: DrawingSmartArt["relIds"] = {};
+		if (graphicData) {
+			const rel = xml.element(graphicData, "relIds");
+			if (rel) {
+				const dm = xml.attr(rel, "dm");
+				const lo = xml.attr(rel, "lo");
+				const qs = xml.attr(rel, "qs");
+				const cs = xml.attr(rel, "cs");
+				if (dm) relIds.dm = dm;
+				if (lo) relIds.lo = lo;
+				if (qs) relIds.qs = qs;
+				if (cs) relIds.cs = cs;
+			}
+		}
+
+		return <DrawingSmartArt>{
+			type: DomType.SmartArt,
+			children: [],
+			cssStyle: {},
+			relIds,
 		};
 	}
 
