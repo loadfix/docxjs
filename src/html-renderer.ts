@@ -2099,12 +2099,67 @@ section.${c}>ol>li::before {
 		return this.renderContainer(elem, "span");
 	}
 
-	// Structured Document Tag (content control). parseSdt only emits a
-	// DomType.Sdt wrapper when w:alias or w:tag is set on w:sdtPr — that's
-	// the only case where wrapping the content adds accessibility value.
-	// Otherwise the parser unwraps directly and this method isn't reached.
+	// Structured Document Tag (content control). parseSdt emits a
+	// DomType.Sdt wrapper when w:alias / w:tag is set (Wave 1.4 a11y),
+	// or when a typed form control (checkbox, dropdown, date, picture,
+	// gallery) is detected in w:sdtPr. Otherwise the parser unwraps
+	// directly and this method isn't reached.
 	renderSdt(elem: WmlSdt) {
-		const children = this.renderElements(elem.children);
+		const control = elem.sdtControl;
+
+		// Checkbox: emit a disabled <input type="checkbox"> in place of the
+		// sdtContent glyph run. The w:sdtContent for a checkbox just holds
+		// the ☑ / ☐ character — replacing it with a real checkbox is a
+		// more useful read-only rendering.
+		let children: Node[];
+		if (control?.type === "checkbox") {
+			const box = this.h({ tagName: "input" }) as HTMLInputElement;
+			box.setAttribute("type", "checkbox");
+			box.setAttribute("disabled", "");
+			if (control.checked) box.setAttribute("checked", "");
+			children = [box];
+		} else if (control?.type === "dropdown") {
+			// Dropdown / combo: disabled <select> populated from w:listItem.
+			// The currently-selected value is whatever text the sdtContent
+			// renders. We extract it as plain text (textContent of the
+			// rendered children) and mark the matching <option> selected.
+			const rendered = this.renderElements(elem.children) ?? [];
+			const selectedText = rendered
+				.map(n => (n instanceof Node ? (n.textContent ?? "") : String(n)))
+				.join("")
+				.trim();
+			const select = this.h({ tagName: "select" }) as HTMLSelectElement;
+			select.setAttribute("disabled", "");
+			for (const item of control.items) {
+				const option = this.h({ tagName: "option" }) as HTMLOptionElement;
+				// DOCX-derived — setAttribute + textContent only.
+				option.setAttribute("value", item.value);
+				option.textContent = item.displayText;
+				if (
+					item.value === selectedText ||
+					item.displayText === selectedText
+				) {
+					option.setAttribute("selected", "");
+				}
+				select.appendChild(option);
+			}
+			children = [select];
+		} else if (control?.type === "date") {
+			// Wrap the rendered sdtContent in <time>. fullDate is DOCX-
+			// attacker-controlled; only emit datetime="…" when it matches
+			// an ISO-8601 allowlist, drop otherwise.
+			const rendered = this.renderElements(elem.children) ?? [];
+			const time = this.h({ tagName: "time" }) as HTMLTimeElement;
+			const ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/;
+			if (control.fullDate && ISO.test(control.fullDate)) {
+				time.setAttribute("datetime", control.fullDate);
+			}
+			for (const c of rendered) time.appendChild(c);
+			children = [time];
+		} else {
+			children = this.renderElements(elem.children) ?? [];
+		}
+
 		const span = this.h({ tagName: "span", children }) as HTMLSpanElement;
 		// DOCX-derived strings — setAttribute, never innerHTML / className.
 		span.setAttribute("role", "group");
@@ -2115,6 +2170,12 @@ section.${c}>ol>li::before {
 			// Surface the programmatic tag as a data-attr; the browser
 			// HTML-encodes attribute values so this is safe for DOCX strings.
 			span.dataset.sdtTag = elem.sdtTag;
+		}
+		if (control) {
+			// Lets downstream CSS / JS target the wrapper without
+			// re-parsing. dataset setter HTML-encodes, so the string is
+			// safe even though the values here are renderer-owned literals.
+			span.dataset.sdtType = control.type;
 		}
 		return span;
 	}
