@@ -25,6 +25,7 @@ import {
 	DiagramColorsPart, DiagramDrawingPart,
 } from "./smartart/smartart-parts";
 import { ContentType } from "./common/content-types";
+import { convertVectorImage, detectVectorFormat } from "./common/vector-image";
 
 const topLevelRels = [
 	{ type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
@@ -214,12 +215,33 @@ export class WordDocument {
 
 	async loadDocumentImage(id: string, part?: Part): Promise<string> {
 		const path = this.getPathById(part ?? this.documentPart, id);
-		return path ? this.blobToURL(await this._package.load(path, "blob"), path) : null;
+		if (!path) return null;
+		const blob = await this._package.load(path, "blob");
+		return this.blobToImageURL(blob, path);
 	}
 
 	async loadNumberingImage(id: string): Promise<string> {
 		const path = this.getPathById(this.numberingPart, id);
-		return path ? this.blobToURL(await this._package.load(path, "blob"), path) : null;
+		if (!path) return null;
+		const blob = await this._package.load(path, "blob");
+		return this.blobToImageURL(blob, path);
+	}
+
+	private async blobToImageURL(blob: Blob, path: string): Promise<string> {
+		if (!blob) return null;
+
+		// Browsers can't render legacy WMF / EMF directly. Detect by the
+		// part path's extension (hard-coded regex in detectVectorFormat —
+		// no DOCX string is passed to any decoder) and route through the
+		// vector-image helper, which uses WMFJS / EMFJS when available and
+		// falls back to a placeholder SVG otherwise.
+		const vector = detectVectorFormat(path);
+		if (vector) {
+			return convertVectorImage(blob, vector);
+		}
+
+		const url = this.blobToURL(blob, path);
+		return typeof url === 'string' ? url : await url;
 	}
 
 	async loadFont(id: string, key: string): Promise<string> {
