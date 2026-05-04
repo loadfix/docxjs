@@ -1435,6 +1435,56 @@ async function renderFixture(path, options) {
     note(`40·: text fixture renders post-theme-dedupe`);
 }
 
+// ── 41. Theme-wide colour propagation (Wave 6.1) ────────────────────────
+// Smoke guard: the text fixture still renders after parseDefaultProperties
+// started recognising w:themeColor/themeTint/themeShade. If the sideband
+// emission crashed, renderFixture would throw at module-load or render
+// time.
+{
+    const { container } = await renderFixture('text');
+    const runs = container.querySelectorAll('span');
+    assert(
+        runs.length > 0,
+        `41a: text fixture should still produce run spans after theme-wide rewrite`,
+    );
+    // No $themeColor sideband should leak to rendered style attributes —
+    // styleToString strips $-prefixed keys. Spot-check that we don't see
+    // them on live elements.
+    const leaked = [...runs].some((r) => (r.getAttribute('style') ?? '').includes('$themeColor'));
+    assert(
+        !leaked,
+        `41b: $themeColor sideband keys must not leak into rendered style attributes`,
+    );
+    note(`41·: text fixture produced ${runs.length} run(s) post-theme-wide rewrite, 0 sideband leaks`);
+}
+
+// ── 42. Shape-effects glow/reflection parser (Wave 6.2) ─────────────────
+// parseEffectList gained glow and reflection branches. Regression guard:
+// the text fixture (no shapes) still renders — i.e. the switch extension
+// doesn't break non-shape parse paths.
+{
+    const { container } = await renderFixture('text');
+    const shapeEls = container.querySelectorAll('.docx-shape, .docx-shape-group');
+    assert(
+        shapeEls.length === 0,
+        `42a: text fixture has no shapes (guard against parseEffectList side-effects)`,
+    );
+    note(`42·: text fixture unaffected by shape-effects parser extension`);
+}
+
+// ── 43. SmartArt placeholder / fallback dispatch (Wave 6.3) ─────────────
+// Regression guard: text fixture has no SmartArt, so no
+// .docx-smartart-placeholder should leak into it.
+{
+    const { container } = await renderFixture('text');
+    const smartArtEls = container.querySelectorAll('.docx-smartart-placeholder, [data-smartart-layout]');
+    assert(
+        smartArtEls.length === 0,
+        `43a: text fixture should not emit SmartArt placeholders (got ${smartArtEls.length})`,
+    );
+    note(`43·: text fixture has 0 SmartArt artefacts post-dispatch addition`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1443,5 +1493,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${40} scenarios passed`);
+    console.log(`\n✓ all ${43} scenarios passed`);
 }

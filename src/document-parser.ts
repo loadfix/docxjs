@@ -6,11 +6,11 @@ import {
 	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
 import {
-	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx,
+	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt,
 	GradientFill, PatternFill, ShapeEffects,
 } from './document/drawing';
 import { sanitizeCssColor } from './utils';
-import { ColourRef, ColourModifiers, isAllowedSchemeSlot, DEFAULT_THEME_PALETTE } from './drawing/theme';
+import { ColourRef, ColourModifiers, isAllowedSchemeSlot, DEFAULT_THEME_PALETTE, buildThemeColorReference } from './drawing/theme';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
 import { parseSectionProperties, SectionProperties } from './document/section';
@@ -88,6 +88,19 @@ export var autos = {
 };
 
 const supportedNamespaceURIs = [];
+
+// Walks up parentNode links looking for an Element with a matching
+// localName. Stops at the document root. Used by parseSmartArtReference
+// to find an enclosing <mc:AlternateContent> without threading it
+// through every caller.
+function findAncestorByLocalName(start: Element | null, localName: string): Element | null {
+	let n: Node | null = start ? start.parentNode : null;
+	while (n && n.nodeType === 1) {
+		if ((n as Element).localName === localName) return n as Element;
+		n = n.parentNode;
+	}
+	return null;
+}
 
 const mmlTagMap = {
 	"oMath": DomType.MmlMath,
@@ -1631,6 +1644,20 @@ export class DocumentParser {
 		// parseChartReference.
 		const uri = graphicData ? xml.attr(graphicData, "uri") : null;
 		const CHARTEX_URI = "http://schemas.microsoft.com/office/drawingml/2014/chartex";
+		const SMARTART_URI = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+
+		// SmartArt: <a:graphicData uri="…/diagram"> contains a
+		// <dgm:relIds> pointing at the five /word/diagrams/ parts. We
+		// don't implement the layout engine, so the best user-visible
+		// outcome is to walk back up to any enclosing mc:AlternateContent
+		// and render its <mc:Fallback> drawing (which Word itself
+		// pre-renders as a picture for exactly this situation). When
+		// that fails — either no AlternateContent wrapper or no
+		// Fallback — we emit a labelled placeholder. See
+		// parseSmartArtReference for the ancestor walk.
+		if (uri === SMARTART_URI) {
+			return this.parseSmartArtReference(elem, graphicData);
+		}
 
 		for (let n of xml.elements(graphicData)) {
 			// ChartEx: the child is <cx:chart r:id="..."/>. URI gates
@@ -1687,6 +1714,89 @@ export class DocumentParser {
 		return {
 			type: DomType.ChartEx,
 			relId: relId ?? "",
+		};
+	}
+
+	// SmartArt dispatch — see the big comment in parseGraphic above.
+	//
+	// Two paths out of here:
+	//   1. If an <mc:AlternateContent> ancestor exists, re-parse the
+	//      <mc:Fallback>'s drawing (almost always a <pic:pic> of the
+	//      rendered SmartArt) and return *that* as the substitute.
+	//      checkAlternateContent usually handles this at parseRun,
+	//      but the SmartArt <a:graphic> can only reach this method
+	//      when it did NOT — e.g. the AlternateContent was deeper than
+	//      the run level, or the document doesn't wrap the SmartArt
+	//      in AlternateContent at all.
+	//   2. Otherwise emit a placeholder that a consumer can style.
+	//      The layout URN is captured from <dgm:relIds r:lo="…"> via
+	//      the layout-part relationship so a future SmartArt renderer
+	//      can dispatch on it.
+	//
+	// Security: r:dm / r:lo / r:qs / r:cs are Id tokens resolved through
+	// the part-map (never interpolated into CSS). The layout URN is
+	// allowlisted by DiagramLayoutPart before it reaches the DOM as
+	// data-smartart-layout. Fallback drawing re-enters parseDrawing*
+	// which applies the usual DOCX-string sinks (textContent /
+	// setAttribute), so no new trust boundary is introduced.
+	parseSmartArtReference(graphic: Element, graphicData: Element | null): OpenXmlElement {
+		// Walk ancestors for the nearest mc:AlternateContent. We only
+		// consider the *same* AlternateContent that owns this graphic
+		// (so we never steal a Fallback from an unrelated sibling).
+		const alt = findAncestorByLocalName(graphic, "AlternateContent");
+		if (alt) {
+			const fallback = xml.element(alt, "Fallback");
+			if (fallback) {
+				// The Fallback wraps either a <w:drawing> or a bare
+				// DrawingML element depending on the generator. The
+				// most common shape is <w:drawing><wp:inline>…</w:drawing>
+				// but some files put <wp:inline> or even <mc:Choice>-
+				// style bare content directly. Try each in order.
+				const drawing = xml.element(fallback, "drawing");
+				if (drawing) {
+					const r = this.parseDrawing(drawing);
+					if (r) return r;
+				}
+				// Bare <wp:inline>/<wp:anchor> fallback.
+				for (const c of xml.elements(fallback)) {
+					if (c.localName === "inline" || c.localName === "anchor") {
+						const r = this.parseDrawingWrapper(c);
+						if (r) return r;
+					}
+				}
+				// Some files put a raw <pic:pic> in Fallback. Extremely
+				// rare, but handle it so we don't drop content.
+				for (const c of xml.elements(fallback)) {
+					if (c.localName === "pic") {
+						return this.parsePicture(c);
+					}
+				}
+			}
+		}
+
+		// No usable Fallback — emit a placeholder. Extract <dgm:relIds>
+		// for the rel-id capture so a future layout engine can find the
+		// parts. Nothing here reaches a CSS string or selector.
+		const relIds: DrawingSmartArt["relIds"] = {};
+		if (graphicData) {
+			const rel = xml.element(graphicData, "relIds");
+			if (rel) {
+				const dm = xml.attr(rel, "dm");
+				const lo = xml.attr(rel, "lo");
+				const qs = xml.attr(rel, "qs");
+				const cs = xml.attr(rel, "cs");
+				if (dm) relIds.dm = dm;
+				if (lo) relIds.lo = lo;
+				if (qs) relIds.qs = qs;
+				if (cs) relIds.cs = cs;
+			}
+		}
+
+		return <DrawingSmartArt>{
+			type: DomType.SmartArt,
+			children: [],
+			cssStyle: {},
+			relIds,
 		};
 	}
 
@@ -1976,8 +2086,8 @@ export class DocumentParser {
 		return any ? out : undefined;
 	}
 
-	// Parses <a:effectLst> → ShapeEffects. Handles outer/inner shadow
-	// and softEdge. Glow / reflection remain TODO (see CLAUDE.md).
+	// Parses <a:effectLst> → ShapeEffects. Handles outer/inner shadow,
+	// softEdge, glow, and reflection.
 	private parseEffectList(el: Element | null | undefined): ShapeEffects | undefined {
 		if (!el) return undefined;
 		const result: ShapeEffects = {};
@@ -2008,8 +2118,41 @@ export class DocumentParser {
 					}
 					break;
 				}
-				// TODO: <a:glow> → feGaussianBlur + colour.
-				// TODO: <a:reflection> → out of scope.
+				case "glow": {
+					// <a:glow rad="…"> with a colour child. rad is EMU
+					// blur radius; omit the entry entirely if rad is
+					// missing or non-positive so the renderer doesn't
+					// emit an empty filter chain.
+					const rad = xml.intAttr(n, "rad");
+					if (rad != null && Number.isFinite(rad) && rad > 0) {
+						const colour = this.parseColor(n);
+						const entry: NonNullable<ShapeEffects["glow"]> = { rad };
+						if (colour) entry.colour = colour;
+						result.glow = entry;
+						any = true;
+					}
+					break;
+				}
+				case "reflection": {
+					// <a:reflection stA=".." endA=".." stPos=".." endPos=".."
+					//   dist=".." dir=".." fadeDir=".." rotWithShape=".."/>
+					// All attributes optional; the renderer picks
+					// sensible defaults. stPos / endPos / fadeDir /
+					// rotWithShape are parsed-but-not-used in v1 — we
+					// only honour vertical reflections.
+					const stA = xml.intAttr(n, "stA");
+					const endA = xml.intAttr(n, "endA");
+					const dist = xml.intAttr(n, "dist");
+					const dirRaw = xml.intAttr(n, "dir");
+					const entry: NonNullable<ShapeEffects["reflection"]> = {};
+					if (stA != null && Number.isFinite(stA)) entry.stA = stA;
+					if (endA != null && Number.isFinite(endA)) entry.endA = endA;
+					if (dist != null && Number.isFinite(dist)) entry.dist = dist;
+					if (dirRaw != null && Number.isFinite(dirRaw)) entry.dir = (dirRaw / 60000) % 360;
+					result.reflection = entry;
+					any = true;
+					break;
+				}
 			}
 		}
 		return any ? result : undefined;
@@ -2624,9 +2767,15 @@ export class DocumentParser {
 					style["vertical-align"] = values.valueOfTextAlignment(c);
 					break;
 
-				case "color":
+				case "color": {
 					style["color"] = xmlUtil.colorAttr(c, "val", null, autos.color);
+					// Sideband: renderer substitutes the concrete hex (with
+					// any themeTint/themeShade applied) back into `color`.
+					// Literal w:val wins when both are present.
+					const tref = xmlUtil.themeColorReference(c, "themeColor", "val");
+					if (tref) style["$themeColor-color"] = tref;
 					break;
+				}
 
 				case "sz":
 					style["font-size"] = style["min-height"] = xml.lengthAttr(c, "val", LengthUsage.FontSize);
@@ -2636,9 +2785,12 @@ export class DocumentParser {
 					values.applyShd(c, style);
 					break;
 
-				case "highlight":
+				case "highlight": {
 					style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
+					const tref = xmlUtil.themeColorReference(c, "themeColor", "val");
+					if (tref) style["$themeColor-background-color"] = tref;
 					break;
+				}
 
 				case "vertAlign":
 					//TODO
@@ -2713,9 +2865,12 @@ export class DocumentParser {
 					this.parseBorderProperties(c, style);
 					break;
 
-				case "bdr":
+				case "bdr": {
 					style["border"] = values.valueOfBorder(c);
+					const tref = values.themeRefOfBorder(c);
+					if (tref) style["$themeColor-border"] = tref;
 					break;
+				}
 
 				case "tcBorders":
 					this.parseBorderProperties(c, style);
@@ -3051,24 +3206,29 @@ export class DocumentParser {
 	}
 
 	parseBorderProperties(node: Element, output: Record<string, string>) {
+		const setBorder = (prop: string, c: Element) => {
+			output[prop] = values.valueOfBorder(c);
+			const tref = values.themeRefOfBorder(c);
+			if (tref) output[`$themeColor-${prop}`] = tref;
+		};
 		for (const c of xml.elements(node)) {
 			switch (c.localName) {
 				case "start":
 				case "left":
-					output["border-left"] = values.valueOfBorder(c);
+					setBorder("border-left", c);
 					break;
 
 				case "end":
 				case "right":
-					output["border-right"] = values.valueOfBorder(c);
+					setBorder("border-right", c);
 					break;
 
 				case "top":
-					output["border-top"] = values.valueOfBorder(c);
+					setBorder("border-top", c);
 					break;
 
 				case "bottom":
-					output["border-bottom"] = values.valueOfBorder(c);
+					setBorder("border-bottom", c);
 					break;
 
 				// Diagonal borders. These don't map to any CSS border
@@ -3091,7 +3251,7 @@ export class DocumentParser {
 const knownColors = ['black', 'blue', 'cyan', 'darkBlue', 'darkCyan', 'darkGray', 'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'green', 'lightGray', 'magenta', 'none', 'red', 'white', 'yellow'];
 
 class xmlUtil {
-	static colorAttr(node: Element, attrName: string, defValue: string = null, autoColor: string = 'black') {
+	static colorAttr(node: Element, attrName: string, defValue: string = null, autoColor: string = 'black', themeAttrName: string = "themeColor") {
 		var v = xml.attr(node, attrName);
 
 		if (v) {
@@ -3104,9 +3264,27 @@ class xmlUtil {
 			return `#${v}`;
 		}
 
-		var themeColor = xml.attr(node, "themeColor");
+		var themeColor = xml.attr(node, themeAttrName);
 
 		return themeColor ? `var(--docx-${themeColor}-color)` : defValue;
+	}
+
+	// Builds a `$themeColor` sideband placeholder for a `w:color` /
+	// `w:shd` / `w:bdr` element. Returns null when the element carries
+	// no themeColor/themeFill attribute, the slot is not allowlisted,
+	// or a literal `w:val`/`w:fill` hex is present — the literal wins
+	// (matching xmlUtil.colorAttr's fallback order and Word's own
+	// rendering precedence).
+	static themeColorReference(node: Element, themeAttrName: string = "themeColor", literalAttrName?: string): string | null {
+		if (literalAttrName) {
+			const literal = xml.attr(node, literalAttrName);
+			if (literal && literal !== "auto") return null;
+		}
+		const slot = xml.attr(node, themeAttrName);
+		if (!slot) return null;
+		const tint = xml.attr(node, "themeTint");
+		const shade = xml.attr(node, "themeShade");
+		return buildThemeColorReference(slot, tint, shade);
 	}
 }
 
@@ -3146,13 +3324,19 @@ class values {
 	// keyword / var(--docx-theme-…). No attacker DOCX string is ever
 	// interpolated into CSS here. See SECURITY_REVIEW.md #3/#4.
 	static applyShd(c: Element, style: Record<string, string>) {
-		const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd);
-		const color = xmlUtil.colorAttr(c, "color", null, autos.shd);
+		const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd, "themeFill");
+		const color = xmlUtil.colorAttr(c, "color", null, autos.shd, "themeColor");
 		const val = xml.attr(c, "val");
 
 		// Baseline fill; pattern templates may override `background` below.
 		if (fill != null) {
 			style["background-color"] = fill;
+			// Sideband: when the fill came via w:themeFill (optionally
+			// with w:themeTint / w:themeShade), let the renderer swap
+			// the resolved hex in at render time. A literal w:fill wins
+			// over the themeFill reference.
+			const tref = xmlUtil.themeColorReference(c, "themeFill", "fill");
+			if (tref) style["$themeColor-background-color"] = tref;
 		}
 
 		// Nothing to pattern if val is missing / clear / nil.
@@ -3226,6 +3410,20 @@ class values {
 		var size = xml.lengthAttr(c, "sz", LengthUsage.Border);
 
 		return `${size} ${type} ${color == "auto" ? autos.borderColor : color}`;
+	}
+
+	// Companion to `valueOfBorder` for the `$themeColor-<prop>` sideband.
+	// Borders emit a composite "<size> <type> <color>" string, so when
+	// the color portion is theme-bound the renderer needs to know the
+	// concrete colour to splice in. Returns null when the border has no
+	// themeColor (the composite string's literal colour is used as-is).
+	// Matches xmlUtil.colorAttr's fallback order: a literal `color`
+	// value that isn't `auto` wins over any themeColor declaration.
+	static themeRefOfBorder(c: Element): string | null {
+		if (values.parseBorderType(xml.attr(c, "val")) == "none") return null;
+		const literal = xml.attr(c, "color");
+		if (literal && literal !== "auto") return null;
+		return xmlUtil.themeColorReference(c);
 	}
 
 	static parseBorderType(type: string) {

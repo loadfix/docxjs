@@ -155,6 +155,103 @@ export function resolveSchemeColor(val: unknown, palette?: Record<string, string
     return DEFAULT_THEME_PALETTE[val] ?? null;
 }
 
+// Serialises the inputs the document parser sees for a `w:color` /
+// `w:shd` / `w:bdr` attribute cluster (the `themeColor` / `themeFill`
+// slot name plus optional `themeTint` / `themeShade` hex bytes) into a
+// compact placeholder string the renderer can feed back to
+// `parseThemeColorReference`. Returns null when the slot name isn't an
+// allowlisted scheme key. themeTint / themeShade are accepted only as
+// 1-2 hex digits (Word's serialisation); other values are dropped.
+//
+// Examples:
+//   buildThemeColorReference("accent1")                   → "accent1"
+//   buildThemeColorReference("accent1", "66", null)       → "accent1:tint=66"
+//   buildThemeColorReference("accent2", null, "80")       → "accent2:shade=80"
+export function buildThemeColorReference(
+    slot: string | null | undefined,
+    themeTint?: string | null,
+    themeShade?: string | null,
+): string | null {
+    if (!isAllowedSchemeSlot(slot)) return null;
+    const parts: string[] = [slot];
+    if (typeof themeTint === 'string' && /^[0-9a-fA-F]{1,2}$/.test(themeTint)) {
+        parts.push(`tint=${themeTint.toLowerCase()}`);
+    }
+    if (typeof themeShade === 'string' && /^[0-9a-fA-F]{1,2}$/.test(themeShade)) {
+        parts.push(`shade=${themeShade.toLowerCase()}`);
+    }
+    return parts.join(':');
+}
+
+// Parses a placeholder produced by `buildThemeColorReference` — or a
+// raw `w:color` / `w:fill` value that may be a literal hex, `"auto"`,
+// or a theme-reference form like `"accent1"` or `"accent1:tint=66"` —
+// into a ColourRef the renderer can resolve at render time. Returns
+// null when no usable reference is present.
+//
+// themeTint / themeShade are expressed as Word's single-byte hex
+// (0-255). They map onto `tint` / `shade` in ColourModifiers, which
+// the existing `resolveColour` pipeline applies in the normalised
+// 0-100000 integer range.
+//
+// Security: the slot name is validated through isAllowedSchemeSlot;
+// hex literals pass through sanitizeCssColor; the modifier fields
+// are parsed as hex bytes and numerically clamped. Nothing from the
+// input string survives as a selector / class / innerHTML sink.
+export function parseThemeColorReference(raw: string | null | undefined): ColourRef | null {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === 'auto') return null;
+
+    // Literal hex forms ("#RRGGBB", "RRGGBB", "#RGB") — let the
+    // existing sanitiser decide.
+    const hexSan = sanitizeCssColor(trimmed);
+    if (hexSan && /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(trimmed)) {
+        return { hex: hexSan };
+    }
+
+    const segments = trimmed.split(/[:\s]+/).filter(Boolean);
+    if (segments.length === 0) return null;
+
+    const slot = segments[0];
+    if (!isAllowedSchemeSlot(slot)) return null;
+
+    const ref: ColourRef = { scheme: slot };
+    const mods: ColourModifiers = {};
+    let gotMod = false;
+
+    for (let i = 1; i < segments.length; i++) {
+        const eq = segments[i].indexOf('=');
+        if (eq < 0) continue;
+        const key = segments[i].slice(0, eq);
+        const val = segments[i].slice(eq + 1);
+        if (!/^[0-9a-fA-F]{1,2}$/.test(val)) continue;
+        const byte = parseInt(val, 16);
+        if (!Number.isFinite(byte)) continue;
+        // Word's themeTint / themeShade hex byte is 0-255 where 255
+        // means "apply the full modifier" (i.e. 100%). Map onto the
+        // 0-100000 scale that ColourModifiers expects.
+        const scaled = Math.round((byte / 255) * 100000);
+        if (key === 'tint') {
+            // Word's themeTint byte (ECMA-376 §17.18.104): higher =
+            // more tint toward white, 255 ≈ pure white, 0 = base. Map
+            // directly onto ColourModifiers.tint (0-100000), which
+            // resolveColour applies as r + (255-r) * tint/100000.
+            mods.tint = scaled;
+            gotMod = true;
+        } else if (key === 'shade') {
+            // Word's themeShade byte: higher = closer to base, 0 =
+            // pure black. resolveColour applies `shade/100000` as a
+            // multiplicative factor on each channel, so the direct
+            // mapping matches.
+            mods.shade = scaled;
+            gotMod = true;
+        }
+    }
+    if (gotMod) ref.mods = mods;
+    return ref;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
     if (v < lo) return lo;
     if (v > hi) return hi;

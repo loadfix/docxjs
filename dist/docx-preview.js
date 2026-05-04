@@ -34,6 +34,11 @@
         RelationshipTypes["AltChunk"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk";
         RelationshipTypes["Chart"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
         RelationshipTypes["ChartEx"] = "http://schemas.microsoft.com/office/2014/relationships/chartEx";
+        RelationshipTypes["DiagramData"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData";
+        RelationshipTypes["DiagramLayout"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout";
+        RelationshipTypes["DiagramQuickStyle"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle";
+        RelationshipTypes["DiagramColors"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors";
+        RelationshipTypes["DiagramDrawing"] = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing";
     })(RelationshipTypes || (RelationshipTypes = {}));
     function parseRelationships(root, xml) {
         return xml.elements(root).map(e => ({
@@ -881,6 +886,7 @@
         DomType["BidiOverride"] = "bidiOverride";
         DomType["Chart"] = "chart";
         DomType["ChartEx"] = "chartEx";
+        DomType["SmartArt"] = "smartArt";
     })(DomType || (DomType = {}));
     class OpenXmlElementBase {
         constructor() {
@@ -1321,7 +1327,66 @@
     function resolveSchemeColor(val, palette) {
         if (!isAllowedSchemeSlot(val))
             return null;
+        const themed = palette?.[val];
+        if (themed)
+            return themed;
         return DEFAULT_THEME_PALETTE[val] ?? null;
+    }
+    function buildThemeColorReference(slot, themeTint, themeShade) {
+        if (!isAllowedSchemeSlot(slot))
+            return null;
+        const parts = [slot];
+        if (typeof themeTint === 'string' && /^[0-9a-fA-F]{1,2}$/.test(themeTint)) {
+            parts.push(`tint=${themeTint.toLowerCase()}`);
+        }
+        if (typeof themeShade === 'string' && /^[0-9a-fA-F]{1,2}$/.test(themeShade)) {
+            parts.push(`shade=${themeShade.toLowerCase()}`);
+        }
+        return parts.join(':');
+    }
+    function parseThemeColorReference(raw) {
+        if (typeof raw !== 'string')
+            return null;
+        const trimmed = raw.trim();
+        if (!trimmed || trimmed === 'auto')
+            return null;
+        const hexSan = sanitizeCssColor(trimmed);
+        if (hexSan && /^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(trimmed)) {
+            return { hex: hexSan };
+        }
+        const segments = trimmed.split(/[:\s]+/).filter(Boolean);
+        if (segments.length === 0)
+            return null;
+        const slot = segments[0];
+        if (!isAllowedSchemeSlot(slot))
+            return null;
+        const ref = { scheme: slot };
+        const mods = {};
+        let gotMod = false;
+        for (let i = 1; i < segments.length; i++) {
+            const eq = segments[i].indexOf('=');
+            if (eq < 0)
+                continue;
+            const key = segments[i].slice(0, eq);
+            const val = segments[i].slice(eq + 1);
+            if (!/^[0-9a-fA-F]{1,2}$/.test(val))
+                continue;
+            const byte = parseInt(val, 16);
+            if (!Number.isFinite(byte))
+                continue;
+            const scaled = Math.round((byte / 255) * 100000);
+            if (key === 'tint') {
+                mods.tint = scaled;
+                gotMod = true;
+            }
+            else if (key === 'shade') {
+                mods.shade = scaled;
+                gotMod = true;
+            }
+        }
+        if (gotMod)
+            ref.mods = mods;
+        return ref;
     }
     function clamp(v, lo, hi) {
         if (v < lo)
@@ -1413,10 +1478,12 @@
     function parseChartSpace(chartSpace, path) {
         const key = deriveKey$1(path);
         const chart = globalXmlParser.element(chartSpace, "chart");
+        const emptyAxis = { line: null, tickLabel: null, gridline: null };
         if (!chart) {
             return {
                 key, title: "", showLegend: false, kind: "unknown",
                 grouping: "clustered", series: [],
+                catAxis: { ...emptyAxis }, valAxis: { ...emptyAxis },
             };
         }
         const titleEl = globalXmlParser.element(chart, "title");
@@ -1427,6 +1494,8 @@
         let kind = "unknown";
         let grouping = "clustered";
         let series = [];
+        let catAxis = { ...emptyAxis };
+        let valAxis = { ...emptyAxis };
         if (plotArea) {
             for (const child of globalXmlParser.elements(plotArea)) {
                 const k = localNameToKind(child.localName);
@@ -1444,8 +1513,68 @@
                 series = globalXmlParser.elements(child, "ser").map(parseSeries);
                 break;
             }
+            const catAxEl = globalXmlParser.element(plotArea, "catAx");
+            if (catAxEl)
+                catAxis = parseAxisStyle(catAxEl);
+            const valAxEl = globalXmlParser.element(plotArea, "valAx");
+            if (valAxEl)
+                valAxis = parseAxisStyle(valAxEl);
         }
-        return { key, title, showLegend, kind, grouping, series };
+        return { key, title, showLegend, kind, grouping, series, catAxis, valAxis };
+    }
+    function parseAxisStyle(axEl) {
+        const style = { line: null, tickLabel: null, gridline: null };
+        const axSpPr = globalXmlParser.element(axEl, "spPr");
+        if (axSpPr) {
+            const ln = globalXmlParser.element(axSpPr, "ln");
+            if (ln) {
+                style.line = parseSolidFillRef(ln);
+            }
+            if (style.line == null) {
+                style.line = parseSolidFillRef(axSpPr);
+            }
+        }
+        const txPr = globalXmlParser.element(axEl, "txPr");
+        if (txPr) {
+            const p = globalXmlParser.element(txPr, "p");
+            const pPr = p ? globalXmlParser.element(p, "pPr") : null;
+            const defRPr = pPr ? globalXmlParser.element(pPr, "defRPr") : null;
+            if (defRPr) {
+                style.tickLabel = parseSolidFillRef(defRPr);
+            }
+        }
+        const grid = globalXmlParser.element(axEl, "majorGridlines");
+        if (grid) {
+            const gSpPr = globalXmlParser.element(grid, "spPr");
+            if (gSpPr) {
+                const ln = globalXmlParser.element(gSpPr, "ln");
+                if (ln) {
+                    style.gridline = parseSolidFillRef(ln);
+                }
+                if (style.gridline == null) {
+                    style.gridline = parseSolidFillRef(gSpPr);
+                }
+            }
+        }
+        return style;
+    }
+    function parseSolidFillRef(spPr) {
+        const solidFill = globalXmlParser.element(spPr, "solidFill");
+        if (!solidFill)
+            return null;
+        const srgb = globalXmlParser.element(solidFill, "srgbClr");
+        if (srgb) {
+            const raw = globalXmlParser.attr(srgb, "val");
+            const safe = sanitizeCssColor(raw);
+            return safe ? { kind: "literal", color: safe } : null;
+        }
+        const scheme = globalXmlParser.element(solidFill, "schemeClr");
+        if (scheme) {
+            const raw = globalXmlParser.attr(scheme, "val");
+            if (isAllowedSchemeSlot(raw))
+                return { kind: "scheme", slot: raw };
+        }
+        return null;
     }
     function deriveKey$1(path) {
         const segs = path.split("/");
@@ -1707,6 +1836,55 @@
         }
     }
 
+    const SMARTART_LAYOUT_URN_RE = /^urn:microsoft\.com\/office\/officeart\/\d{4}\/\d+\/layout\/[a-z0-9]+$/i;
+    class DiagramLayoutPart extends Part {
+        constructor(pkg, path) {
+            super(pkg, path);
+            this.layoutId = "";
+        }
+        parseXml(root) {
+            let uniqueId = globalXmlParser.attr(root, "uniqueId");
+            if (!uniqueId) {
+                const def = firstDescendant(root, "layoutDef");
+                if (def)
+                    uniqueId = globalXmlParser.attr(def, "uniqueId");
+            }
+            if (uniqueId && SMARTART_LAYOUT_URN_RE.test(uniqueId)) {
+                this.layoutId = uniqueId;
+            }
+        }
+    }
+    class DiagramDataPart extends Part {
+        constructor(pkg, path) {
+            super(pkg, path);
+        }
+    }
+    class DiagramQuickStylePart extends Part {
+        constructor(pkg, path) {
+            super(pkg, path);
+        }
+    }
+    class DiagramColorsPart extends Part {
+        constructor(pkg, path) {
+            super(pkg, path);
+        }
+    }
+    class DiagramDrawingPart extends Part {
+        constructor(pkg, path) {
+            super(pkg, path);
+        }
+    }
+    function firstDescendant(root, localName) {
+        for (const c of globalXmlParser.elements(root)) {
+            if (c.localName === localName)
+                return c;
+            const d = firstDescendant(c, localName);
+            if (d)
+                return d;
+        }
+        return null;
+    }
+
     const topLevelRels = [
         { type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
         { type: RelationshipTypes.ExtendedProperties, target: "docProps/app.xml" },
@@ -1796,6 +1974,21 @@
                     break;
                 case RelationshipTypes.ChartEx:
                     part = new ChartExPart(this._package, path);
+                    break;
+                case RelationshipTypes.DiagramLayout:
+                    part = new DiagramLayoutPart(this._package, path);
+                    break;
+                case RelationshipTypes.DiagramData:
+                    part = new DiagramDataPart(this._package, path);
+                    break;
+                case RelationshipTypes.DiagramQuickStyle:
+                    part = new DiagramQuickStylePart(this._package, path);
+                    break;
+                case RelationshipTypes.DiagramColors:
+                    part = new DiagramColorsPart(this._package, path);
+                    break;
+                case RelationshipTypes.DiagramDrawing:
+                    part = new DiagramDrawingPart(this._package, path);
                     break;
             }
             if (part == null)
@@ -2367,6 +2560,15 @@
         highlight: "transparent"
     };
     const supportedNamespaceURIs = [];
+    function findAncestorByLocalName(start, localName) {
+        let n = start ? start.parentNode : null;
+        while (n && n.nodeType === 1) {
+            if (n.localName === localName)
+                return n;
+            n = n.parentNode;
+        }
+        return null;
+    }
     const mmlTagMap = {
         "oMath": DomType.MmlMath,
         "oMathPara": DomType.MmlMathParagraph,
@@ -3623,6 +3825,10 @@
             var graphicData = globalXmlParser.element(elem, "graphicData");
             const uri = graphicData ? globalXmlParser.attr(graphicData, "uri") : null;
             const CHARTEX_URI = "http://schemas.microsoft.com/office/drawingml/2014/chartex";
+            const SMARTART_URI = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+            if (uri === SMARTART_URI) {
+                return this.parseSmartArtReference(elem, graphicData);
+            }
             for (let n of globalXmlParser.elements(graphicData)) {
                 if (uri === CHARTEX_URI && n.localName === "chart") {
                     return this.parseChartExReference(n);
@@ -3652,6 +3858,56 @@
             return {
                 type: DomType.ChartEx,
                 relId: relId ?? "",
+            };
+        }
+        parseSmartArtReference(graphic, graphicData) {
+            const alt = findAncestorByLocalName(graphic, "AlternateContent");
+            if (alt) {
+                const fallback = globalXmlParser.element(alt, "Fallback");
+                if (fallback) {
+                    const drawing = globalXmlParser.element(fallback, "drawing");
+                    if (drawing) {
+                        const r = this.parseDrawing(drawing);
+                        if (r)
+                            return r;
+                    }
+                    for (const c of globalXmlParser.elements(fallback)) {
+                        if (c.localName === "inline" || c.localName === "anchor") {
+                            const r = this.parseDrawingWrapper(c);
+                            if (r)
+                                return r;
+                        }
+                    }
+                    for (const c of globalXmlParser.elements(fallback)) {
+                        if (c.localName === "pic") {
+                            return this.parsePicture(c);
+                        }
+                    }
+                }
+            }
+            const relIds = {};
+            if (graphicData) {
+                const rel = globalXmlParser.element(graphicData, "relIds");
+                if (rel) {
+                    const dm = globalXmlParser.attr(rel, "dm");
+                    const lo = globalXmlParser.attr(rel, "lo");
+                    const qs = globalXmlParser.attr(rel, "qs");
+                    const cs = globalXmlParser.attr(rel, "cs");
+                    if (dm)
+                        relIds.dm = dm;
+                    if (lo)
+                        relIds.lo = lo;
+                    if (qs)
+                        relIds.qs = qs;
+                    if (cs)
+                        relIds.cs = cs;
+                }
+            }
+            return {
+                type: DomType.SmartArt,
+                children: [],
+                cssStyle: {},
+                relIds,
             };
         }
         parseXfrm(xfrm) {
@@ -3915,6 +4171,36 @@
                             result.softEdge = { rad };
                             any = true;
                         }
+                        break;
+                    }
+                    case "glow": {
+                        const rad = globalXmlParser.intAttr(n, "rad");
+                        if (rad != null && Number.isFinite(rad) && rad > 0) {
+                            const colour = this.parseColor(n);
+                            const entry = { rad };
+                            if (colour)
+                                entry.colour = colour;
+                            result.glow = entry;
+                            any = true;
+                        }
+                        break;
+                    }
+                    case "reflection": {
+                        const stA = globalXmlParser.intAttr(n, "stA");
+                        const endA = globalXmlParser.intAttr(n, "endA");
+                        const dist = globalXmlParser.intAttr(n, "dist");
+                        const dirRaw = globalXmlParser.intAttr(n, "dir");
+                        const entry = {};
+                        if (stA != null && Number.isFinite(stA))
+                            entry.stA = stA;
+                        if (endA != null && Number.isFinite(endA))
+                            entry.endA = endA;
+                        if (dist != null && Number.isFinite(dist))
+                            entry.dist = dist;
+                        if (dirRaw != null && Number.isFinite(dirRaw))
+                            entry.dir = (dirRaw / 60000) % 360;
+                        result.reflection = entry;
+                        any = true;
                         break;
                     }
                 }
@@ -4403,18 +4689,26 @@
                     case "textAlignment":
                         style["vertical-align"] = values.valueOfTextAlignment(c);
                         break;
-                    case "color":
+                    case "color": {
                         style["color"] = xmlUtil.colorAttr(c, "val", null, autos.color);
+                        const tref = xmlUtil.themeColorReference(c, "themeColor", "val");
+                        if (tref)
+                            style["$themeColor-color"] = tref;
                         break;
+                    }
                     case "sz":
                         style["font-size"] = style["min-height"] = globalXmlParser.lengthAttr(c, "val", LengthUsage.FontSize);
                         break;
                     case "shd":
                         values.applyShd(c, style);
                         break;
-                    case "highlight":
+                    case "highlight": {
                         style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
+                        const tref = xmlUtil.themeColorReference(c, "themeColor", "val");
+                        if (tref)
+                            style["$themeColor-background-color"] = tref;
                         break;
+                    }
                     case "vertAlign":
                         break;
                     case "position":
@@ -4467,9 +4761,13 @@
                     case "pBdr":
                         this.parseBorderProperties(c, style);
                         break;
-                    case "bdr":
+                    case "bdr": {
                         style["border"] = values.valueOfBorder(c);
+                        const tref = values.themeRefOfBorder(c);
+                        if (tref)
+                            style["$themeColor-border"] = tref;
                         break;
+                    }
                     case "tcBorders":
                         this.parseBorderProperties(c, style);
                         break;
@@ -4720,21 +5018,27 @@
             }
         }
         parseBorderProperties(node, output) {
+            const setBorder = (prop, c) => {
+                output[prop] = values.valueOfBorder(c);
+                const tref = values.themeRefOfBorder(c);
+                if (tref)
+                    output[`$themeColor-${prop}`] = tref;
+            };
             for (const c of globalXmlParser.elements(node)) {
                 switch (c.localName) {
                     case "start":
                     case "left":
-                        output["border-left"] = values.valueOfBorder(c);
+                        setBorder("border-left", c);
                         break;
                     case "end":
                     case "right":
-                        output["border-right"] = values.valueOfBorder(c);
+                        setBorder("border-right", c);
                         break;
                     case "top":
-                        output["border-top"] = values.valueOfBorder(c);
+                        setBorder("border-top", c);
                         break;
                     case "bottom":
-                        output["border-bottom"] = values.valueOfBorder(c);
+                        setBorder("border-bottom", c);
                         break;
                     case "tl2br":
                         output["$diag-tlbr"] = values.valueOfBorder(c);
@@ -4748,7 +5052,7 @@
     }
     const knownColors = ['black', 'blue', 'cyan', 'darkBlue', 'darkCyan', 'darkGray', 'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'green', 'lightGray', 'magenta', 'none', 'red', 'white', 'yellow'];
     class xmlUtil {
-        static colorAttr(node, attrName, defValue = null, autoColor = 'black') {
+        static colorAttr(node, attrName, defValue = null, autoColor = 'black', themeAttrName = "themeColor") {
             var v = globalXmlParser.attr(node, attrName);
             if (v) {
                 if (v == "auto") {
@@ -4759,8 +5063,21 @@
                 }
                 return `#${v}`;
             }
-            var themeColor = globalXmlParser.attr(node, "themeColor");
+            var themeColor = globalXmlParser.attr(node, themeAttrName);
             return themeColor ? `var(--docx-${themeColor}-color)` : defValue;
+        }
+        static themeColorReference(node, themeAttrName = "themeColor", literalAttrName) {
+            if (literalAttrName) {
+                const literal = globalXmlParser.attr(node, literalAttrName);
+                if (literal && literal !== "auto")
+                    return null;
+            }
+            const slot = globalXmlParser.attr(node, themeAttrName);
+            if (!slot)
+                return null;
+            const tint = globalXmlParser.attr(node, "themeTint");
+            const shade = globalXmlParser.attr(node, "themeShade");
+            return buildThemeColorReference(slot, tint, shade);
         }
     }
     class values {
@@ -4783,11 +5100,14 @@
             return globalXmlParser.lengthAttr(c, "w");
         }
         static applyShd(c, style) {
-            const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd);
-            const color = xmlUtil.colorAttr(c, "color", null, autos.shd);
+            const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd, "themeFill");
+            const color = xmlUtil.colorAttr(c, "color", null, autos.shd, "themeColor");
             const val = globalXmlParser.attr(c, "val");
             if (fill != null) {
                 style["background-color"] = fill;
+                const tref = xmlUtil.themeColorReference(c, "themeFill", "fill");
+                if (tref)
+                    style["$themeColor-background-color"] = tref;
             }
             if (!val || val === "clear" || val === "nil")
                 return;
@@ -4837,6 +5157,14 @@
             var color = xmlUtil.colorAttr(c, "color");
             var size = globalXmlParser.lengthAttr(c, "sz", LengthUsage.Border);
             return `${size} ${type} ${color == "auto" ? autos.borderColor : color}`;
+        }
+        static themeRefOfBorder(c) {
+            if (values.parseBorderType(globalXmlParser.attr(c, "val")) == "none")
+                return null;
+            const literal = globalXmlParser.attr(c, "color");
+            if (literal && literal !== "auto")
+                return null;
+            return xmlUtil.themeColorReference(c);
         }
         static parseBorderType(type) {
             switch (type) {
@@ -5489,7 +5817,7 @@
     function appendEffects(defs, effects, widthPx, heightPx, context) {
         if (!effects)
             return null;
-        const hasEffect = effects.outerShadow || effects.innerShadow || effects.softEdge;
+        const hasEffect = effects.outerShadow || effects.innerShadow || effects.softEdge || effects.glow;
         if (!hasEffect)
             return null;
         const id = safeId(context.nextId('docx-filter'));
@@ -5502,6 +5830,7 @@
         filter.setAttribute('width', '200%');
         filter.setAttribute('height', '200%');
         filter.setAttribute('filterUnits', 'objectBoundingBox');
+        const layers = [];
         if (effects.outerShadow) {
             const s = effects.outerShadow;
             const { dx, dy } = shadowOffset(s.dir, s.dist);
@@ -5511,34 +5840,122 @@
             const opacity = typeof alpha === 'number' && Number.isFinite(alpha)
                 ? Math.max(0, Math.min(1, alpha / 100000))
                 : 0.5;
+            const resultName = `outerShadow-${layers.length}`;
             const fe = document.createElementNS(ns.svg, 'feDropShadow');
+            fe.setAttribute('in', 'SourceGraphic');
             fe.setAttribute('dx', dx.toFixed(2));
             fe.setAttribute('dy', dy.toFixed(2));
             fe.setAttribute('stdDeviation', blur.toFixed(2));
             fe.setAttribute('flood-color', colour);
             fe.setAttribute('flood-opacity', opacity.toFixed(3));
+            fe.setAttribute('result', resultName);
             filter.appendChild(fe);
+            layers.push(resultName);
+        }
+        if (effects.glow) {
+            const rad = emuToShadowPx(effects.glow.rad);
+            const colour = sanitizeCssColor(resolveColour(effects.glow.colour, context.themePalette)) ?? '#FFFF00';
+            const alpha = effects.glow.colour?.mods?.alpha;
+            const opacity = typeof alpha === 'number' && Number.isFinite(alpha)
+                ? Math.max(0, Math.min(1, alpha / 100000))
+                : 1;
+            const blurResult = `glowBlur-${layers.length}`;
+            const blur = document.createElementNS(ns.svg, 'feGaussianBlur');
+            blur.setAttribute('in', 'SourceAlpha');
+            blur.setAttribute('stdDeviation', rad.toFixed(2));
+            blur.setAttribute('result', blurResult);
+            filter.appendChild(blur);
+            const floodResult = `glowFlood-${layers.length}`;
+            const flood = document.createElementNS(ns.svg, 'feFlood');
+            flood.setAttribute('flood-color', colour);
+            flood.setAttribute('flood-opacity', opacity.toFixed(3));
+            flood.setAttribute('result', floodResult);
+            filter.appendChild(flood);
+            const compResult = `glow-${layers.length}`;
+            const comp = document.createElementNS(ns.svg, 'feComposite');
+            comp.setAttribute('in', floodResult);
+            comp.setAttribute('in2', blurResult);
+            comp.setAttribute('operator', 'in');
+            comp.setAttribute('result', compResult);
+            filter.appendChild(comp);
+            layers.push(compResult);
         }
         if (effects.innerShadow) {
             const s = effects.innerShadow;
             const { dx, dy } = shadowOffset(s.dir, s.dist);
             const blur = emuToShadowPx(s.blurRad) / 2;
             const colour = sanitizeCssColor(resolveColour(s.colour, context.themePalette)) ?? '#000000';
-            const fe = document.createElementNS(ns.svg, 'feDropShadow');
-            fe.setAttribute('dx', dx.toFixed(2));
-            fe.setAttribute('dy', dy.toFixed(2));
-            fe.setAttribute('stdDeviation', blur.toFixed(2));
-            fe.setAttribute('flood-color', colour);
-            fe.setAttribute('flood-opacity', '0.6');
-            filter.appendChild(fe);
+            const alpha = s.colour?.mods?.alpha;
+            const opacity = typeof alpha === 'number' && Number.isFinite(alpha)
+                ? Math.max(0, Math.min(1, alpha / 100000))
+                : 0.6;
+            const blurResult = `innerBlur-${layers.length}`;
+            const blurEl = document.createElementNS(ns.svg, 'feGaussianBlur');
+            blurEl.setAttribute('in', 'SourceAlpha');
+            blurEl.setAttribute('stdDeviation', blur.toFixed(2));
+            blurEl.setAttribute('result', blurResult);
+            filter.appendChild(blurEl);
+            const offsetResult = `innerOffset-${layers.length}`;
+            const offsetEl = document.createElementNS(ns.svg, 'feOffset');
+            offsetEl.setAttribute('in', blurResult);
+            offsetEl.setAttribute('dx', dx.toFixed(2));
+            offsetEl.setAttribute('dy', dy.toFixed(2));
+            offsetEl.setAttribute('result', offsetResult);
+            filter.appendChild(offsetEl);
+            const invResult = `innerInvert-${layers.length}`;
+            const invEl = document.createElementNS(ns.svg, 'feComposite');
+            invEl.setAttribute('in', 'SourceAlpha');
+            invEl.setAttribute('in2', offsetResult);
+            invEl.setAttribute('operator', 'arithmetic');
+            invEl.setAttribute('k2', '-1');
+            invEl.setAttribute('k3', '1');
+            invEl.setAttribute('result', invResult);
+            filter.appendChild(invEl);
+            const floodResult = `innerFlood-${layers.length}`;
+            const flood = document.createElementNS(ns.svg, 'feFlood');
+            flood.setAttribute('flood-color', colour);
+            flood.setAttribute('flood-opacity', opacity.toFixed(3));
+            flood.setAttribute('result', floodResult);
+            filter.appendChild(flood);
+            const clippedResult = `innerShadow-${layers.length}`;
+            const clipEl = document.createElementNS(ns.svg, 'feComposite');
+            clipEl.setAttribute('in', floodResult);
+            clipEl.setAttribute('in2', invResult);
+            clipEl.setAttribute('operator', 'in');
+            clipEl.setAttribute('result', clippedResult);
+            filter.appendChild(clipEl);
+            const mergedResult = `innerShadowOver-${layers.length}`;
+            const overEl = document.createElementNS(ns.svg, 'feComposite');
+            overEl.setAttribute('in', clippedResult);
+            overEl.setAttribute('in2', 'SourceGraphic');
+            overEl.setAttribute('operator', 'over');
+            overEl.setAttribute('result', mergedResult);
+            filter.appendChild(overEl);
+            layers.push(mergedResult);
         }
         if (effects.softEdge) {
             const rad = emuToShadowPx(effects.softEdge.rad);
+            const resultName = `softEdge-${layers.length}`;
             const blur = document.createElementNS(ns.svg, 'feGaussianBlur');
             blur.setAttribute('in', 'SourceGraphic');
             blur.setAttribute('stdDeviation', rad.toFixed(2));
+            blur.setAttribute('result', resultName);
             filter.appendChild(blur);
+            layers.push(resultName);
         }
+        const containsSource = !!effects.innerShadow || !!effects.softEdge;
+        const merge = document.createElementNS(ns.svg, 'feMerge');
+        for (const name of layers) {
+            const node = document.createElementNS(ns.svg, 'feMergeNode');
+            node.setAttribute('in', name);
+            merge.appendChild(node);
+        }
+        if (!containsSource) {
+            const src = document.createElementNS(ns.svg, 'feMergeNode');
+            src.setAttribute('in', 'SourceGraphic');
+            merge.appendChild(src);
+        }
+        filter.appendChild(merge);
         defs.appendChild(filter);
         return id;
     }
@@ -5663,6 +6080,29 @@
                 path.setAttribute('filter', `url(#${filterId})`);
             svg.appendChild(path);
         }
+        if (shape.effects?.reflection) {
+            const ref = shape.effects.reflection;
+            const distPx = emuToShadowPx(ref.dist);
+            const stA = typeof ref.stA === 'number' && Number.isFinite(ref.stA) ? ref.stA : 50000;
+            const endA = typeof ref.endA === 'number' && Number.isFinite(ref.endA) ? ref.endA : 300;
+            const startOpacity = Math.max(0, Math.min(1, stA / 100000)) * 0.5;
+            const endOpacity = Math.max(0, Math.min(1, endA / 100000)) * 0.5;
+            const reflectionSvg = svg.cloneNode(true);
+            reflectionSvg.style.position = 'absolute';
+            reflectionSvg.style.left = '0';
+            reflectionSvg.style.top = `${(heightPx + distPx).toFixed(2)}px`;
+            reflectionSvg.style.width = '100%';
+            reflectionSvg.style.height = `${heightPx.toFixed(2)}px`;
+            reflectionSvg.style.transform = 'scaleY(-1)';
+            reflectionSvg.style.transformOrigin = 'top left';
+            reflectionSvg.style.pointerEvents = 'none';
+            const maskGradient = `linear-gradient(to bottom, ` +
+                `rgba(0,0,0,${startOpacity.toFixed(3)}) 0%, ` +
+                `rgba(0,0,0,${endOpacity.toFixed(3)}) 100%)`;
+            reflectionSvg.style.webkitMaskImage = maskGradient;
+            reflectionSvg.style.maskImage = maskGradient;
+            wrapper.appendChild(reflectionSvg);
+        }
         wrapper.appendChild(svg);
         if (shape.txbxParagraphs && shape.txbxParagraphs.length > 0 && renderText) {
             const text = document.createElement('div');
@@ -5748,7 +6188,26 @@
         "#5B9BD5", "#70AD47", "#264478", "#9E480E",
         "#636363", "#997300",
     ];
-    function renderChart(model) {
+    const DEFAULT_AXIS_LINE = "#888";
+    const DEFAULT_TICK_LABEL = "#555";
+    function resolveAxisRef(ref, palette) {
+        if (!ref)
+            return null;
+        if (ref.kind === "literal") {
+            return sanitizeCssColor(ref.color);
+        }
+        const resolved = resolveSchemeColor(ref.slot, palette ?? undefined);
+        return resolved ? sanitizeCssColor(resolved) : null;
+    }
+    function resolveAxisStyle(style, palette) {
+        const s = style ?? { line: null, tickLabel: null, gridline: null };
+        return {
+            line: resolveAxisRef(s.line, palette) ?? DEFAULT_AXIS_LINE,
+            tickLabel: resolveAxisRef(s.tickLabel, palette) ?? DEFAULT_TICK_LABEL,
+            gridline: resolveAxisRef(s.gridline, palette),
+        };
+    }
+    function renderChart(model, options) {
         const doc = document;
         const svg = doc.createElementNS(SVG_NS, "svg");
         svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
@@ -5757,6 +6216,9 @@
         svg.style.maxWidth = "100%";
         svg.style.height = "auto";
         svg.style.display = "block";
+        const palette = options?.themePalette ?? null;
+        const catAxis = resolveAxisStyle(model.catAxis, palette);
+        const valAxis = resolveAxisStyle(model.valAxis, palette);
         const title = (model.title ?? "").trim();
         const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
         if (title) {
@@ -5783,7 +6245,7 @@
                     top: plotTop,
                     bottom: plotBottom - AXIS_LABEL_HEIGHT,
                     horizontal: model.kind === "bar",
-                });
+                }, { catAxis, valAxis });
                 break;
             case "line":
                 renderLineChart(svg, doc, model, {
@@ -5791,7 +6253,7 @@
                     right: VIEW_W - PADDING,
                     top: plotTop,
                     bottom: plotBottom - AXIS_LABEL_HEIGHT,
-                });
+                }, { catAxis, valAxis });
                 break;
             case "pie":
                 renderPieChart(svg, doc, model, {
@@ -5812,7 +6274,7 @@
             svg.appendChild(node);
         return svg;
     }
-    function renderBarChart(svg, doc, model, rect) {
+    function renderBarChart(svg, doc, model, rect, axisColors) {
         const series = model.series.filter((s) => s.values.length > 0);
         if (series.length === 0)
             return;
@@ -5856,21 +6318,32 @@
         const horizontal = rect.horizontal;
         const plotW = rect.right - rect.left;
         const plotH = rect.bottom - rect.top;
-        svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom));
-        svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom));
+        const valLineColor = axisColors.valAxis.line;
+        const catLineColor = axisColors.catAxis.line;
+        const valTickColor = axisColors.valAxis.tickLabel;
+        const catTickColor = axisColors.catAxis.tickLabel;
+        const valGrid = axisColors.valAxis.gridline;
+        svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom, valLineColor));
+        svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom, catLineColor));
         for (const t of ticks) {
             if (horizontal) {
                 const x = rect.left + ((t - yMin) / (yMax - yMin)) * plotW;
-                svg.appendChild(mkLine(doc, x, rect.bottom, x, rect.bottom + 4));
+                if (valGrid && t !== yMin) {
+                    svg.appendChild(mkLine(doc, x, rect.top, x, rect.bottom, valGrid));
+                }
+                svg.appendChild(mkLine(doc, x, rect.bottom, x, rect.bottom + 4, valLineColor));
                 svg.appendChild(mkText(doc, x, rect.bottom + 16, formatTick(t), {
-                    fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                    fontSize: FONT_SIZE, anchor: "middle", fill: valTickColor,
                 }));
             }
             else {
                 const y = rect.bottom - ((t - yMin) / (yMax - yMin)) * plotH;
-                svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y));
+                if (valGrid && t !== yMin) {
+                    svg.appendChild(mkLine(doc, rect.left, y, rect.right, y, valGrid));
+                }
+                svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y, valLineColor));
                 svg.appendChild(mkText(doc, rect.left - 6, y + 4, formatTick(t), {
-                    fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                    fontSize: FONT_SIZE, anchor: "end", fill: valTickColor,
                 }));
             }
         }
@@ -5883,13 +6356,13 @@
             if (horizontal) {
                 const yMid = rect.top + slotSize * (i + 0.5);
                 svg.appendChild(mkText(doc, rect.left - 6, yMid + 4, categories[i] ?? "", {
-                    fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                    fontSize: FONT_SIZE, anchor: "end", fill: catTickColor,
                 }));
             }
             else {
                 const xMid = rect.left + slotSize * (i + 0.5);
                 svg.appendChild(mkText(doc, xMid, rect.bottom + 16, categories[i] ?? "", {
-                    fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                    fontSize: FONT_SIZE, anchor: "middle", fill: catTickColor,
                 }));
             }
             if (stacked) {
@@ -5969,7 +6442,7 @@
             svg.appendChild(rect);
         }
     }
-    function renderLineChart(svg, doc, model, rect) {
+    function renderLineChart(svg, doc, model, rect, axisColors) {
         const series = model.series.filter((s) => s.values.length > 0);
         if (series.length === 0)
             return;
@@ -5999,20 +6472,28 @@
         const { min: yMin, max: yMax, ticks } = niceScale(valMin, valMax, 5);
         const plotW = rect.right - rect.left;
         const plotH = rect.bottom - rect.top;
-        svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom));
-        svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom));
+        const valLineColor = axisColors.valAxis.line;
+        const catLineColor = axisColors.catAxis.line;
+        const valTickColor = axisColors.valAxis.tickLabel;
+        const catTickColor = axisColors.catAxis.tickLabel;
+        const valGrid = axisColors.valAxis.gridline;
+        svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom, valLineColor));
+        svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom, catLineColor));
         for (const t of ticks) {
             const y = rect.bottom - ((t - yMin) / (yMax - yMin)) * plotH;
-            svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y));
+            if (valGrid && t !== yMin) {
+                svg.appendChild(mkLine(doc, rect.left, y, rect.right, y, valGrid));
+            }
+            svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y, valLineColor));
             svg.appendChild(mkText(doc, rect.left - 6, y + 4, formatTick(t), {
-                fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                fontSize: FONT_SIZE, anchor: "end", fill: valTickColor,
             }));
         }
         const xStep = catCount > 1 ? plotW / (catCount - 1) : 0;
         for (let i = 0; i < catCount; i++) {
             const x = rect.left + xStep * i;
             svg.appendChild(mkText(doc, x, rect.bottom + 16, categories[i] ?? "", {
-                fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                fontSize: FONT_SIZE, anchor: "middle", fill: catTickColor,
             }));
         }
         for (let si = 0; si < series.length; si++) {
@@ -6229,13 +6710,13 @@
         }
         return niceFraction * Math.pow(10, exponent);
     }
-    function mkLine(doc, x1, y1, x2, y2) {
+    function mkLine(doc, x1, y1, x2, y2, stroke = "#888") {
         const el = doc.createElementNS(SVG_NS, "line");
         el.setAttribute("x1", fmt(x1));
         el.setAttribute("y1", fmt(y1));
         el.setAttribute("x2", fmt(x2));
         el.setAttribute("y2", fmt(y2));
-        el.setAttribute("stroke", "#888");
+        el.setAttribute("stroke", stroke);
         el.setAttribute("stroke-width", "1");
         return el;
     }
@@ -7398,6 +7879,8 @@ section.${c}>ol>li::before {
                     return this.renderChart(elem);
                 case DomType.ChartEx:
                     return this.renderChartEx(elem);
+                case DomType.SmartArt:
+                    return this.renderSmartArtPlaceholder(elem);
                 case DomType.Text:
                     return this.renderText(elem);
                 case DomType.Text:
@@ -8065,7 +8548,8 @@ section.${c}>ol>li::before {
             if (!part || !(part instanceof ChartPart) || !part.chart)
                 return fallback;
             try {
-                const svg = renderChart(part.chart);
+                const themePalette = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+                const svg = renderChart(part.chart, { themePalette });
                 const wrapper = this.createElement("span");
                 wrapper.className = `${this.className}-chart`;
                 wrapper.style.display = "inline-block";
@@ -8095,6 +8579,26 @@ section.${c}>ol>li::before {
             const noteDiv = this.createElement("div");
             noteDiv.className = "docx-chartex-placeholder__note";
             noteDiv.textContent = "Chart type not yet supported";
+            wrapper.appendChild(noteDiv);
+            return wrapper;
+        }
+        renderSmartArtPlaceholder(elem) {
+            const wrapper = this.createElement("div");
+            wrapper.className = "docx-smartart-placeholder";
+            let layoutId = elem.layoutId ?? "";
+            const loRelId = elem.relIds?.lo;
+            if (!layoutId && loRelId && this.document) {
+                const part = this.document.findPartByRelId(loRelId, this.currentPart ?? this.document.documentPart);
+                if (part instanceof DiagramLayoutPart && part.layoutId) {
+                    layoutId = part.layoutId;
+                }
+            }
+            if (layoutId) {
+                wrapper.setAttribute("data-smartart-layout", layoutId);
+            }
+            const noteDiv = this.createElement("div");
+            noteDiv.className = "docx-smartart-placeholder__note";
+            noteDiv.textContent = "SmartArt diagram not yet supported";
             wrapper.appendChild(noteDiv);
             return wrapper;
         }
@@ -8685,8 +9189,42 @@ section.${c}>ol>li::before {
         toH(elem, ns, tagName, children = null) {
             const { "$lang": rawLang, ...style } = elem.cssStyle ?? {};
             const lang = isValidBcp47LanguageTag(rawLang) ? rawLang : undefined;
+            this.applyThemeColorSideband(style);
             const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
             return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) };
+        }
+        applyThemeColorSideband(style) {
+            const palette = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+            const keys = Object.keys(style);
+            for (const k of keys) {
+                if (!k.startsWith('$themeColor-'))
+                    continue;
+                const targetProp = k.slice('$themeColor-'.length);
+                const placeholder = style[k];
+                delete style[k];
+                const ref = parseThemeColorReference(placeholder);
+                if (!ref)
+                    continue;
+                const resolved = sanitizeCssColor(resolveColour(ref, palette));
+                if (!resolved)
+                    continue;
+                const existing = style[targetProp];
+                if (existing == null) {
+                    style[targetProp] = resolved;
+                    continue;
+                }
+                if (targetProp === 'border' || targetProp.startsWith('border-')) {
+                    const parts = existing.split(/\s+/);
+                    if (parts.length >= 3) {
+                        style[targetProp] = `${parts[0]} ${parts[1]} ${resolved}`;
+                    }
+                    else {
+                        style[targetProp] = resolved;
+                    }
+                    continue;
+                }
+                style[targetProp] = resolved;
+            }
         }
         toHTML(elem, ns, tagName, children = null) {
             return this.h(this.toH(elem, ns, tagName, children));

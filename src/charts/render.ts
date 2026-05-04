@@ -1,5 +1,14 @@
 import { sanitizeCssColor } from "../utils";
-import { ChartModel, ChartSeries } from "./model";
+import { ChartAxisColorRef, ChartAxisStyle, ChartModel, ChartSeries } from "./model";
+import { resolveSchemeColor } from "../drawing/theme";
+
+// Options threaded into the SVG chart renderer. Currently carries only
+// the document's theme palette, which axis chrome (lines / tick labels
+// / gridlines) resolves schemeClr references against. Series and
+// data-point colours are still pre-resolved by chart-part.ts.
+export interface RenderChartOptions {
+    themePalette?: Record<string, string> | null;
+}
 
 // Zero-dependency SVG chart renderer. Consumes the shape produced by
 // `src/charts/chart-part.ts` and emits an `<svg>` element into the
@@ -36,7 +45,54 @@ const DEFAULT_PALETTE = [
     "#636363", "#997300",
 ];
 
-export function renderChart(model: ChartModel): SVGElement {
+// Axis-chrome defaults. Applied whenever the axis style's
+// corresponding ref is null or fails to resolve to a safe colour.
+// Tick labels are mid-grey to match the original behaviour; axis
+// lines are a slightly darker grey; gridlines default to none
+// (matching the v1 renderer which didn't emit gridlines at all, so
+// we preserve that behaviour unless the axis explicitly declared
+// <c:majorGridlines>).
+const DEFAULT_AXIS_LINE = "#888";
+const DEFAULT_TICK_LABEL = "#555";
+
+interface ResolvedAxisStyle {
+    line: string;
+    tickLabel: string;
+    gridline: string | null;
+}
+
+function resolveAxisRef(
+    ref: ChartAxisColorRef,
+    palette: Record<string, string> | null | undefined,
+): string | null {
+    if (!ref) return null;
+    if (ref.kind === "literal") {
+        return sanitizeCssColor(ref.color);
+    }
+    const resolved = resolveSchemeColor(ref.slot, palette ?? undefined);
+    return resolved ? sanitizeCssColor(resolved) : null;
+}
+
+function resolveAxisStyle(
+    style: ChartAxisStyle | undefined,
+    palette: Record<string, string> | null | undefined,
+): ResolvedAxisStyle {
+    const s = style ?? { line: null, tickLabel: null, gridline: null };
+    return {
+        line: resolveAxisRef(s.line, palette) ?? DEFAULT_AXIS_LINE,
+        tickLabel: resolveAxisRef(s.tickLabel, palette) ?? DEFAULT_TICK_LABEL,
+        // Gridlines fall back to null so the renderer knows to skip
+        // emission entirely when the DOCX didn't declare them.
+        gridline: resolveAxisRef(s.gridline, palette),
+    };
+}
+
+interface AxisColors {
+    catAxis: ResolvedAxisStyle;
+    valAxis: ResolvedAxisStyle;
+}
+
+export function renderChart(model: ChartModel, options?: RenderChartOptions): SVGElement {
     const doc: Document = document;
     const svg = doc.createElementNS(SVG_NS, "svg") as SVGElement;
     svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
@@ -45,6 +101,10 @@ export function renderChart(model: ChartModel): SVGElement {
     svg.style.maxWidth = "100%";
     svg.style.height = "auto";
     svg.style.display = "block";
+
+    const palette = options?.themePalette ?? null;
+    const catAxis = resolveAxisStyle(model.catAxis, palette);
+    const valAxis = resolveAxisStyle(model.valAxis, palette);
 
     const title = (model.title ?? "").trim();
     const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
@@ -77,7 +137,7 @@ export function renderChart(model: ChartModel): SVGElement {
                 top: plotTop,
                 bottom: plotBottom - AXIS_LABEL_HEIGHT,
                 horizontal: model.kind === "bar",
-            });
+            }, { catAxis, valAxis });
             break;
         case "line":
             renderLineChart(svg, doc, model, {
@@ -85,7 +145,7 @@ export function renderChart(model: ChartModel): SVGElement {
                 right: VIEW_W - PADDING,
                 top: plotTop,
                 bottom: plotBottom - AXIS_LABEL_HEIGHT,
-            });
+            }, { catAxis, valAxis });
             break;
         case "pie":
             renderPieChart(svg, doc, model, {
@@ -118,6 +178,7 @@ export function renderChart(model: ChartModel): SVGElement {
 function renderBarChart(
     svg: SVGElement, doc: Document, model: ChartModel,
     rect: { left: number; right: number; top: number; bottom: number; horizontal: boolean },
+    axisColors: AxisColors,
 ) {
     const series = model.series.filter((s) => s.values.length > 0);
     if (series.length === 0) return;
@@ -161,23 +222,38 @@ function renderBarChart(
     const plotW = rect.right - rect.left;
     const plotH = rect.bottom - rect.top;
 
-    // Axes.
-    svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom));
-    svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom));
+    // Axis-line colour is taken from the axis that each edge represents:
+    // the value-axis line runs perpendicular to its ticks, and the
+    // category axis sits along the plot's edge opposite the tick labels.
+    const valLineColor = axisColors.valAxis.line;
+    const catLineColor = axisColors.catAxis.line;
+    const valTickColor = axisColors.valAxis.tickLabel;
+    const catTickColor = axisColors.catAxis.tickLabel;
+    const valGrid = axisColors.valAxis.gridline;
 
-    // Tick labels for the value axis.
+    // Axes.
+    svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom, valLineColor));
+    svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom, catLineColor));
+
+    // Tick labels (and optional major gridlines) for the value axis.
     for (const t of ticks) {
         if (horizontal) {
             const x = rect.left + ((t - yMin) / (yMax - yMin)) * plotW;
-            svg.appendChild(mkLine(doc, x, rect.bottom, x, rect.bottom + 4));
+            if (valGrid && t !== yMin) {
+                svg.appendChild(mkLine(doc, x, rect.top, x, rect.bottom, valGrid));
+            }
+            svg.appendChild(mkLine(doc, x, rect.bottom, x, rect.bottom + 4, valLineColor));
             svg.appendChild(mkText(doc, x, rect.bottom + 16, formatTick(t), {
-                fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                fontSize: FONT_SIZE, anchor: "middle", fill: valTickColor,
             }));
         } else {
             const y = rect.bottom - ((t - yMin) / (yMax - yMin)) * plotH;
-            svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y));
+            if (valGrid && t !== yMin) {
+                svg.appendChild(mkLine(doc, rect.left, y, rect.right, y, valGrid));
+            }
+            svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y, valLineColor));
             svg.appendChild(mkText(doc, rect.left - 6, y + 4, formatTick(t), {
-                fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                fontSize: FONT_SIZE, anchor: "end", fill: valTickColor,
             }));
         }
     }
@@ -194,12 +270,12 @@ function renderBarChart(
         if (horizontal) {
             const yMid = rect.top + slotSize * (i + 0.5);
             svg.appendChild(mkText(doc, rect.left - 6, yMid + 4, categories[i] ?? "", {
-                fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                fontSize: FONT_SIZE, anchor: "end", fill: catTickColor,
             }));
         } else {
             const xMid = rect.left + slotSize * (i + 0.5);
             svg.appendChild(mkText(doc, xMid, rect.bottom + 16, categories[i] ?? "", {
-                fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                fontSize: FONT_SIZE, anchor: "middle", fill: catTickColor,
             }));
         }
 
@@ -295,6 +371,7 @@ function appendBar(svg: SVGElement, doc: Document, p: {
 function renderLineChart(
     svg: SVGElement, doc: Document, model: ChartModel,
     rect: { left: number; right: number; top: number; bottom: number },
+    axisColors: AxisColors,
 ) {
     const series = model.series.filter((s) => s.values.length > 0);
     if (series.length === 0) return;
@@ -322,14 +399,23 @@ function renderLineChart(
     const plotW = rect.right - rect.left;
     const plotH = rect.bottom - rect.top;
 
-    svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom));
-    svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom));
+    const valLineColor = axisColors.valAxis.line;
+    const catLineColor = axisColors.catAxis.line;
+    const valTickColor = axisColors.valAxis.tickLabel;
+    const catTickColor = axisColors.catAxis.tickLabel;
+    const valGrid = axisColors.valAxis.gridline;
+
+    svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom, valLineColor));
+    svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom, catLineColor));
 
     for (const t of ticks) {
         const y = rect.bottom - ((t - yMin) / (yMax - yMin)) * plotH;
-        svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y));
+        if (valGrid && t !== yMin) {
+            svg.appendChild(mkLine(doc, rect.left, y, rect.right, y, valGrid));
+        }
+        svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y, valLineColor));
         svg.appendChild(mkText(doc, rect.left - 6, y + 4, formatTick(t), {
-            fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+            fontSize: FONT_SIZE, anchor: "end", fill: valTickColor,
         }));
     }
 
@@ -337,7 +423,7 @@ function renderLineChart(
     for (let i = 0; i < catCount; i++) {
         const x = rect.left + xStep * i;
         svg.appendChild(mkText(doc, x, rect.bottom + 16, categories[i] ?? "", {
-            fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+            fontSize: FONT_SIZE, anchor: "middle", fill: catTickColor,
         }));
     }
 
@@ -609,13 +695,13 @@ function niceNum(range: number, round: boolean): number {
     return niceFraction * Math.pow(10, exponent);
 }
 
-function mkLine(doc: Document, x1: number, y1: number, x2: number, y2: number): SVGElement {
+function mkLine(doc: Document, x1: number, y1: number, x2: number, y2: number, stroke: string = "#888"): SVGElement {
     const el = doc.createElementNS(SVG_NS, "line") as SVGElement;
     el.setAttribute("x1", fmt(x1));
     el.setAttribute("y1", fmt(y1));
     el.setAttribute("x2", fmt(x2));
     el.setAttribute("y2", fmt(y2));
-    el.setAttribute("stroke", "#888");
+    el.setAttribute("stroke", stroke);
     el.setAttribute("stroke-width", "1");
     return el;
 }

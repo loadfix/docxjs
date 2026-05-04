@@ -30,11 +30,13 @@ import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReferen
 import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
-import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt } from './document/drawing';
 import { renderShape, renderShapeGroup, ShapeRenderContext } from './drawing/shapes';
 import { ChartPart } from './charts/chart-part';
 import { ChartExPart } from './charts/chartex-part';
+import { DiagramLayoutPart } from './smartart/smartart-parts';
 import { renderChart as renderChartSvg, scheduleLegendOverflowAdjust } from './charts/render';
+import { parseThemeColorReference, resolveColour } from './drawing/theme';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -1683,6 +1685,9 @@ section.${c}>ol>li::before {
 			case DomType.ChartEx:
 				return this.renderChartEx(elem as DrawingChartEx);
 
+			case DomType.SmartArt:
+				return this.renderSmartArtPlaceholder(elem as DrawingSmartArt);
+
 			case DomType.Text:
 				return this.renderText(elem as WmlText);
 
@@ -2719,7 +2724,8 @@ section.${c}>ol>li::before {
 		if (!part || !(part instanceof ChartPart) || !part.chart) return fallback;
 
 		try {
-			const svg = renderChartSvg(part.chart);
+			const themePalette = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+			const svg = renderChartSvg(part.chart, { themePalette });
 			const wrapper = this.createElement("span");
 			wrapper.className = `${this.className}-chart`;
 			wrapper.style.display = "inline-block";
@@ -2775,6 +2781,44 @@ section.${c}>ol>li::before {
 		const noteDiv = this.createElement("div");
 		noteDiv.className = "docx-chartex-placeholder__note";
 		noteDiv.textContent = "Chart type not yet supported";
+		wrapper.appendChild(noteDiv);
+
+		return wrapper;
+	}
+
+	// SmartArt placeholder — only reached when parseSmartArtReference
+	// could not substitute a Fallback drawing (see document-parser.ts).
+	// Emits a labelled <div> tagged with data-smartart-layout so host
+	// CSS can distinguish SmartArt kinds. The layout URN is already
+	// allowlisted at part-parse time (DiagramLayoutPart) and round-
+	// tripped through the rel-id map here; no DOCX string reaches a
+	// selector or innerHTML sink.
+	renderSmartArtPlaceholder(elem: DrawingSmartArt): HTMLElement {
+		const wrapper = this.createElement("div");
+		wrapper.className = "docx-smartart-placeholder";
+
+		// Look up the layout URN via the r:lo relationship. The
+		// enclosing part is documentPart unless we're in a header /
+		// footer / footnote, in which case currentPart is set by the
+		// container renderer.
+		let layoutId = elem.layoutId ?? "";
+		const loRelId = elem.relIds?.lo;
+		if (!layoutId && loRelId && this.document) {
+			const part = this.document.findPartByRelId(
+				loRelId,
+				this.currentPart ?? this.document.documentPart,
+			);
+			if (part instanceof DiagramLayoutPart && part.layoutId) {
+				layoutId = part.layoutId;
+			}
+		}
+		if (layoutId) {
+			wrapper.setAttribute("data-smartart-layout", layoutId);
+		}
+
+		const noteDiv = this.createElement("div");
+		noteDiv.className = "docx-smartart-placeholder__note";
+		noteDiv.textContent = "SmartArt diagram not yet supported";
 		wrapper.appendChild(noteDiv);
 
 		return wrapper;
@@ -3570,8 +3614,59 @@ section.${c}>ol>li::before {
 		// safe — but we still drop values that aren't BCP 47-shaped so a
 		// crafted DOCX can't stuff garbage into an assistive-tech hint.
 		const lang = isValidBcp47LanguageTag(rawLang) ? rawLang : undefined;
+		this.applyThemeColorSideband(style);
 		const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
 		return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) } as any;
+	}
+
+	// Resolves every `$themeColor-<cssProp>` sideband key in the style
+	// map against the document's theme palette (with any themeTint /
+	// themeShade modifiers) and writes the concrete hex back into the
+	// sibling CSS property. The sideband keys themselves are dropped so
+	// they never leak to the DOM — styleToString filters `$`-prefixed
+	// keys; html.ts's Object.assign(result.style, …) also ignores them.
+	//
+	// Covers:
+	//   - scalar properties: `color`, `background-color`, `border`.
+	//   - composite border strings ("<size> <type> <color>"): the
+	//     resolved hex replaces the colour token in-place.
+	//
+	// Security: the placeholder passes through parseThemeColorReference
+	// (allowlisted slot names, hex-byte-validated modifiers) and the
+	// resolved colour through sanitizeCssColor before it reaches the
+	// style property. A malformed sideband is dropped, leaving the
+	// original (hex-or-var(--docx-…)) value in place.
+	private applyThemeColorSideband(style: Record<string, string>) {
+		const palette = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+		const keys = Object.keys(style);
+		for (const k of keys) {
+			if (!k.startsWith('$themeColor-')) continue;
+			const targetProp = k.slice('$themeColor-'.length);
+			const placeholder = style[k];
+			delete style[k];
+			const ref = parseThemeColorReference(placeholder);
+			if (!ref) continue;
+			const resolved = sanitizeCssColor(resolveColour(ref, palette));
+			if (!resolved) continue;
+			const existing = style[targetProp];
+			if (existing == null) {
+				style[targetProp] = resolved;
+				continue;
+			}
+			// Composite border strings: "<size> <type> <color>" — tail is
+			// the colour slot (possibly multi-token like "rgb(…)").
+			if (targetProp === 'border' || targetProp.startsWith('border-')) {
+				const parts = existing.split(/\s+/);
+				if (parts.length >= 3) {
+					style[targetProp] = `${parts[0]} ${parts[1]} ${resolved}`;
+				} else {
+					style[targetProp] = resolved;
+				}
+				continue;
+			}
+			// Everything else: plain swap.
+			style[targetProp] = resolved;
+		}
 	}
 
 	toHTML(elem: OpenXmlElement, ns: ns, tagName: string, children: Node[] = null) {

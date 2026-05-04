@@ -20,6 +20,10 @@ import { CommentsPart } from "./comments/comments-part";
 import { CommentsExtendedPart } from "./comments/comments-extended-part";
 import { ChartPart } from "./charts/chart-part";
 import { ChartExPart } from "./charts/chartex-part";
+import {
+	DiagramLayoutPart, DiagramDataPart, DiagramQuickStylePart,
+	DiagramColorsPart, DiagramDrawingPart,
+} from "./smartart/smartart-parts";
 import { ContentType } from "./common/content-types";
 
 const topLevelRels = [
@@ -160,6 +164,35 @@ export class WordDocument {
 				// treemap, ...). Rendered as a labelled placeholder
 				// rather than a real chart — see src/charts/chartex-part.ts.
 				part = new ChartExPart(this._package, path);
+				break;
+
+			case RelationshipTypes.DiagramLayout:
+				// SmartArt layout definition. Loaded for the uniqueId
+				// URN only; the layout algorithm itself is not
+				// implemented. See src/smartart/smartart-parts.ts.
+				part = new DiagramLayoutPart(this._package, path);
+				break;
+
+			case RelationshipTypes.DiagramData:
+				// SmartArt data-model (tree of points with text).
+				// Currently loaded only so the package resolver walks
+				// its own relationships (embedded images). A future
+				// list/hierarchy renderer will consume it.
+				part = new DiagramDataPart(this._package, path);
+				break;
+
+			case RelationshipTypes.DiagramQuickStyle:
+				part = new DiagramQuickStylePart(this._package, path);
+				break;
+
+			case RelationshipTypes.DiagramColors:
+				part = new DiagramColorsPart(this._package, path);
+				break;
+
+			case RelationshipTypes.DiagramDrawing:
+				// Microsoft extension: cached drawing with manual
+				// layout overrides. Loaded so its image rels resolve.
+				part = new DiagramDrawingPart(this._package, path);
 				break;
 		}
 

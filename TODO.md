@@ -308,7 +308,7 @@ variants.
 | DrawingML shape groups `wpg:wgp` | Not implemented | Same switch (`document-parser.ts:1062`). See #167. |
 | DrawingML text boxes `wps:txbx` | Not implemented | Same site. See #80 / #97 above. |
 | Custom geometry `a:custGeom` | Not implemented | No DrawingML SVG pipeline at all. |
-| SmartArt (`dgm:relIds`) | Not implemented | Not parsed; SmartArt content is silently dropped. |
+| SmartArt (`dgm:relIds`) | Partial | `parseSmartArtReference` (`document-parser.ts`) unwraps the sibling `<mc:Fallback>` drawing when present — Word writes a pre-rendered `<pic:pic>` there for almost every SmartArt block, so the rendered output matches Word's own fallback. When no Fallback exists, emits a `<div class="docx-smartart-placeholder">` with `data-smartart-layout` (URN allowlisted). No layout engine: list / cycle / hierarchy / pyramid / matrix aren't drawn from the dgm data-model. |
 | Charts (`c:chart`) | Not implemented | Not parsed; see #57 / #91 / #189 above. |
 | WordArt / `a:gradFill`, `a:pattFill`, `a:blipFill` on shapes | Not implemented | No shape pipeline. |
 | VML path / 3D / shadow | Partial | `parseVmlElement` (`vml/vml.ts:31`) handles `rect`, `oval`, `line`, `shape`, `textbox`, `stroke`, `fill`, `imagedata`. `path`, `shadow`, `extrusion`, `fill type="gradient"` / `type="pattern"` fall through (see `parseFill`, `vml/vml.ts:129` — the body is commented out). |

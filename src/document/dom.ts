@@ -86,7 +86,13 @@ export enum DomType {
     // placeholder rather than a real SVG chart. See
     // src/charts/chartex-part.ts and the renderChartEx branch of
     // html-renderer.ts.
-    ChartEx = "chartEx"
+    ChartEx = "chartEx",
+    // SmartArt reference that could not be rendered as its Fallback
+    // drawing (either no mc:Fallback existed or its content was
+    // unrecognised). Rendered as a labelled placeholder with the
+    // layout URN carried in a data attribute. See
+    // parseSmartArtReference in document-parser.ts.
+    SmartArt = "smartArt"
 }
 
 // Structured Document Tag (content control). Parsed from w:sdt when

@@ -26,8 +26,8 @@ export interface PatternFill {
     bg?: ColourRef;
 }
 
-// Parsed <a:effectLst>. v1 handles outer/inner shadow and softEdge.
-// Glow / reflection remain TODO.
+// Parsed <a:effectLst>. Handles outer/inner shadow, softEdge, glow,
+// and reflection.
 export interface ShapeEffects {
     outerShadow?: {
         blurRad?: number; // EMU
@@ -43,6 +43,22 @@ export interface ShapeEffects {
     };
     softEdge?: {
         rad: number; // EMU
+    };
+    // <a:glow rad="…"><a:srgbClr|schemeClr/></a:glow>. Rendered as a
+    // coloured halo around the shape via an SVG filter chain.
+    glow?: {
+        rad: number;       // EMU blur radius
+        colour?: ColourRef;
+    };
+    // <a:reflection>. Rendered as a mirrored DOM twin of the shape
+    // positioned below, faded via a CSS mask-image gradient. v1 only
+    // honours vertical (90°) reflections; non-vertical `dir` values
+    // are rendered as vertical.
+    reflection?: {
+        stA?: number;   // start alpha, 1000ths (0..100000)
+        endA?: number;  // end alpha, 1000ths
+        dist?: number;  // distance EMU
+        dir?: number;   // degrees, converted from 60000ths
     };
 }
 
@@ -155,4 +171,31 @@ export interface DrawingChartEx extends OpenXmlElement {
     type: DomType.ChartEx;
     // r:id of the chartEx part. Same safety notes as DrawingChart.relId.
     relId: string;
+}
+
+// SmartArt placeholder — emitted by parseSmartArtReference when the
+// SmartArt <a:graphicData uri="…/diagram"> cannot be replaced by its
+// <mc:Fallback> sibling (either none existed or its content was
+// unrecognised). The renderer turns this into a bland labelled div
+// with `data-smartart-layout` carrying an allowlisted URN so a host
+// stylesheet can distinguish SmartArt kinds without granting the
+// attacker any CSS write primitive. Real SmartArt rendering remains
+// unimplemented. See parseSmartArtReference in document-parser.ts.
+export interface DrawingSmartArt extends OpenXmlElement {
+    type: DomType.SmartArt;
+    // Layout URN parsed out of the referenced /word/diagrams/layoutN.xml
+    // part (e.g. "urn:microsoft.com/office/officeart/2005/8/layout/list1").
+    // Empty string when the part could not be resolved or the URN did
+    // not match the allowlist. Validated against SMARTART_LAYOUT_ALLOWLIST
+    // in document-parser.ts before being emitted.
+    layoutId?: string;
+    // The five r:id values from <dgm:relIds>. Captured so a future
+    // layout engine can resolve the diagram parts; currently only
+    // layoutId is used for rendering.
+    relIds?: {
+        dm?: string;
+        lo?: string;
+        qs?: string;
+        cs?: string;
+    };
 }
