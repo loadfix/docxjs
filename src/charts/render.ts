@@ -2,8 +2,11 @@ import { sanitizeCssColor } from "../utils";
 import {
     ChartAxisColorRef,
     ChartAxisStyle,
-    ChartExDataModel,
+    ChartExFunnelModel,
+    ChartExHistogramModel,
+    ChartExTreeDataModel,
     ChartExTreeNode,
+    ChartExWaterfallModel,
     ChartModel,
     ChartSeries,
 } from "./model";
@@ -848,7 +851,7 @@ const SUNBURST_LABEL_THRESHOLD = 0.12;
 const TREEMAP_LABEL_MIN_W = 32;
 const TREEMAP_LABEL_MIN_H = 14;
 
-export function renderSunburst(model: ChartExDataModel): SVGElement {
+export function renderSunburst(model: ChartExTreeDataModel): SVGElement {
     const doc: Document = document;
     const svg = doc.createElementNS(SVG_NS, "svg") as SVGElement;
     svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
@@ -992,7 +995,7 @@ function sunburstArcPath(
         + ` Z`;
 }
 
-export function renderTreemap(model: ChartExDataModel): SVGElement {
+export function renderTreemap(model: ChartExTreeDataModel): SVGElement {
     const doc: Document = document;
     const svg = doc.createElementNS(SVG_NS, "svg") as SVGElement;
     svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
@@ -1124,4 +1127,420 @@ function renderTreemapLeaf(
         });
         svg.appendChild(label);
     }
+}
+
+// -----------------------------------------------------------------
+// ChartEx: waterfall / funnel / histogram
+// -----------------------------------------------------------------
+//
+// Flat chartEx kinds. All three share the same outer SVG shell
+// (title + plot rect) as sunburst / treemap; only the inner layout
+// differs. Factored into a single helper to keep the per-kind
+// renderers focused on geometry.
+//
+// Security: every label reaches the DOM via textContent; every
+// colour round-trips through sanitizeCssColor before hitting a
+// `fill` attribute. Numerics are already parseFloat-filtered on the
+// model so we only defend against the degenerate cases (empty data,
+// all-zero totals, NaN after arithmetic).
+
+// Waterfall palette. Positive contributions use the green; negative
+// contributions use the red; subtotals and totals use the blue. The
+// per-point <cx:dataPt> override wins over all three — matches the
+// same precedence rule as the classic pie/bar renderer.
+const WATERFALL_POSITIVE = "#548235";
+const WATERFALL_NEGATIVE = "#C00000";
+const WATERFALL_TOTAL = "#4472C4";
+
+// Funnel bars get a gradient-free solid fill — we rotate through the
+// default palette so adjacent trapezoids stay visually distinct.
+// Users with <cx:dataPt> overrides obviously win.
+
+// Histogram default bin count when neither binSize nor binCount is
+// declared. Matches PowerPoint's "Automatic" fallback closely enough
+// for a viewer (the canonical Scott / Sturges rules would need the
+// sample standard deviation, which is more work than this pass
+// warrants).
+const HISTOGRAM_DEFAULT_BIN_COUNT = 10;
+
+// Upper bound on computed bin count. Guards against pathological
+// binSize values (e.g. 0.0001 against a [0, 10000] range) producing
+// a DOM-exploding number of <rect>s.
+const HISTOGRAM_MAX_BINS = 200;
+
+function chartExShell(
+    title: string,
+    emptyLabel: string,
+): {
+    svg: SVGElement;
+    doc: Document;
+    plot: { x: number; y: number; w: number; h: number };
+    emptyIf(cond: boolean): SVGElement | null;
+} {
+    const doc: Document = document;
+    const svg = doc.createElementNS(SVG_NS, "svg") as SVGElement;
+    svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.style.maxWidth = "100%";
+    svg.style.height = "auto";
+    svg.style.display = "block";
+
+    const clean = (title ?? "").trim();
+    const titleBottom = clean ? PADDING + TITLE_HEIGHT : PADDING;
+    if (clean) {
+        svg.appendChild(mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, clean, {
+            fontSize: 14, fontWeight: "600", anchor: "middle",
+        }));
+    }
+
+    const plotTop = titleBottom + 4;
+    const plotBottom = VIEW_H - PADDING;
+    const plot = {
+        x: PADDING + AXIS_LABEL_WIDTH,
+        y: plotTop,
+        w: VIEW_W - 2 * PADDING - AXIS_LABEL_WIDTH,
+        h: plotBottom - plotTop - AXIS_LABEL_HEIGHT,
+    };
+
+    return {
+        svg, doc, plot,
+        emptyIf(cond: boolean) {
+            if (!cond) return null;
+            svg.appendChild(mkText(doc, VIEW_W / 2, VIEW_H / 2, clean || emptyLabel, {
+                fontSize: 12, anchor: "middle", fill: "#888",
+            }));
+            return svg;
+        },
+    };
+}
+
+export function renderWaterfall(model: ChartExWaterfallModel): SVGElement {
+    const shell = chartExShell(model.title, "[waterfall]");
+    const empty = shell.emptyIf(
+        model.points.length === 0 || shell.plot.w <= 0 || shell.plot.h <= 0,
+    );
+    if (empty) return empty;
+    const { svg, doc, plot } = shell;
+
+    // Walk once to compute the min/max of the rect spans. Running
+    // total tracks the cumulative sum up to (but not including) the
+    // current point; each point contributes [before, after] where:
+    //   - normal:   before = runningTotal; after = runningTotal + value
+    //   - subtotal: before = 0;            after = runningTotal + value
+    //                                      runningTotal jumps to after.
+    //   - total:    before = 0;            after = runningTotal + value
+    //                                      runningTotal does NOT change.
+    interface Span { before: number; after: number; }
+    const spans: Span[] = [];
+    let running = 0;
+    for (const p of model.points) {
+        let before: number;
+        let after: number;
+        if (p.type === "normal") {
+            before = running;
+            after = running + p.value;
+            running = after;
+        } else if (p.type === "subtotal") {
+            before = 0;
+            after = running + p.value;
+            running = after;
+        } else {
+            before = 0;
+            after = running + p.value;
+            // Total doesn't advance the running sum — it's a cap,
+            // visualised separately from the running contributions.
+        }
+        spans.push({ before, after });
+    }
+
+    let valMin = 0;
+    let valMax = 0;
+    for (const s of spans) {
+        if (s.before < valMin) valMin = s.before;
+        if (s.after < valMin) valMin = s.after;
+        if (s.before > valMax) valMax = s.before;
+        if (s.after > valMax) valMax = s.after;
+    }
+    if (valMax === valMin) valMax = valMin + 1;
+    const { min: yMin, max: yMax, ticks } = niceScale(valMin, valMax, 5);
+
+    // Axis chrome. Default greys — waterfall chartEx has no axis
+    // style metadata in the model, unlike classic barChart.
+    svg.appendChild(mkLine(doc, plot.x, plot.y, plot.x, plot.y + plot.h, DEFAULT_AXIS_LINE));
+    svg.appendChild(mkLine(doc, plot.x, plot.y + plot.h, plot.x + plot.w, plot.y + plot.h, DEFAULT_AXIS_LINE));
+
+    for (const t of ticks) {
+        const y = plot.y + plot.h - ((t - yMin) / (yMax - yMin)) * plot.h;
+        svg.appendChild(mkLine(doc, plot.x - 4, y, plot.x, y, DEFAULT_AXIS_LINE));
+        svg.appendChild(mkText(doc, plot.x - 6, y + 4, formatTick(t), {
+            fontSize: FONT_SIZE, anchor: "end", fill: DEFAULT_TICK_LABEL,
+        }));
+    }
+
+    const n = model.points.length;
+    const slotW = plot.w / n;
+    const barPad = Math.min(slotW * 0.15, 8);
+    const barW = Math.max(1, slotW - 2 * barPad);
+
+    for (let i = 0; i < n; i++) {
+        const p = model.points[i];
+        const span = spans[i];
+        const xMid = plot.x + slotW * (i + 0.5);
+
+        // Category label.
+        svg.appendChild(mkText(doc, xMid, plot.y + plot.h + 16, p.label, {
+            fontSize: FONT_SIZE, anchor: "middle", fill: DEFAULT_TICK_LABEL,
+        }));
+
+        const scaled = (v: number) => plot.y + plot.h
+            - ((v - yMin) / (yMax - yMin)) * plot.h;
+        const y0 = scaled(Math.max(span.before, span.after));
+        const y1 = scaled(Math.min(span.before, span.after));
+        const barH = Math.max(0, y1 - y0);
+
+        // Colour precedence: explicit per-point override from <cx:dataPt>
+        // wins over the type-based default.
+        const typeColor =
+            p.type === "normal"
+                ? (p.value >= 0 ? WATERFALL_POSITIVE : WATERFALL_NEGATIVE)
+                : WATERFALL_TOTAL;
+        const color = sanitizeCssColor(p.color) ?? typeColor;
+
+        const rect = doc.createElementNS(SVG_NS, "rect");
+        rect.setAttribute("x", fmt(xMid - barW / 2));
+        rect.setAttribute("y", fmt(y0));
+        rect.setAttribute("width", fmt(barW));
+        rect.setAttribute("height", fmt(barH));
+        rect.setAttribute("fill", color);
+        svg.appendChild(rect);
+    }
+
+    return svg;
+}
+
+export function renderFunnel(model: ChartExFunnelModel): SVGElement {
+    const shell = chartExShell(model.title, "[funnel]");
+    // Prepare working arrays so we can reserve label space before the
+    // "empty" check decides we have nothing to render.
+    const n = model.points.length;
+    let maxVal = 0;
+    for (const p of model.points) {
+        if (p.value > maxVal) maxVal = p.value;
+    }
+
+    const empty = shell.emptyIf(
+        n === 0 || maxVal <= 0 || shell.plot.w <= 0 || shell.plot.h <= 0,
+    );
+    if (empty) return empty;
+    const { svg, doc, plot } = shell;
+
+    // Reserve the right-hand third of the plot for labels so the
+    // widest trapezoid doesn't collide with its own "category: value"
+    // annotation.
+    const labelReserve = Math.min(160, plot.w * 0.33);
+    const funnelW = Math.max(1, plot.w - labelReserve);
+    const cx = plot.x + funnelW / 2;
+
+    // Evenly spaced vertical stack — one trapezoid per point.
+    const bandH = plot.h / n;
+    const vertPad = Math.min(bandH * 0.1, 6);
+    const inner = bandH - 2 * vertPad;
+
+    for (let i = 0; i < n; i++) {
+        const p = model.points[i];
+        const nextVal = i + 1 < n ? model.points[i + 1].value : p.value;
+
+        // Top / bottom widths proportional to this + next value.
+        // Negative / non-finite values are clamped to zero by the parser.
+        const topHalf = (p.value / maxVal) * funnelW / 2;
+        const botHalf = (Math.min(nextVal, p.value) / maxVal) * funnelW / 2;
+
+        const y0 = plot.y + bandH * i + vertPad;
+        const y1 = y0 + inner;
+
+        const x0t = cx - topHalf;
+        const x1t = cx + topHalf;
+        const x0b = cx - botHalf;
+        const x1b = cx + botHalf;
+
+        const color = sanitizeCssColor(p.color)
+            ?? DEFAULT_PALETTE[i % DEFAULT_PALETTE.length];
+
+        const poly = doc.createElementNS(SVG_NS, "polygon");
+        const points = [
+            `${fmt(x0t)},${fmt(y0)}`,
+            `${fmt(x1t)},${fmt(y0)}`,
+            `${fmt(x1b)},${fmt(y1)}`,
+            `${fmt(x0b)},${fmt(y1)}`,
+        ].join(" ");
+        poly.setAttribute("points", points);
+        poly.setAttribute("fill", color);
+        poly.setAttribute("stroke", "#fff");
+        poly.setAttribute("stroke-width", "1");
+        svg.appendChild(poly);
+
+        // Right-hand label: "Label: value". Label and value both come
+        // from the model (textContent-safe).
+        const labelX = plot.x + funnelW + 8;
+        const labelY = (y0 + y1) / 2 + 4;
+        const labelText = p.label
+            ? `${p.label}: ${formatTick(p.value)}`
+            : formatTick(p.value);
+        svg.appendChild(mkText(doc, labelX, labelY, labelText, {
+            fontSize: FONT_SIZE, anchor: "start", fill: "#333",
+        }));
+    }
+
+    return svg;
+}
+
+export function renderHistogram(model: ChartExHistogramModel): SVGElement {
+    const shell = chartExShell(model.title, "[histogram]");
+
+    const values = model.values;
+    const n = values.length;
+
+    let minV = Infinity;
+    let maxV = -Infinity;
+    for (const v of values) {
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+    }
+    const haveRange = n > 0 && Number.isFinite(minV) && Number.isFinite(maxV);
+
+    const empty = shell.emptyIf(
+        !haveRange || shell.plot.w <= 0 || shell.plot.h <= 0,
+    );
+    if (empty) return empty;
+    const { svg, doc, plot } = shell;
+
+    // Binning. Precedence mirrors PowerPoint's dialog:
+    //   1. binSize (explicit bucket width) — walk from underflow
+    //      (or min) to overflow (or max) in steps of binSize.
+    //   2. binCount — divide the range into `binCount` equal-width
+    //      buckets.
+    //   3. Default — HISTOGRAM_DEFAULT_BIN_COUNT equal-width buckets.
+    //
+    // Edge cases:
+    //   - underflow: any value < underflow lands in a single leading
+    //     bin labelled "<= underflow".
+    //   - overflow: any value > overflow lands in a single trailing
+    //     bin labelled "> overflow".
+    //   - min === max: a single bin spanning [min, min+1] keeps the
+    //     renderer from dividing by zero.
+    const { underflow, overflow } = model.binning;
+    const useUnderflow = underflow != null && underflow > minV;
+    const useOverflow = overflow != null && overflow < maxV;
+    const rangeLo = useUnderflow ? underflow! : minV;
+    let rangeHi = useOverflow ? overflow! : maxV;
+    if (rangeHi <= rangeLo) rangeHi = rangeLo + 1;
+
+    let binSize = model.binning.binSize;
+    let binCount = model.binning.binCount;
+    if (binSize == null) {
+        const count = binCount != null
+            ? binCount
+            : Math.max(1, Math.min(HISTOGRAM_MAX_BINS, HISTOGRAM_DEFAULT_BIN_COUNT));
+        binSize = (rangeHi - rangeLo) / count;
+    }
+    if (!(binSize > 0)) binSize = rangeHi - rangeLo;
+    // Derive binCount from binSize (in case both were given and binSize
+    // wins; or when binSize came from the default path).
+    binCount = Math.max(1, Math.min(
+        HISTOGRAM_MAX_BINS,
+        Math.ceil((rangeHi - rangeLo) / binSize),
+    ));
+    // Tighten rangeHi to the last bin's right edge for label consistency.
+    rangeHi = rangeLo + binSize * binCount;
+
+    interface Bin { lo: number; hi: number; count: number; label: string; }
+    const bins: Bin[] = [];
+    if (useUnderflow) {
+        bins.push({
+            lo: -Infinity, hi: rangeLo, count: 0,
+            label: `<= ${formatTick(rangeLo)}`,
+        });
+    }
+    for (let i = 0; i < binCount; i++) {
+        const lo = rangeLo + binSize * i;
+        const hi = lo + binSize;
+        bins.push({
+            lo, hi, count: 0,
+            label: `${formatTick(lo)}-${formatTick(hi)}`,
+        });
+    }
+    if (useOverflow) {
+        bins.push({
+            lo: rangeHi, hi: Infinity, count: 0,
+            label: `> ${formatTick(rangeHi)}`,
+        });
+    }
+
+    // Bin each value. Right edge is exclusive except for the final
+    // "normal" bin, which is inclusive so the maximum value still lands.
+    for (const v of values) {
+        if (useUnderflow && v < rangeLo) {
+            bins[0].count++;
+            continue;
+        }
+        if (useOverflow && v > rangeHi) {
+            bins[bins.length - 1].count++;
+            continue;
+        }
+        let idx = Math.floor((v - rangeLo) / binSize);
+        if (idx < 0) idx = 0;
+        if (idx >= binCount) idx = binCount - 1;
+        const offset = useUnderflow ? 1 : 0;
+        bins[idx + offset].count++;
+    }
+
+    // Value axis: bar counts.
+    let maxCount = 0;
+    for (const b of bins) {
+        if (b.count > maxCount) maxCount = b.count;
+    }
+    if (maxCount === 0) maxCount = 1;
+    const { min: yMin, max: yMax, ticks } = niceScale(0, maxCount, 5);
+
+    svg.appendChild(mkLine(doc, plot.x, plot.y, plot.x, plot.y + plot.h, DEFAULT_AXIS_LINE));
+    svg.appendChild(mkLine(doc, plot.x, plot.y + plot.h, plot.x + plot.w, plot.y + plot.h, DEFAULT_AXIS_LINE));
+
+    for (const t of ticks) {
+        const y = plot.y + plot.h - ((t - yMin) / (yMax - yMin)) * plot.h;
+        svg.appendChild(mkLine(doc, plot.x - 4, y, plot.x, y, DEFAULT_AXIS_LINE));
+        svg.appendChild(mkText(doc, plot.x - 6, y + 4, formatTick(t), {
+            fontSize: FONT_SIZE, anchor: "end", fill: DEFAULT_TICK_LABEL,
+        }));
+    }
+
+    const slotW = plot.w / bins.length;
+    const barPad = Math.min(slotW * 0.1, 4);
+    const barW = Math.max(1, slotW - 2 * barPad);
+
+    const baseColor = sanitizeCssColor(model.seriesColor) ?? DEFAULT_PALETTE[0];
+
+    for (let i = 0; i < bins.length; i++) {
+        const b = bins[i];
+        const xLeft = plot.x + slotW * i + barPad;
+        const y0 = plot.y + plot.h - ((b.count - yMin) / (yMax - yMin)) * plot.h;
+        const y1 = plot.y + plot.h;
+
+        const override = model.dataPointOverrides.get(i);
+        const color = (override ? sanitizeCssColor(override) : null) ?? baseColor;
+
+        const rect = doc.createElementNS(SVG_NS, "rect");
+        rect.setAttribute("x", fmt(xLeft));
+        rect.setAttribute("y", fmt(y0));
+        rect.setAttribute("width", fmt(barW));
+        rect.setAttribute("height", fmt(Math.max(0, y1 - y0)));
+        rect.setAttribute("fill", color);
+        svg.appendChild(rect);
+
+        svg.appendChild(mkText(doc, xLeft + barW / 2, plot.y + plot.h + 16, b.label, {
+            fontSize: FONT_SIZE, anchor: "middle", fill: DEFAULT_TICK_LABEL,
+        }));
+    }
+
+    return svg;
 }

@@ -160,15 +160,13 @@ export interface ChartExTreeNode {
     leafIndex: number;
 }
 
-// Parsed data model for the two chartEx kinds we render as real
-// SVG: sunburst and treemap. Both share the same tree shape; only
-// the layout differs at render time.
-export interface ChartExDataModel {
+// Parsed data model for hierarchical chartEx kinds (sunburst / treemap).
+// Both share the same tree shape; only the layout differs at render time.
+export interface ChartExTreeDataModel {
     shape: "data";
     key: string;
     title: string;
-    // Restricted to the kinds we actually render; chartex-part.ts
-    // falls back to a placeholder for anything else.
+    // Restricted to the kinds that use the tree shape.
     kind: "sunburst" | "treemap";
     // Root of the parsed category tree. Children are the level-0
     // nodes. The root itself is a synthetic container with label "".
@@ -177,6 +175,86 @@ export interface ChartExDataModel {
     // etc.). Used by the sunburst renderer to size rings.
     maxDepth: number;
 }
+
+// A single entry in a waterfall chart. `type` is one of:
+//   - "normal"    — a positive or negative contribution. The bar floats
+//                   from the running total before this value to the
+//                   running total after.
+//   - "subtotal"  — the bar is anchored to the 0-baseline. Downstream
+//                   contributions resume from this subtotal as their
+//                   new baseline.
+//   - "total"     — a final bar anchored to 0 and not contributing to
+//                   the running sum (matches Word's rendering).
+//
+// Security: `label` is an attacker-controlled DOCX string and reaches
+// the DOM via textContent only. `value` is parseFloat-filtered. `type`
+// is allowlisted to one of the three literals.
+export interface WaterfallPoint {
+    label: string;
+    value: number;
+    type: "normal" | "subtotal" | "total";
+    // Per-data-point override from <cx:dataPt idx>. Already sanitised.
+    color: string | null;
+}
+
+export interface ChartExWaterfallModel {
+    shape: "data";
+    key: string;
+    title: string;
+    kind: "waterfall";
+    points: WaterfallPoint[];
+}
+
+// A simple ordered list of {label, value} for funnel charts.
+// `label` via textContent; `value` finite-checked; `color` sanitised.
+export interface FunnelPoint {
+    label: string;
+    value: number;
+    color: string | null;
+}
+
+export interface ChartExFunnelModel {
+    shape: "data";
+    key: string;
+    title: string;
+    kind: "funnel";
+    points: FunnelPoint[];
+}
+
+// Histogram binning parameters from <cx:binning>. At least one of
+// `binSize` or `binCount` is set; the renderer prefers `binSize` when
+// both are present (matches PowerPoint's fallback order).
+export interface HistogramBinning {
+    binSize: number | null;
+    binCount: number | null;
+    underflow: number | null;
+    overflow: number | null;
+}
+
+export interface ChartExHistogramModel {
+    shape: "data";
+    key: string;
+    title: string;
+    kind: "histogram";
+    // Raw (unbinned) values from <cx:numDim type="val">. The renderer
+    // bins them at layout time using `binning`.
+    values: number[];
+    binning: HistogramBinning;
+    // Series-level colour (pre-sanitised) and a map of per-bin
+    // overrides (by bin index). Populated when <cx:dataPt> entries
+    // were present.
+    seriesColor: string | null;
+    dataPointOverrides: Map<number, string>;
+}
+
+// Parsed data model union — one variant per kind of chartEx we
+// render as real SVG. Kept as a discriminated union on `kind` so the
+// renderer dispatch is type-safe.
+export type ChartExDataModel =
+    | ChartExTreeDataModel
+    | ChartExWaterfallModel
+    | ChartExFunnelModel
+    | ChartExHistogramModel;
 
 // Union consumed by renderChartEx in html-renderer.ts.
 export type ChartExModel = ChartExPlaceholder | ChartExDataModel;

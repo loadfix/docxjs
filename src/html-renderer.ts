@@ -35,7 +35,7 @@ import { renderShape, renderShapeGroup, ShapeRenderContext } from './drawing/sha
 import { ChartPart } from './charts/chart-part';
 import { ChartExPart } from './charts/chartex-part';
 import { DiagramLayoutPart } from './smartart/smartart-parts';
-import { renderChart as renderChartSvg, renderSunburst as renderSunburstSvg, renderTreemap as renderTreemapSvg, scheduleLegendOverflowAdjust } from './charts/render';
+import { renderChart as renderChartSvg, renderSunburst as renderSunburstSvg, renderTreemap as renderTreemapSvg, renderWaterfall as renderWaterfallSvg, renderFunnel as renderFunnelSvg, renderHistogram as renderHistogramSvg, scheduleLegendOverflowAdjust } from './charts/render';
 import { parseThemeColorReference, resolveColour } from './drawing/theme';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
@@ -2777,7 +2777,7 @@ section.${c}>ol>li::before {
 		// chartex-part.ts.
 		if (chart.shape === "data") {
 			try {
-				let svg: SVGElement;
+				let svg: SVGElement | null = null;
 				switch (chart.kind) {
 					case "sunburst":
 						svg = renderSunburstSvg(chart);
@@ -2785,13 +2785,24 @@ section.${c}>ol>li::before {
 					case "treemap":
 						svg = renderTreemapSvg(chart);
 						break;
+					case "waterfall":
+						svg = renderWaterfallSvg(chart);
+						break;
+					case "funnel":
+						svg = renderFunnelSvg(chart);
+						break;
+					case "histogram":
+						svg = renderHistogramSvg(chart);
+						break;
 				}
-				const wrapper = this.createElement("span");
-				wrapper.className = `${this.className}-chart`;
-				wrapper.style.display = "inline-block";
-				wrapper.setAttribute("data-chart-kind", chart.kind);
-				wrapper.appendChild(svg);
-				return wrapper;
+				if (svg) {
+					const wrapper = this.createElement("span");
+					wrapper.className = `${this.className}-chart`;
+					wrapper.style.display = "inline-block";
+					wrapper.setAttribute("data-chart-kind", chart.kind);
+					wrapper.appendChild(svg);
+					return wrapper;
+				}
 			} catch {
 				// Fall through to the placeholder below on any render
 				// error — never let a malformed chartEx abort the page.

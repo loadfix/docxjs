@@ -5,10 +5,17 @@ import { sanitizeCssColor } from "../utils";
 import { resolveSchemeColor } from "../drawing/theme";
 import {
     ChartExDataModel,
+    ChartExFunnelModel,
+    ChartExHistogramModel,
     ChartExKind,
     ChartExModel,
     ChartExPlaceholder,
+    ChartExTreeDataModel,
     ChartExTreeNode,
+    ChartExWaterfallModel,
+    FunnelPoint,
+    HistogramBinning,
+    WaterfallPoint,
 } from "./model";
 
 // Parses a `/word/charts/chartEx*.xml` (modern 2013+) part into either
@@ -91,14 +98,23 @@ function parseChartExSpace(root: Element, path: string): ChartExModel {
     const title = chart ? extractTitle(chart) : "";
 
     // Try to parse a full data model for the kinds we actually render.
-    // Anything else (waterfall / funnel / histogram / pareto /
-    // box_whisker / unknown) falls back to the placeholder shape —
-    // see renderChartEx in html-renderer.ts for the matching dispatch.
+    // Anything else (pareto / box_whisker / unknown) falls back to the
+    // placeholder shape — see renderChartEx in html-renderer.ts for
+    // the matching dispatch.
     if ((kind === "sunburst" || kind === "treemap") && firstSeries) {
-        const dataModel = tryParseDataModel(root, firstSeries, key, title, kind);
+        const dataModel = tryParseTreeModel(root, firstSeries, key, title, kind);
         if (dataModel) return dataModel;
         // Parsing failed (missing data / empty tree); fall through to
         // the placeholder so the reader still sees something labelled.
+    } else if (kind === "waterfall" && firstSeries) {
+        const dataModel = tryParseWaterfallModel(root, firstSeries, key, title);
+        if (dataModel) return dataModel;
+    } else if (kind === "funnel" && firstSeries) {
+        const dataModel = tryParseFunnelModel(root, firstSeries, key, title);
+        if (dataModel) return dataModel;
+    } else if (kind === "histogram" && firstSeries) {
+        const dataModel = tryParseHistogramModel(root, firstSeries, key, title);
+        if (dataModel) return dataModel;
     }
 
     const placeholder: ChartExPlaceholder = { shape: "placeholder", key, title, kind };
@@ -108,29 +124,14 @@ function parseChartExSpace(root: Element, path: string): ChartExModel {
 // Full data-model parser for sunburst / treemap. Returns null when
 // the chart has no usable hierarchy — caller falls back to the
 // placeholder shape.
-function tryParseDataModel(
+function tryParseTreeModel(
     root: Element,
     seriesEl: Element,
     key: string,
     title: string,
     kind: "sunburst" | "treemap",
-): ChartExDataModel | null {
-    // <cx:dataId val="0"> on the series points at a <cx:data id="0">
-    // inside <cx:chartData>. When missing, default to the first
-    // <cx:data> block (common in minimal generators).
-    const dataIdEl = xml.element(seriesEl, "dataId");
-    const dataId = dataIdEl ? xml.attr(dataIdEl, "val") : null;
-
-    const chartData = xml.element(root, "chartData");
-    if (!chartData) return null;
-
-    let dataEl: Element | null = null;
-    for (const d of xml.elements(chartData, "data")) {
-        if (dataId == null || xml.attr(d, "id") === dataId) {
-            dataEl = d;
-            break;
-        }
-    }
+): ChartExTreeDataModel | null {
+    const dataEl = findDataBlock(root, seriesEl);
     if (!dataEl) return null;
 
     // Extract the multi-level categories and the single value dimension.
@@ -155,6 +156,220 @@ function tryParseDataModel(
     const maxDepth = computeMaxDepth(root0);
 
     return { shape: "data", key, title, kind, root: root0, maxDepth };
+}
+
+// Resolves the series' `<cx:dataId val="N"/>` against the
+// `<cx:chartData>` block's `<cx:data id="N">` children. When the
+// dataId attribute is missing we pick the first `<cx:data>` — matches
+// minimal chartEx generators that omit the id.
+function findDataBlock(root: Element, seriesEl: Element): Element | null {
+    const dataIdEl = xml.element(seriesEl, "dataId");
+    const dataId = dataIdEl ? xml.attr(dataIdEl, "val") : null;
+
+    const chartData = xml.element(root, "chartData");
+    if (!chartData) return null;
+
+    for (const d of xml.elements(chartData, "data")) {
+        if (dataId == null || xml.attr(d, "id") === dataId) {
+            return d;
+        }
+    }
+    return null;
+}
+
+// Parses the pair of {category labels, numeric values} used by the
+// "flat" chartEx kinds (waterfall / funnel / histogram). Unlike the
+// sunburst / treemap path, which walks a multi-level hierarchy, flat
+// chartEx has a single `<cx:lvl>` in each dim. Returns null when
+// either dim is missing; category labels default to empty strings
+// when `<cx:strDim>` is absent (histogram's continuous data has no
+// category labels until we bin it).
+function parseFlatDimensions(dataEl: Element): {
+    labels: string[]; values: number[];
+} | null {
+    const catDim = findDimension(dataEl, "strDim", "cat");
+    const valDim = findDimension(dataEl, "numDim", "val");
+    if (!valDim) return null;
+
+    const values = parseNumericLevel(valDim);
+    if (values.length === 0) return null;
+
+    let labels: string[];
+    if (catDim) {
+        const levels = parseStringLevels(catDim);
+        labels = levels.length > 0 ? levels[0].points : [];
+    } else {
+        labels = [];
+    }
+    // Pad or truncate so labels is aligned with values (keeps the
+    // renderer simpler at the cost of possibly emitting empty labels).
+    while (labels.length < values.length) labels.push("");
+    if (labels.length > values.length) labels.length = values.length;
+
+    return { labels, values };
+}
+
+// Waterfall parser. Extracts the flat {label, value} list from the
+// series' data block, then marks which points are subtotals using
+// the indices declared under `<cx:layoutPr><cx:subtotals>`. Point
+// types are allowlisted to "normal" | "subtotal" | "total".
+function tryParseWaterfallModel(
+    root: Element,
+    seriesEl: Element,
+    key: string,
+    title: string,
+): ChartExWaterfallModel | null {
+    const dataEl = findDataBlock(root, seriesEl);
+    if (!dataEl) return null;
+
+    const flat = parseFlatDimensions(dataEl);
+    if (!flat) return null;
+
+    // Subtotal indices from `<cx:layoutPr><cx:subtotals><cx:subtotal idx="N"/>`.
+    // Each idx is filtered through Number.isFinite and bounded by
+    // MAX_POINTS. Unknown idx values are ignored silently.
+    const subtotalSet = new Set<number>();
+    const layoutPr = xml.element(seriesEl, "layoutPr");
+    if (layoutPr) {
+        const subtotals = xml.element(layoutPr, "subtotals");
+        if (subtotals) {
+            for (const st of xml.elements(subtotals, "subtotal")) {
+                const rawIdx = xml.attr(st, "idx");
+                const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+                if (Number.isFinite(idx) && idx >= 0 && idx < MAX_POINTS) {
+                    subtotalSet.add(idx);
+                }
+            }
+        }
+    }
+
+    const overrides = parseDataPointOverrides(seriesEl);
+
+    const points: WaterfallPoint[] = flat.values.map((v, i) => {
+        const value = Number.isFinite(v) ? v : 0;
+        // The final bar is rendered as a "total" when its index is
+        // declared as subtotal AND it's the last point — matches
+        // PowerPoint's convention of putting the grand total at the
+        // end of the series. Any other subtotal-tagged index becomes
+        // a "subtotal" (anchored to 0, contributes to running sum).
+        let type: "normal" | "subtotal" | "total" = "normal";
+        if (subtotalSet.has(i)) {
+            type = i === flat.values.length - 1 ? "total" : "subtotal";
+        }
+        return {
+            label: flat.labels[i] ?? "",
+            value,
+            type,
+            color: overrides.get(i) ?? null,
+        };
+    });
+
+    if (points.length === 0) return null;
+
+    return { shape: "data", key, title, kind: "waterfall", points };
+}
+
+// Funnel parser. A funnel is a flat {label, value} list — there's
+// no subtotals, binning, or hierarchy. `<cx:dataPt>` overrides apply
+// per point as usual.
+function tryParseFunnelModel(
+    root: Element,
+    seriesEl: Element,
+    key: string,
+    title: string,
+): ChartExFunnelModel | null {
+    const dataEl = findDataBlock(root, seriesEl);
+    if (!dataEl) return null;
+
+    const flat = parseFlatDimensions(dataEl);
+    if (!flat) return null;
+
+    const overrides = parseDataPointOverrides(seriesEl);
+
+    const points: FunnelPoint[] = flat.values.map((v, i) => ({
+        label: flat.labels[i] ?? "",
+        // Treat non-finite / negative values as 0 — funnel widths
+        // would otherwise invert.
+        value: Number.isFinite(v) && v >= 0 ? v : 0,
+        color: overrides.get(i) ?? null,
+    }));
+
+    if (points.length === 0) return null;
+
+    return { shape: "data", key, title, kind: "funnel", points };
+}
+
+// Histogram parser. The `<cx:numDim type="val">` carries the raw
+// (unbinned) values. Binning parameters live under
+// `<cx:layoutPr><cx:binning binSize="…" binCount="…" underflow="…"
+// overflow="…"/>` — all are optional; the renderer picks a default
+// bin count when both binSize and binCount are absent.
+function tryParseHistogramModel(
+    root: Element,
+    seriesEl: Element,
+    key: string,
+    title: string,
+): ChartExHistogramModel | null {
+    const dataEl = findDataBlock(root, seriesEl);
+    if (!dataEl) return null;
+
+    const valDim = findDimension(dataEl, "numDim", "val");
+    if (!valDim) return null;
+
+    const rawValues = parseNumericLevel(valDim);
+    const values = rawValues.filter((v) => Number.isFinite(v));
+    if (values.length === 0) return null;
+
+    const binning = parseBinning(seriesEl);
+
+    // Series-level colour: parse `<cx:spPr><a:solidFill>` on the series
+    // element itself, if present.
+    const seriesSpPr = xml.element(seriesEl, "spPr");
+    const seriesColor = seriesSpPr ? parseSolidFillColor(seriesSpPr) : null;
+
+    const dataPointOverrides = parseDataPointOverrides(seriesEl);
+
+    return {
+        shape: "data",
+        key,
+        title,
+        kind: "histogram",
+        values,
+        binning,
+        seriesColor,
+        dataPointOverrides,
+    };
+}
+
+function parseBinning(seriesEl: Element): HistogramBinning {
+    const layoutPr = xml.element(seriesEl, "layoutPr");
+    const out: HistogramBinning = {
+        binSize: null, binCount: null, underflow: null, overflow: null,
+    };
+    if (!layoutPr) return out;
+    const binning = xml.element(layoutPr, "binning");
+    if (!binning) return out;
+
+    const parseFiniteAttr = (name: string): number | null => {
+        const raw = xml.attr(binning, name);
+        if (raw == null) return null;
+        const n = parseFloat(raw);
+        return Number.isFinite(n) ? n : null;
+    };
+
+    out.binSize = parseFiniteAttr("binSize");
+    const binCountRaw = parseFiniteAttr("binCount");
+    // binCount must be a positive integer within a sane bound.
+    out.binCount = binCountRaw != null && binCountRaw >= 1 && binCountRaw <= MAX_POINTS
+        ? Math.floor(binCountRaw)
+        : null;
+    // binSize must be strictly positive — a zero or negative size would
+    // loop forever when binning.
+    if (out.binSize != null && !(out.binSize > 0)) out.binSize = null;
+
+    out.underflow = parseFiniteAttr("underflow");
+    out.overflow = parseFiniteAttr("overflow");
+    return out;
 }
 
 // Finds a <cx:strDim>/<cx:numDim> child of <cx:data> whose `type`
