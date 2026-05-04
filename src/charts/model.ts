@@ -47,6 +47,35 @@ export interface ChartSeries {
     dataPointOverrides: Map<number, ChartDataPointOverride>;
 }
 
+// Axis chrome colour reference. Carries either a sanitised literal
+// (`"#4472C4"`), a scheme-slot placeholder to resolve against the
+// document's theme palette at render time (`"schemeClr:accent1"`), or
+// null when the DOCX had no usable colour and the renderer should
+// fall back to its hard-coded defaults.
+//
+// Keeping axes as a string-placeholder union (rather than a full
+// ColourRef) lets chart parsing stay palette-independent: the theme
+// part may load before or after a chart part, and axes don't need
+// modifier support for v1.
+export type ChartAxisColorRef =
+    | { kind: "literal"; color: string }
+    | { kind: "scheme"; slot: string }
+    | null;
+
+// Axis chrome colour triplet. Each field is the reference collected
+// at parse time; the renderer resolves each one against the active
+// theme palette (passed via RenderChartOptions.themePalette).
+//
+// Parsed from <c:catAx> / <c:valAx>:
+//   - `line`      ← <c:spPr><a:ln><a:solidFill> (the axis line stroke)
+//   - `tickLabel` ← <c:txPr>/<a:p>/<a:pPr>/<a:defRPr><a:solidFill>
+//   - `gridline`  ← <c:majorGridlines><c:spPr><a:ln><a:solidFill>
+export interface ChartAxisStyle {
+    line: ChartAxisColorRef;
+    tickLabel: ChartAxisColorRef;
+    gridline: ChartAxisColorRef;
+}
+
 export interface ChartModel {
     // Unique key (the chart part's path without extension). Currently
     // unused by the renderer but handy for debugging.
@@ -63,6 +92,11 @@ export interface ChartModel {
     grouping: string;
     // Ordered list of series. Pie charts use the first series only.
     series: ChartSeries[];
+    // Axis chrome colours parsed from <c:catAx> and <c:valAx>. When a
+    // chart has neither axis (pie / doughnut), both entries are the
+    // all-null default and the renderer falls back to built-in greys.
+    catAxis: ChartAxisStyle;
+    valAxis: ChartAxisStyle;
 }
 
 // The allowlisted set of chartEx root-element local names. Anything
