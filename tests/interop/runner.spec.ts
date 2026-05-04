@@ -126,12 +126,67 @@ test.describe('interop visual diff', () => {
 
         test(label, async ({ page }) => {
             await page.goto('/');
+            // Ensure the demo is ready — #files must exist and renderDocx
+            // must be exposed on window. If the demo is still evaluating
+            // its <script>, setInputFiles could fire before the listener
+            // is attached and the file silently goes nowhere.
+            await page.waitForFunction(
+                () => !!document.querySelector('#files') && typeof (window as any).renderDocx === 'function',
+                { timeout: 10_000 },
+            );
+
             // The demo's `#files` <input> triggers renderDocx on change.
-            await page.locator('#files').setInputFiles(m.fixturePath);
+            // We call renderDocx directly via page.evaluate rather than
+            // relying on the input's change event so we can AWAIT the
+            // render — the event-based path returns control before the
+            // async render finishes, which caused stale-render leakage
+            // during initial harness development.
+            const fixtureBytes = readFileSync(m.fixturePath);
+            const renderResult = await page.evaluate(async ({ name, bytes }) => {
+                // Wipe the document container up-front so any residual
+                // wrapper from a previous render can't be screenshotted.
+                const container = document.querySelector('#document-container');
+                if (container) container.innerHTML = '';
+                const thumbs = document.querySelector('#thumbnails-container');
+                if (thumbs) thumbs.innerHTML = '';
+
+                const file = new File([new Uint8Array(bytes)], name, {
+                    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                });
+                const fn = (window as any).renderDocx;
+                if (typeof fn !== 'function') return { ok: false, error: 'renderDocx missing' };
+                try {
+                    await fn(file);
+                    const wrappers = document.querySelectorAll('.docx-wrapper');
+                    const text = wrappers[0]?.textContent?.slice(0, 120) ?? '';
+                    return { ok: true, wrapperCount: wrappers.length, firstText: text };
+                } catch (e) {
+                    return { ok: false, error: (e as Error).message };
+                }
+            }, { name: `${m.featureName}.docx`, bytes: Array.from(fixtureBytes) });
+            // Surface render status in the test log so baseline drift is
+            // easy to triage.
+            if (!renderResult.ok) {
+                throw new Error(`renderDocx failed for ${m.featureName}: ${renderResult.error}`);
+            }
+            console.log(`[${m.featureName}] wrappers=${renderResult.wrapperCount} text="${renderResult.firstText}"`);
+
             // `.docx-wrapper` is emitted by renderAsync once the document
-            // finishes parsing — waiting for it guarantees screenshots
-            // capture the rendered output, not the empty chrome.
-            await page.waitForSelector('.docx-wrapper', { timeout: 15_000 });
+            // finishes parsing. We scope to the main `#document-container`
+            // because the demo *also* calls renderThumbnails, which creates
+            // a second .docx-wrapper-class subtree inside
+            // #thumbnails-container.
+            const wrapper = page.locator('#document-container .docx-wrapper');
+            await wrapper.waitFor({ timeout: 15_000 });
+            // Cross-check the wrapper's text against what renderDocx told
+            // us above — if they diverge we've got a stale wrapper and the
+            // screenshot would capture the wrong fixture.
+            const wrapperText = await wrapper.evaluate((el) => el.textContent?.slice(0, 120) ?? '');
+            if (wrapperText !== renderResult.firstText) {
+                throw new Error(
+                    `[${m.featureName}] wrapper text mismatch — expected "${renderResult.firstText}", saw "${wrapperText}"`,
+                );
+            }
             // A short settling window so late-loading resources (fonts,
             // images) paint before capture. Most fixtures are text-only.
             await page.waitForTimeout(250);
@@ -139,9 +194,7 @@ test.describe('interop visual diff', () => {
             // Baseline file name is stable and OS-agnostic inside the repo;
             // Playwright stores platform-specific variants under
             // `{projectName}/{spec}-snapshots/`.
-            await expect(page.locator('.docx-wrapper')).toHaveScreenshot(
-                `${m.featureName}.png`,
-            );
+            await expect(wrapper).toHaveScreenshot(`${m.featureName}.png`);
         });
     }
 });
