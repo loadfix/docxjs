@@ -33,7 +33,8 @@
     "serve": "node scripts/dev-server.mjs",
     "dev": "npm run build && npm run serve",
     "test": "npm run build && playwright test",
-    "test:track-changes": "npm run build && node scripts/test-track-changes.mjs"
+    "test:track-changes": "npm run build && node scripts/test-track-changes.mjs",
+    "test:interop": "npm run build && playwright test --config=playwright.interop.config.ts"
   },
   "files": [
     "dist"
