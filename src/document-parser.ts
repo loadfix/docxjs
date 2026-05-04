@@ -953,10 +953,21 @@ export class DocumentParser {
 					result.children.push({ type: DomType.NoBreakHyphen });
 					break;
 
+				case "softHyphen":
+					// U+00AD — browser-discretionary break point; invisible unless wrapped.
+					result.children.push(<WmlText>{
+						type: DomType.Text,
+						text: "­"
+					});
+					break;
+
 				case "br":
+				case "cr":
+					// w:cr is Word's explicit carriage return; render identically to a
+					// text-wrapping br.
 					result.children.push(<WmlBreak>{
 						type: DomType.Break,
-						break: xml.attr(c, "type") || "textWrapping"
+						break: c.localName === "cr" ? "textWrapping" : (xml.attr(c, "type") || "textWrapping")
 					});
 					break;
 
@@ -1749,6 +1760,12 @@ export class DocumentParser {
 					style["text-decoration"] = xml.boolAttr(c, "val", true) ? "line-through" : "none"
 					break;
 
+				case "dstrike":
+					// Word's double strikethrough. Combine line-through with the "double"
+					// style (identical longhand sinks as the decoration line).
+					style["text-decoration"] = xml.boolAttr(c, "val", true) ? "line-through double" : "none";
+					break;
+
 				case "b":
 					style["font-weight"] = xml.boolAttr(c, "val", true) ? "bold" : "normal";
 					break;
@@ -1800,13 +1817,56 @@ export class DocumentParser {
 					break;
 
 				case "vanish":
+				case "specVanish":
+					// specVanish marks field-code-generated hidden text; for a read-only
+					// viewer it collapses to the same display:none as w:vanish.
 					if (xml.boolAttr(c, "val", true))
 						style["display"] = "none";
 					break;
 
 				case "kern":
-					//TODO
-					//style['letter-spacing'] = xml.lengthAttr(elem, 'val', LengthUsage.FontSize);
+					// w:kern@val is the half-point threshold above which kerning kicks in.
+					// We can't know the rendered font size at parse time (it may come
+					// from a style inherited later), so v1 just enables kerning whenever
+					// the property is present. CSS default is "auto" so absence of
+					// property leaves the browser to decide.
+					if (xml.boolAttr(c, "val", true))
+						style["font-kerning"] = "normal";
+					break;
+
+				case "w":
+					// Character scale — integer percentage (e.g. val="150" == 150%).
+					// font-stretch accepts a percentage in CSS Fonts Level 4.
+					{
+						const pct = xml.intAttr(c, "val");
+						if (pct != null)
+							style["font-stretch"] = `${pct}%`;
+					}
+					break;
+
+				case "emboss":
+					// Light highlight top-left, dark shadow bottom-right.
+					if (xml.boolAttr(c, "val", true))
+						style["text-shadow"] = "1px 1px 1px #fff, -1px -1px 1px #000";
+					break;
+
+				case "imprint":
+					// Inverse of emboss: dark top-left, light bottom-right.
+					if (xml.boolAttr(c, "val", true))
+						style["text-shadow"] = "1px 1px 1px #000, -1px -1px 1px #fff";
+					break;
+
+				case "outline":
+					// WebKit stroke; non-WebKit browsers fall back to normal text.
+					if (xml.boolAttr(c, "val", true)) {
+						style["-webkit-text-stroke"] = "1px currentColor";
+						style["color"] = "transparent";
+					}
+					break;
+
+				case "shadow":
+					if (xml.boolAttr(c, "val", true))
+						style["text-shadow"] = "2px 2px 2px rgba(0,0,0,0.5)";
 					break;
 
 				case "noWrap":
@@ -1828,8 +1888,14 @@ export class DocumentParser {
 					break;
 
 				case "spacing":
-					if (elem.localName == "pPr")
+					if (elem.localName == "pPr") {
 						this.parseSpacing(c, style);
+					} else if (elem.localName == "rPr") {
+						// Run-level character spacing (tracking). val is in twentieths
+						// of a point. Dxa's mul (0.05) converts twips → pt, identical
+						// conversion.
+						style["letter-spacing"] = xml.lengthAttr(c, "val", LengthUsage.Dxa);
+					}
 					break;
 
 				case "wordWrap":
