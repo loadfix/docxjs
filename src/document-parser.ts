@@ -2137,18 +2137,27 @@ export class DocumentParser {
 					// <a:reflection stA=".." endA=".." stPos=".." endPos=".."
 					//   dist=".." dir=".." fadeDir=".." rotWithShape=".."/>
 					// All attributes optional; the renderer picks
-					// sensible defaults. stPos / endPos / fadeDir /
-					// rotWithShape are parsed-but-not-used in v1 — we
-					// only honour vertical reflections.
+					// sensible defaults. `dir` / `fadeDir` are in
+					// 60000ths of a degree; `stPos` / `endPos` are in
+					// 1/1000ths of a percent. `rotWithShape` defaults
+					// to true (reflection rotates with the shape).
 					const stA = xml.intAttr(n, "stA");
 					const endA = xml.intAttr(n, "endA");
 					const dist = xml.intAttr(n, "dist");
 					const dirRaw = xml.intAttr(n, "dir");
+					const fadeDirRaw = xml.intAttr(n, "fadeDir");
+					const stPos = xml.intAttr(n, "stPos");
+					const endPos = xml.intAttr(n, "endPos");
+					const rotWithShape = xml.boolAttr(n, "rotWithShape");
 					const entry: NonNullable<ShapeEffects["reflection"]> = {};
 					if (stA != null && Number.isFinite(stA)) entry.stA = stA;
 					if (endA != null && Number.isFinite(endA)) entry.endA = endA;
 					if (dist != null && Number.isFinite(dist)) entry.dist = dist;
 					if (dirRaw != null && Number.isFinite(dirRaw)) entry.dir = (dirRaw / 60000) % 360;
+					if (fadeDirRaw != null && Number.isFinite(fadeDirRaw)) entry.fadeDir = (fadeDirRaw / 60000) % 360;
+					if (stPos != null && Number.isFinite(stPos)) entry.stPos = stPos;
+					if (endPos != null && Number.isFinite(endPos)) entry.endPos = endPos;
+					if (rotWithShape != null) entry.rotWithShape = rotWithShape;
 					result.reflection = entry;
 					any = true;
 					break;

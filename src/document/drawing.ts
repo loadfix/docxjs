@@ -51,14 +51,22 @@ export interface ShapeEffects {
         colour?: ColourRef;
     };
     // <a:reflection>. Rendered as a mirrored DOM twin of the shape
-    // positioned below, faded via a CSS mask-image gradient. v1 only
-    // honours vertical (90°) reflections; non-vertical `dir` values
-    // are rendered as vertical.
+    // positioned below, faded via a CSS mask-image gradient. `dir`
+    // controls the offset angle of the reflection (defaults to 90° =
+    // straight down); `fadeDir` controls the angle of the fade mask
+    // independently of `dir`. `stPos` / `endPos` set gradient stops
+    // (1/1000ths; 0 = at shape edge, 100000 = fully faded).
+    // `rotWithShape=false` counter-rotates the reflection so it stays
+    // level when the shape itself is rotated.
     reflection?: {
-        stA?: number;   // start alpha, 1000ths (0..100000)
-        endA?: number;  // end alpha, 1000ths
-        dist?: number;  // distance EMU
-        dir?: number;   // degrees, converted from 60000ths
+        stA?: number;          // start alpha, 1000ths (0..100000)
+        endA?: number;         // end alpha, 1000ths
+        dist?: number;         // distance EMU
+        dir?: number;          // degrees, converted from 60000ths
+        fadeDir?: number;      // degrees, converted from 60000ths
+        stPos?: number;        // 1/1000ths (0..100000)
+        endPos?: number;       // 1/1000ths (0..100000)
+        rotWithShape?: boolean; // default true
     };
 }
 
