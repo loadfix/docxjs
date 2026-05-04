@@ -1560,11 +1560,49 @@ export class DocumentParser {
 		var rightFromText = xml.lengthAttr(node, "rightFromText");
 		var leftFromText = xml.lengthAttr(node, "leftFromText");
 
-		table.cssStyle["float"] = 'left';
+		// OOXML w:tblpPr positioning attributes. We honour:
+		//   - page anchors: switch to position:absolute with left/top from
+		//     tblpX / tblpY (twips → pt).
+		//   - text / margin anchors: keep float:left and fold the four
+		//     *FromText padding values into the margins (legacy behaviour).
+		//   - tblpXSpec = "center" or "right": reset margin-left/right to
+		//     auto so the table centers / right-aligns regardless of
+		//     float. Spec values beat any numeric tblpX.
+		const horzAnchor = xml.attr(node, "horzAnchor");
+		const vertAnchor = xml.attr(node, "vertAnchor");
+		const tblpXSpec = xml.attr(node, "tblpXSpec");
+		const tblpYSpec = xml.attr(node, "tblpYSpec");
+		const tblpX = xml.lengthAttr(node, "tblpX");
+		const tblpY = xml.lengthAttr(node, "tblpY");
+
+		const pageAnchored = horzAnchor === "page" || vertAnchor === "page";
+
+		if (pageAnchored) {
+			table.cssStyle["position"] = "absolute";
+			if (tblpX) table.cssStyle["left"] = tblpX;
+			if (tblpY) table.cssStyle["top"] = tblpY;
+		} else {
+			table.cssStyle["float"] = "left";
+		}
+
 		table.cssStyle["margin-bottom"] = values.addSize(table.cssStyle["margin-bottom"], bottomFromText);
 		table.cssStyle["margin-left"] = values.addSize(table.cssStyle["margin-left"], leftFromText);
 		table.cssStyle["margin-right"] = values.addSize(table.cssStyle["margin-right"], rightFromText);
 		table.cssStyle["margin-top"] = values.addSize(table.cssStyle["margin-top"], topFromText);
+
+		if (tblpXSpec === "center") {
+			table.cssStyle["margin-left"] = "auto";
+			table.cssStyle["margin-right"] = "auto";
+		} else if (tblpXSpec === "right") {
+			table.cssStyle["margin-left"] = "auto";
+		}
+
+		// tblpYSpec has no good desktop-web analogue (bottom / inside /
+		// outside are page-relative OOXML positions). Only record it for
+		// downstream tooling; not projected onto CSS.
+		if (tblpYSpec) {
+			table.cssStyle["$tblp-y-spec"] = tblpYSpec;
+		}
 	}
 
 	parseTableRow(node: Element): WmlTableRow {
@@ -1608,6 +1646,13 @@ export class DocumentParser {
 
 				case "tblHeader":
 					row.isHeader = xml.boolAttr(c, "val");
+					break;
+
+				case "cantSplit":
+					// Default "val" for a presence-only boolean element in
+					// OOXML is true. Parse explicitly so <w:cantSplit
+					// w:val="false"/> also round-trips correctly.
+					row.cantSplit = xml.boolAttr(c, "val", true);
 					break;
 
 				case "gridBefore":
@@ -1738,7 +1783,7 @@ export class DocumentParser {
 					break;
 
 				case "shd":
-					style["background-color"] = xmlUtil.colorAttr(c, "fill", null, autos.shd);
+					values.applyShd(c, style);
 					break;
 
 				case "highlight":
@@ -1880,8 +1925,10 @@ export class DocumentParser {
 					break;
 
 				case "noWrap":
-					//TODO
-					//style["white-space"] = "nowrap";
+					// Applies to table cells (<w:tcPr><w:noWrap/>). A
+					// presence-only boolean in OOXML defaults to true.
+					if (xml.boolAttr(c, "val", true))
+						style["white-space"] = "nowrap";
 					break;
 
 				case "tblCellMar":
@@ -2117,6 +2164,19 @@ export class DocumentParser {
 				case "bottom":
 					output["border-bottom"] = values.valueOfBorder(c);
 					break;
+
+				// Diagonal borders. These don't map to any CSS border
+				// property, so we stash them under `$`-prefixed metadata
+				// keys (which styleToString + html.ts both skip when
+				// applying styles) and let renderTableCell read them back
+				// to emit an inline SVG overlay.
+				case "tl2br":
+					output["$diag-tlbr"] = values.valueOfBorder(c);
+					break;
+
+				case "tr2bl":
+					output["$diag-trbl"] = values.valueOfBorder(c);
+					break;
 			}
 		}
 	}
@@ -2164,6 +2224,90 @@ class values {
 
 	static valueOfMargin(c: Element) {
 		return xml.lengthAttr(c, "w");
+	}
+
+	// w:shd pattern → CSS background. For v1:
+	//   - clear / nil / null             → plain background-color from fill
+	//   - pctN (where N is a known digit) → color-mix fill/color at N%
+	//   - diagStripe / horzStripe /
+	//     vertStripe / diagCross /
+	//     thinDiagStripe / thinHorzStripe /
+	//     thinVertStripe / thinDiagCross  → repeating-linear-gradient
+	//   - anything else                   → plain background-color
+	// Pattern keys go through an allowlist (SHD_PATTERN_RE below) before
+	// selecting a gradient template; the fill/color colours pass through
+	// xmlUtil.colorAttr which already constrains the output to hex / known
+	// keyword / var(--docx-theme-…). No attacker DOCX string is ever
+	// interpolated into CSS here. See SECURITY_REVIEW.md #3/#4.
+	static applyShd(c: Element, style: Record<string, string>) {
+		const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd);
+		const color = xmlUtil.colorAttr(c, "color", null, autos.shd);
+		const val = xml.attr(c, "val");
+
+		// Baseline fill; pattern templates may override `background` below.
+		if (fill != null) {
+			style["background-color"] = fill;
+		}
+
+		// Nothing to pattern if val is missing / clear / nil.
+		if (!val || val === "clear" || val === "nil") return;
+
+		// Strict allowlist: pctN, thin-prefixed and plain stripe / cross
+		// names, or the raw Word enum values. Anything that doesn't match
+		// falls through to the plain fill set above.
+		const SHD_PATTERN_RE = /^(pct\d{1,2}|thin[A-Z][A-Za-z]+|[a-z][A-Za-z]+)$/;
+		if (!SHD_PATTERN_RE.test(val)) return;
+
+		const base = fill ?? "transparent";
+		const fg = color ?? "black";
+
+		// Percent shading: blend fg into the base at N%.  Word's pctN is
+		// the strength of the foreground dot pattern, so the result is a
+		// fill that is N% foreground and (100-N)% base. color-mix works
+		// in all evergreen browsers; older browsers fall back to the
+		// plain background-color assigned above.
+		const pctMatch = /^pct(\d{1,2})$/.exec(val);
+		if (pctMatch) {
+			const pct = Math.min(100, Math.max(0, parseInt(pctMatch[1], 10)));
+			style["background-color"] = `color-mix(in srgb, ${fg} ${pct}%, ${base})`;
+			return;
+		}
+
+		// Stripe / cross templates. The numeric widths are hard-coded; no
+		// DOCX-derived values land inside the template string.
+		const templates: Record<string, string> = {
+			horzStripe:     `repeating-linear-gradient(0deg, ${fg} 0 2px, ${base} 2px 6px)`,
+			thinHorzStripe: `repeating-linear-gradient(0deg, ${fg} 0 1px, ${base} 1px 3px)`,
+			vertStripe:     `repeating-linear-gradient(90deg, ${fg} 0 2px, ${base} 2px 6px)`,
+			thinVertStripe: `repeating-linear-gradient(90deg, ${fg} 0 1px, ${base} 1px 3px)`,
+			diagStripe:     `repeating-linear-gradient(45deg, ${fg} 0 2px, ${base} 2px 6px)`,
+			thinDiagStripe: `repeating-linear-gradient(45deg, ${fg} 0 1px, ${base} 1px 3px)`,
+			reverseDiagStripe:     `repeating-linear-gradient(-45deg, ${fg} 0 2px, ${base} 2px 6px)`,
+			thinReverseDiagStripe: `repeating-linear-gradient(-45deg, ${fg} 0 1px, ${base} 1px 3px)`,
+		};
+
+		const tpl = templates[val];
+		if (tpl) {
+			style["background-image"] = tpl;
+			style["background-color"] = base;
+			return;
+		}
+
+		// diagCross / horzCross / thin variants: two stacked gradients.
+		const crossTemplates: Record<string, string> = {
+			diagCross:     `repeating-linear-gradient(45deg, ${fg} 0 2px, transparent 2px 6px), repeating-linear-gradient(-45deg, ${fg} 0 2px, transparent 2px 6px)`,
+			thinDiagCross: `repeating-linear-gradient(45deg, ${fg} 0 1px, transparent 1px 3px), repeating-linear-gradient(-45deg, ${fg} 0 1px, transparent 1px 3px)`,
+			horzCross:     `repeating-linear-gradient(0deg, ${fg} 0 2px, transparent 2px 6px), repeating-linear-gradient(90deg, ${fg} 0 2px, transparent 2px 6px)`,
+			thinHorzCross: `repeating-linear-gradient(0deg, ${fg} 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, ${fg} 0 1px, transparent 1px 3px)`,
+		};
+
+		const crossTpl = crossTemplates[val];
+		if (crossTpl) {
+			style["background-image"] = crossTpl;
+			style["background-color"] = base;
+		}
+		// Otherwise: unsupported pattern (e.g. unrecognised word); leave
+		// the baseline fill in place.
 	}
 
 	static valueOfBorder(c: Element) {

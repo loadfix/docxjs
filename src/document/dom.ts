@@ -171,6 +171,10 @@ export interface WmlTableRow extends OpenXmlElement {
 	isHeader?: boolean;
     gridBefore?: number;
     gridAfter?: number;
+    // w:cantSplit — when true, the visual-pagination splitter must not
+    // break a page inside this row. See splitTableAtRowBoundary in
+    // page-break.ts.
+    cantSplit?: boolean;
     // Set when w:trPr contains a w:ins or w:del element (Track Changes
     // Phase 3, #5). The row itself is inserted or deleted, distinct from
     // revisions to its content.

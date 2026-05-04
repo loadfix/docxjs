@@ -410,6 +410,39 @@ function splitTableAtRowBoundary(
     if (cutIndex < 0) return null; // Not even one row fits.
     if (cutIndex === rows.length - 1) return null; // Everything fits already — nothing to split.
 
+    // w:cantSplit honouring — renderTableRow projects the flag as
+    // data-cant-split="" on the <tr>. If the cut would land inside a
+    // cant-split row (i.e. the *next* row is cant-split and was the one
+    // that didn't fit because of its own size, not because other rows
+    // already consumed the room), back up to the previous boundary.
+    // When no earlier valid cut exists, fall through with the original
+    // cutIndex so the caller can still make forward progress — Word's
+    // rendering treats cantSplit as advisory when a row is too tall to
+    // fit on one page anyway.
+    //
+    // We only back up when the row *immediately after* the cut is
+    // cant-split. The row *at* the cut sits on the head page in full
+    // (its height was accounted for before the loop terminated), so it
+    // is never the one being split mid-way.
+    const nextRow = rows[cutIndex + 1];
+    if (nextRow && nextRow.hasAttribute('data-cant-split')) {
+        // The next row is cant-split. But it didn't fit as a whole, so
+        // it would be split across pages. Back up to the previous
+        // boundary that is safe.
+        let safe = cutIndex;
+        while (safe >= 0) {
+            const candidate = rows[safe + 1];
+            if (!candidate || !candidate.hasAttribute('data-cant-split')) break;
+            safe--;
+        }
+        if (safe >= 0) {
+            cutIndex = safe;
+        }
+        // safe < 0 means every option would split a cant-split row;
+        // fall through with the original cutIndex (overflow rather
+        // than split).
+    }
+
     // Build the tail table shell.
     const tail = table.cloneNode(false) as HTMLTableElement;
     tail.removeAttribute('id');
