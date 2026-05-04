@@ -16,6 +16,7 @@ import {
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
 import { FooterHeaderReference, SectionProperties } from './document/section';
+import { Border } from './document/border';
 import { WmlRun } from './document/run';
 import { WmlBookmarkStart } from './document/bookmarks';
 import { IDomStyle } from './document/style';
@@ -230,6 +231,11 @@ export class HtmlRenderer {
 
 	defaultTabSize: string;
 	currentTabs: any[] = [];
+
+	// Sequential counter used to scope inline line-numbering rules to a
+	// single article (`<article class="docx-lnno-N">`). Incremented each
+	// time createSectionContent emits an article with line numbering on.
+	private lineNumberingArticleSeq: number = 0;
 
 	commentHighlight: any;
 	commentMap: Record<string, Range> = {};
@@ -534,13 +540,22 @@ export class HtmlRenderer {
 		return output;
 	}
 
-	createPageElement(className: string, props: SectionProperties, docStyle: Record<string, any>) {
+	createPageElement(className: string, props: SectionProperties, docStyle: Record<string, any>, pageIndex: number = 0) {
 		const style: Record<string, string> = { ...docStyle };
 
 		if (props) {
 			if (props.pageMargins) {
-				style.paddingLeft = props.pageMargins.left;
-				style.paddingRight = props.pageMargins.right;
+				let { left, right } = props.pageMargins;
+
+				// w:mirrorMargins swaps inner/outer on facing pages. We treat
+				// the 0-indexed page as the first "odd" (recto) page, so even
+				// indices get the mirrored layout.
+				if (props.mirrorMargins && pageIndex % 2 === 1) {
+					[left, right] = [right, left];
+				}
+
+				style.paddingLeft = left;
+				style.paddingRight = right;
 				style.paddingTop = props.pageMargins.top;
 				style.paddingBottom = props.pageMargins.bottom;
 			}
@@ -551,25 +566,139 @@ export class HtmlRenderer {
 				if (!this.options.ignoreHeight)
 					style.minHeight = props.pageSize.height;
 			}
+
+			if (props.pageBorders) {
+				for (const edge of ["top", "right", "bottom", "left"] as const) {
+					const border = props.pageBorders[edge] as Border | undefined;
+					const css = this.borderToCss(border);
+					if (css) {
+						const key = `border${edge.charAt(0).toUpperCase()}${edge.slice(1)}` as
+							"borderTop" | "borderRight" | "borderBottom" | "borderLeft";
+						style[key] = css;
+					}
+				}
+			}
 		}
 
 		return this.h({ tagName: "section", className, style }) as HTMLElement;
 	}
 
+	/**
+	 * Builds a `border: <size> <style> <color>` shorthand from a parsed
+	 * WordprocessingML border. Returns null if the border is absent, has no
+	 * recognised style, or carries an unsafe color string.
+	 */
+	borderToCss(border: Border | undefined): string | null {
+		if (!border || !border.type || border.type === "none" || border.type === "nil") {
+			return null;
+		}
+
+		// WordprocessingML border sizes are in eighths of a point; the
+		// LengthUsage.Border parser already converts to a "<n>pt" string.
+		const size = border.size || "0.5pt";
+
+		// Very rough mapping of Word border styles to CSS equivalents. Art
+		// borders (w:art="...") are not handled — kept as a TODO per the
+		// project's known-gap list.
+		const styleMap: Record<string, string> = {
+			single: "solid", thick: "solid", double: "double",
+			dotted: "dotted", dashed: "dashed", dashSmallGap: "dashed",
+			dotDash: "dashed", dotDotDash: "dashed",
+			wave: "solid", doubleWave: "double",
+		};
+		const cssStyle = styleMap[border.type] ?? "solid";
+
+		const color = sanitizeCssColor(border.color) ?? "currentColor";
+
+		return `${size} ${cssStyle} ${color}`;
+	}
+
 	createSectionContent(props: SectionProperties) {
 		const style: Record<string, string> = {};
+		const classNames: string[] = [];
+		const extraChildren: Node[] = [];
 
 		if (props.columns && props.columns.numberOfColumns) {
-			style.columnCount = `${props.columns.numberOfColumns}`;
-			style.columnGap = props.columns.space;
+			const { columns } = props;
+			const perColumnWidths = columns.columns
+				?.map(c => c.width)
+				.filter((w): w is string => !!w);
+
+			if (columns.equalWidth === false && perColumnWidths && perColumnWidths.length > 0) {
+				// w:cols with per-w:col widths. Use CSS grid rather than the
+				// multi-column box, which can't express unequal column widths.
+				style.display = "grid";
+				style.gridTemplateColumns = perColumnWidths.join(" ");
+				if (columns.space) {
+					style.columnGap = columns.space;
+				}
+			} else {
+				style.columnCount = `${columns.numberOfColumns}`;
+				style.columnGap = columns.space;
+			}
 
 			if (props.columns.separator) {
 				style.columnRule = "1px solid black";
 			}
 		}
 
-		return this.h({ tagName: "article", style }) ;
-	}	
+		// w:docGrid linePitch is in twentieths of a point. Only the numeric
+		// line-height derived from linePitch is applied; the other docGrid
+		// `type` variants (lines / linesAndChars / snapToChars) drive Asian
+		// character-grid layouts that require glyph-level advance control
+		// the browser doesn't expose. We accept the pitch as a hint only.
+		if (props.docGrid && props.docGrid.linePitch > 0) {
+			const pitchPt = props.docGrid.linePitch / 20;
+			if (isFinite(pitchPt) && pitchPt > 0) {
+				style.lineHeight = `${pitchPt}pt`;
+			}
+		}
+
+		// w:lnNumType — CSS counter scoped to this article. Browsers don't
+		// expose line-box positions, so we fall back to numbering
+		// *paragraphs* rather than visual lines.
+		// TODO: paragraph-count fallback; browsers don't expose line boxes.
+		if (props.lineNumbering && props.lineNumbering.countBy > 0) {
+			// Force `countBy` through a numeric coercion so we can safely
+			// interpolate it into the :nth-of-type() selector below.
+			const countBy = Math.max(1, Math.floor(Number(props.lineNumbering.countBy)) || 1);
+			// `counter-reset` on the article re-starts line numbers per
+			// section. Per-page restart is approximated by section restart
+			// here because we don't re-wrap sections per page in this pass.
+			// restart="continuous" suppresses the reset so the counter
+			// carries across sections.
+			const restart = props.lineNumbering.restart || "newPage";
+			if (restart !== "continuous") {
+				const start = Math.max(0, (props.lineNumbering.start ?? 1) - 1);
+				style.counterReset = `docx-line ${start}`;
+			}
+
+			// Assign the article a unique class so the :nth-of-type rule
+			// only matches this section's children. `countBy` is numeric
+			// after the coercion above — no DOCX string reaches the CSS.
+			const seq = ++this.lineNumberingArticleSeq;
+			const scopeClass = `${this.className}-lnno-${seq}`;
+			classNames.push(scopeClass);
+
+			// Inline <style> with a scoped selector. The rule technically
+			// applies globally, but only matches paragraphs inside this
+			// article because of the unique scopeClass. Every Nth paragraph
+			// increments the counter by `countBy` (so the displayed number
+			// approximates a per-line count) and renders the counter via
+			// ::before.
+			const rule =
+				`.${scopeClass} > p { counter-increment: docx-line; }\n` +
+				`.${scopeClass} > p:nth-of-type(${countBy}n)::before { ` +
+				`content: counter(docx-line); display: inline-block; ` +
+				`width: 2.5em; margin-left: -3em; margin-right: 0.5em; ` +
+				`text-align: right; color: #666; font-size: 0.85em; ` +
+				`vertical-align: top; }`;
+			extraChildren.push(this.h({ tagName: "style", children: [rule] }));
+		}
+
+		const className = classNames.length ? classNames.join(" ") : undefined;
+		return this.h({ tagName: "article", className, style, children: extraChildren }) ;
+	}
 
 	renderSections(document: DocumentElement): HTMLElement[] {
 		const result = [];
@@ -584,7 +713,7 @@ export class HtmlRenderer {
 
 			const section = pages[i][0];
 			let props = section.sectProps;
-			const pageElement = this.createPageElement(this.className, props, document.cssStyle);
+			const pageElement = this.createPageElement(this.className, props, document.cssStyle, result.length);
 
 			this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props,
 				result.length, prevProps != props, pageElement);
@@ -619,8 +748,15 @@ export class HtmlRenderer {
 	renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement) {
 		if (!refs) return;
 
+		// The "even" reference only activates when settings.xml opts in with
+		// <w:evenAndOddHeaders/>. Without that flag, Word uses the default
+		// header/footer on every page regardless of parity. Previously we
+		// unconditionally picked "even" on odd page indices, which broke
+		// documents whose even reference was dormant metadata.
+		const evenAndOdd = this.document?.settingsPart?.settings?.evenAndOddHeaders === true;
+
 		var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-			?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+			?? (evenAndOdd && page % 2 == 1 ? refs.find(x => x.type == "even") : null)
 			?? refs.find(x => x.type == "default");
 
 		var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart) as BaseHeaderFooterPart;

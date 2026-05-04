@@ -15,6 +15,21 @@ export interface Columns {
     columns: Column[];
 }
 
+export interface LineNumbering {
+    countBy: number;
+    start: number;
+    distance: Length;
+    restart: "newPage" | "newSection" | "continuous" | string;
+}
+
+export interface DocGrid {
+    type: "default" | "lines" | "linesAndChars" | "snapToChars" | string;
+    /** Line pitch in twentieths of a point (1/20 pt). */
+    linePitch: number;
+    /** Character pitch in twentieths of a point; parsed but unused for non-default grids. */
+    charSpace: number;
+}
+
 export interface PageSize {
     width: Length, 
     height: Length, 
@@ -63,6 +78,9 @@ export interface SectionProperties {
     footerRefs: FooterHeaderReference[];
     headerRefs: FooterHeaderReference[];
     titlePage: boolean;
+    lineNumbering: LineNumbering;
+    docGrid: DocGrid;
+    mirrorMargins: boolean;
 }
 
 export function parseSectionProperties(elem: Element, xml: XmlParser = globalXmlParser): SectionProperties {
@@ -117,10 +135,39 @@ export function parseSectionProperties(elem: Element, xml: XmlParser = globalXml
             case "pgNumType":
                 section.pageNumber = parsePageNumber(e, xml);
                 break;
+
+            case "lnNumType":
+                section.lineNumbering = parseLineNumbering(e, xml);
+                break;
+
+            case "docGrid":
+                section.docGrid = parseDocGrid(e, xml);
+                break;
+
+            case "mirrorMargins":
+                section.mirrorMargins = xml.boolAttr(e, "val", true);
+                break;
         }
     }
 
     return section;
+}
+
+function parseLineNumbering(elem: Element, xml: XmlParser): LineNumbering {
+    return {
+        countBy: xml.intAttr(elem, "countBy", 1),
+        start: xml.intAttr(elem, "start", 1),
+        distance: xml.lengthAttr(elem, "distance"),
+        restart: xml.attr(elem, "restart") || "newPage",
+    };
+}
+
+function parseDocGrid(elem: Element, xml: XmlParser): DocGrid {
+    return {
+        type: xml.attr(elem, "type") || "default",
+        linePitch: xml.intAttr(elem, "linePitch", 0),
+        charSpace: xml.intAttr(elem, "charSpace", 0),
+    };
 }
 
 function parseColumns(elem: Element, xml: XmlParser): Columns {
