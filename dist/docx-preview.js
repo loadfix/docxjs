@@ -494,9 +494,33 @@
                 case "pgNumType":
                     section.pageNumber = parsePageNumber(e, xml);
                     break;
+                case "lnNumType":
+                    section.lineNumbering = parseLineNumbering(e, xml);
+                    break;
+                case "docGrid":
+                    section.docGrid = parseDocGrid(e, xml);
+                    break;
+                case "mirrorMargins":
+                    section.mirrorMargins = xml.boolAttr(e, "val", true);
+                    break;
             }
         }
         return section;
+    }
+    function parseLineNumbering(elem, xml) {
+        return {
+            countBy: xml.intAttr(elem, "countBy", 1),
+            start: xml.intAttr(elem, "start", 1),
+            distance: xml.lengthAttr(elem, "distance"),
+            restart: xml.attr(elem, "restart") || "newPage",
+        };
+    }
+    function parseDocGrid(elem, xml) {
+        return {
+            type: xml.attr(elem, "type") || "default",
+            linePitch: xml.intAttr(elem, "linePitch", 0),
+            charSpace: xml.intAttr(elem, "charSpace", 0),
+        };
     }
     function parseColumns(elem, xml) {
         return {
@@ -584,6 +608,9 @@
                 break;
             case "pageBreakBefore":
                 props.pageBreakBefore = xml.boolAttr(elem, "val", true);
+                break;
+            case "widowControl":
+                props.widowControl = xml.boolAttr(elem, "val", true);
                 break;
             case "outlineLvl":
                 props.outlineLevel = xml.intAttr(elem, "val");
@@ -1086,6 +1113,9 @@
                     break;
                 case "autoHyphenation":
                     result.autoHyphenation = xml.boolAttr(el, "val");
+                    break;
+                case "evenAndOddHeaders":
+                    result.evenAndOddHeaders = xml.boolAttr(el, "val", true);
                     break;
             }
         }
@@ -2476,9 +2506,15 @@
             });
         }
         parseFrame(node, paragraph) {
-            var dropCap = globalXmlParser.attr(node, "dropCap");
-            if (dropCap == "drop")
-                paragraph.cssStyle["float"] = "left";
+            const dropCap = globalXmlParser.attr(node, "dropCap");
+            if (dropCap !== "drop" && dropCap !== "margin")
+                return;
+            const linesRaw = globalXmlParser.intAttr(node, "lines");
+            const lines = (Number.isInteger(linesRaw) && linesRaw >= 1 && linesRaw <= 10)
+                ? linesRaw
+                : 3;
+            paragraph.dropCap = dropCap;
+            paragraph.dropCapLines = lines;
         }
         parseHyperlink(node, parent) {
             var result = { type: DomType.Hyperlink, parent: parent, children: [] };
@@ -2561,10 +2597,17 @@
                     case "noBreakHyphen":
                         result.children.push({ type: DomType.NoBreakHyphen });
                         break;
+                    case "softHyphen":
+                        result.children.push({
+                            type: DomType.Text,
+                            text: "­"
+                        });
+                        break;
                     case "br":
+                    case "cr":
                         result.children.push({
                             type: DomType.Break,
-                            break: globalXmlParser.attr(c, "type") || "textWrapping"
+                            break: c.localName === "cr" ? "textWrapping" : (globalXmlParser.attr(c, "type") || "textWrapping")
                         });
                         break;
                     case "lastRenderedPageBreak":
@@ -3033,11 +3076,37 @@
             var bottomFromText = globalXmlParser.lengthAttr(node, "bottomFromText");
             var rightFromText = globalXmlParser.lengthAttr(node, "rightFromText");
             var leftFromText = globalXmlParser.lengthAttr(node, "leftFromText");
-            table.cssStyle["float"] = 'left';
+            const horzAnchor = globalXmlParser.attr(node, "horzAnchor");
+            const vertAnchor = globalXmlParser.attr(node, "vertAnchor");
+            const tblpXSpec = globalXmlParser.attr(node, "tblpXSpec");
+            const tblpYSpec = globalXmlParser.attr(node, "tblpYSpec");
+            const tblpX = globalXmlParser.lengthAttr(node, "tblpX");
+            const tblpY = globalXmlParser.lengthAttr(node, "tblpY");
+            const pageAnchored = horzAnchor === "page" || vertAnchor === "page";
+            if (pageAnchored) {
+                table.cssStyle["position"] = "absolute";
+                if (tblpX)
+                    table.cssStyle["left"] = tblpX;
+                if (tblpY)
+                    table.cssStyle["top"] = tblpY;
+            }
+            else {
+                table.cssStyle["float"] = "left";
+            }
             table.cssStyle["margin-bottom"] = values.addSize(table.cssStyle["margin-bottom"], bottomFromText);
             table.cssStyle["margin-left"] = values.addSize(table.cssStyle["margin-left"], leftFromText);
             table.cssStyle["margin-right"] = values.addSize(table.cssStyle["margin-right"], rightFromText);
             table.cssStyle["margin-top"] = values.addSize(table.cssStyle["margin-top"], topFromText);
+            if (tblpXSpec === "center") {
+                table.cssStyle["margin-left"] = "auto";
+                table.cssStyle["margin-right"] = "auto";
+            }
+            else if (tblpXSpec === "right") {
+                table.cssStyle["margin-left"] = "auto";
+            }
+            if (tblpYSpec) {
+                table.cssStyle["$tblp-y-spec"] = tblpYSpec;
+            }
         }
         parseTableRow(node) {
             var result = { type: DomType.Row, children: [] };
@@ -3068,6 +3137,9 @@
                         break;
                     case "tblHeader":
                         row.isHeader = globalXmlParser.boolAttr(c, "val");
+                        break;
+                    case "cantSplit":
+                        row.cantSplit = globalXmlParser.boolAttr(c, "val", true);
                         break;
                     case "gridBefore":
                         row.gridBefore = globalXmlParser.intAttr(c, "val");
@@ -3171,7 +3243,7 @@
                         style["font-size"] = style["min-height"] = globalXmlParser.lengthAttr(c, "val", LengthUsage.FontSize);
                         break;
                     case "shd":
-                        style["background-color"] = xmlUtil.colorAttr(c, "fill", null, autos.shd);
+                        values.applyShd(c, style);
                         break;
                     case "highlight":
                         style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
@@ -3192,6 +3264,9 @@
                         break;
                     case "strike":
                         style["text-decoration"] = globalXmlParser.boolAttr(c, "val", true) ? "line-through" : "none";
+                        break;
+                    case "dstrike":
+                        style["text-decoration"] = globalXmlParser.boolAttr(c, "val", true) ? "line-through double" : "none";
                         break;
                     case "b":
                         style["font-weight"] = globalXmlParser.boolAttr(c, "val", true) ? "bold" : "normal";
@@ -3232,12 +3307,42 @@
                         this.parseBorderProperties(c, style);
                         break;
                     case "vanish":
+                    case "specVanish":
                         if (globalXmlParser.boolAttr(c, "val", true))
                             style["display"] = "none";
                         break;
                     case "kern":
+                        if (globalXmlParser.boolAttr(c, "val", true))
+                            style["font-kerning"] = "normal";
+                        break;
+                    case "w":
+                        {
+                            const pct = globalXmlParser.intAttr(c, "val");
+                            if (pct != null)
+                                style["font-stretch"] = `${pct}%`;
+                        }
+                        break;
+                    case "emboss":
+                        if (globalXmlParser.boolAttr(c, "val", true))
+                            style["text-shadow"] = "1px 1px 1px #fff, -1px -1px 1px #000";
+                        break;
+                    case "imprint":
+                        if (globalXmlParser.boolAttr(c, "val", true))
+                            style["text-shadow"] = "1px 1px 1px #000, -1px -1px 1px #fff";
+                        break;
+                    case "outline":
+                        if (globalXmlParser.boolAttr(c, "val", true)) {
+                            style["-webkit-text-stroke"] = "1px currentColor";
+                            style["color"] = "transparent";
+                        }
+                        break;
+                    case "shadow":
+                        if (globalXmlParser.boolAttr(c, "val", true))
+                            style["text-shadow"] = "2px 2px 2px rgba(0,0,0,0.5)";
                         break;
                     case "noWrap":
+                        if (globalXmlParser.boolAttr(c, "val", true))
+                            style["white-space"] = "nowrap";
                         break;
                     case "tblCellMar":
                     case "tcMar":
@@ -3250,8 +3355,12 @@
                         style["vertical-align"] = values.valueOfTextAlignment(c);
                         break;
                     case "spacing":
-                        if (elem.localName == "pPr")
+                        if (elem.localName == "pPr") {
                             this.parseSpacing(c, style);
+                        }
+                        else if (elem.localName == "rPr") {
+                            style["letter-spacing"] = globalXmlParser.lengthAttr(c, "val", LengthUsage.Dxa);
+                        }
                         break;
                     case "wordWrap":
                         if (globalXmlParser.boolAttr(c, "val"))
@@ -3429,6 +3538,12 @@
                     case "bottom":
                         output["border-bottom"] = values.valueOfBorder(c);
                         break;
+                    case "tl2br":
+                        output["$diag-tlbr"] = values.valueOfBorder(c);
+                        break;
+                    case "tr2bl":
+                        output["$diag-trbl"] = values.valueOfBorder(c);
+                        break;
                 }
             }
         }
@@ -3468,6 +3583,54 @@
         }
         static valueOfMargin(c) {
             return globalXmlParser.lengthAttr(c, "w");
+        }
+        static applyShd(c, style) {
+            const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd);
+            const color = xmlUtil.colorAttr(c, "color", null, autos.shd);
+            const val = globalXmlParser.attr(c, "val");
+            if (fill != null) {
+                style["background-color"] = fill;
+            }
+            if (!val || val === "clear" || val === "nil")
+                return;
+            const SHD_PATTERN_RE = /^(pct\d{1,2}|thin[A-Z][A-Za-z]+|[a-z][A-Za-z]+)$/;
+            if (!SHD_PATTERN_RE.test(val))
+                return;
+            const base = fill ?? "transparent";
+            const fg = color ?? "black";
+            const pctMatch = /^pct(\d{1,2})$/.exec(val);
+            if (pctMatch) {
+                const pct = Math.min(100, Math.max(0, parseInt(pctMatch[1], 10)));
+                style["background-color"] = `color-mix(in srgb, ${fg} ${pct}%, ${base})`;
+                return;
+            }
+            const templates = {
+                horzStripe: `repeating-linear-gradient(0deg, ${fg} 0 2px, ${base} 2px 6px)`,
+                thinHorzStripe: `repeating-linear-gradient(0deg, ${fg} 0 1px, ${base} 1px 3px)`,
+                vertStripe: `repeating-linear-gradient(90deg, ${fg} 0 2px, ${base} 2px 6px)`,
+                thinVertStripe: `repeating-linear-gradient(90deg, ${fg} 0 1px, ${base} 1px 3px)`,
+                diagStripe: `repeating-linear-gradient(45deg, ${fg} 0 2px, ${base} 2px 6px)`,
+                thinDiagStripe: `repeating-linear-gradient(45deg, ${fg} 0 1px, ${base} 1px 3px)`,
+                reverseDiagStripe: `repeating-linear-gradient(-45deg, ${fg} 0 2px, ${base} 2px 6px)`,
+                thinReverseDiagStripe: `repeating-linear-gradient(-45deg, ${fg} 0 1px, ${base} 1px 3px)`,
+            };
+            const tpl = templates[val];
+            if (tpl) {
+                style["background-image"] = tpl;
+                style["background-color"] = base;
+                return;
+            }
+            const crossTemplates = {
+                diagCross: `repeating-linear-gradient(45deg, ${fg} 0 2px, transparent 2px 6px), repeating-linear-gradient(-45deg, ${fg} 0 2px, transparent 2px 6px)`,
+                thinDiagCross: `repeating-linear-gradient(45deg, ${fg} 0 1px, transparent 1px 3px), repeating-linear-gradient(-45deg, ${fg} 0 1px, transparent 1px 3px)`,
+                horzCross: `repeating-linear-gradient(0deg, ${fg} 0 2px, transparent 2px 6px), repeating-linear-gradient(90deg, ${fg} 0 2px, transparent 2px 6px)`,
+                thinHorzCross: `repeating-linear-gradient(0deg, ${fg} 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, ${fg} 0 1px, transparent 1px 3px)`,
+            };
+            const crossTpl = crossTemplates[val];
+            if (crossTpl) {
+                style["background-image"] = crossTpl;
+                style["background-color"] = base;
+            }
         }
         static valueOfBorder(c) {
             var type = values.parseBorderType(globalXmlParser.attr(c, "val"));
@@ -3789,6 +3952,51 @@
         }
         return out;
     }
+    const BCP47_RE = /^[A-Za-z]{1,8}(-[A-Za-z0-9]{1,8})*$/;
+    function isValidBcp47LanguageTag(value) {
+        return typeof value === 'string' && BCP47_RE.test(value);
+    }
+    function getHeadingTagName(paragraph, stylesMap) {
+        if (!paragraph)
+            return 'p';
+        const level = resolveHeadingLevel(paragraph, stylesMap);
+        if (level == null)
+            return 'p';
+        if (!Number.isInteger(level) || level < 0 || level > 5)
+            return 'p';
+        return `h${level + 1}`;
+    }
+    function resolveHeadingLevel(paragraph, stylesMap) {
+        if (Number.isInteger(paragraph.outlineLevel) && paragraph.outlineLevel >= 0 && paragraph.outlineLevel <= 8) {
+            return paragraph.outlineLevel;
+        }
+        const style = paragraph.styleName && stylesMap?.[paragraph.styleName];
+        if (!style)
+            return null;
+        const styleLevel = style.paragraphProps?.outlineLevel;
+        if (Number.isInteger(styleLevel) && styleLevel >= 0 && styleLevel <= 8) {
+            return styleLevel;
+        }
+        const seen = new Set();
+        let cursor = style;
+        while (cursor && !seen.has(cursor.id)) {
+            seen.add(cursor.id);
+            const nameLevel = headingLevelFromName(cursor.name) ?? headingLevelFromName(cursor.id);
+            if (nameLevel != null)
+                return nameLevel;
+            cursor = cursor.basedOn ? stylesMap?.[cursor.basedOn] : undefined;
+        }
+        return null;
+    }
+    function headingLevelFromName(name) {
+        if (!name)
+            return null;
+        const m = /^heading\s*([1-9])$/i.exec(name.trim());
+        if (!m)
+            return null;
+        const n = Number(m[1]);
+        return n - 1;
+    }
     class HtmlRenderer {
         constructor() {
             this.className = "docx";
@@ -3798,6 +4006,8 @@
             this.currentVerticalMerge = null;
             this.tableCellPositions = [];
             this.currentCellPosition = null;
+            this.tableBandSizes = [];
+            this.currentTableBandSizes = { col: 1, row: 1 };
             this.currentRowIsHeader = false;
             this.footnoteMap = {};
             this.endnoteMap = {};
@@ -3806,6 +4016,7 @@
             this.endnoteRefCount = 0;
             this.usedHederFooterParts = [];
             this.currentTabs = [];
+            this.lineNumberingArticleSeq = 0;
             this.commentMap = {};
             this.commentAnchorElements = {};
             this.sidebarContainer = null;
@@ -4029,12 +4240,16 @@
             }
             return output;
         }
-        createPageElement(className, props, docStyle) {
+        createPageElement(className, props, docStyle, pageIndex = 0) {
             const style = { ...docStyle };
             if (props) {
                 if (props.pageMargins) {
-                    style.paddingLeft = props.pageMargins.left;
-                    style.paddingRight = props.pageMargins.right;
+                    let { left, right } = props.pageMargins;
+                    if (props.mirrorMargins && pageIndex % 2 === 1) {
+                        [left, right] = [right, left];
+                    }
+                    style.paddingLeft = left;
+                    style.paddingRight = right;
                     style.paddingTop = props.pageMargins.top;
                     style.paddingBottom = props.pageMargins.bottom;
                 }
@@ -4044,19 +4259,84 @@
                     if (!this.options.ignoreHeight)
                         style.minHeight = props.pageSize.height;
                 }
+                if (props.pageBorders) {
+                    for (const edge of ["top", "right", "bottom", "left"]) {
+                        const border = props.pageBorders[edge];
+                        const css = this.borderToCss(border);
+                        if (css) {
+                            const key = `border${edge.charAt(0).toUpperCase()}${edge.slice(1)}`;
+                            style[key] = css;
+                        }
+                    }
+                }
             }
             return this.h({ tagName: "section", className, style });
         }
+        borderToCss(border) {
+            if (!border || !border.type || border.type === "none" || border.type === "nil") {
+                return null;
+            }
+            const size = border.size || "0.5pt";
+            const styleMap = {
+                single: "solid", thick: "solid", double: "double",
+                dotted: "dotted", dashed: "dashed", dashSmallGap: "dashed",
+                dotDash: "dashed", dotDotDash: "dashed",
+                wave: "solid", doubleWave: "double",
+            };
+            const cssStyle = styleMap[border.type] ?? "solid";
+            const color = sanitizeCssColor(border.color) ?? "currentColor";
+            return `${size} ${cssStyle} ${color}`;
+        }
         createSectionContent(props) {
             const style = {};
+            const classNames = [];
+            const extraChildren = [];
             if (props.columns && props.columns.numberOfColumns) {
-                style.columnCount = `${props.columns.numberOfColumns}`;
-                style.columnGap = props.columns.space;
+                const { columns } = props;
+                const perColumnWidths = columns.columns
+                    ?.map(c => c.width)
+                    .filter((w) => !!w);
+                if (columns.equalWidth === false && perColumnWidths && perColumnWidths.length > 0) {
+                    style.display = "grid";
+                    style.gridTemplateColumns = perColumnWidths.join(" ");
+                    if (columns.space) {
+                        style.columnGap = columns.space;
+                    }
+                }
+                else {
+                    style.columnCount = `${columns.numberOfColumns}`;
+                    style.columnGap = columns.space;
+                }
                 if (props.columns.separator) {
                     style.columnRule = "1px solid black";
                 }
             }
-            return this.h({ tagName: "article", style });
+            if (props.docGrid && props.docGrid.linePitch > 0) {
+                const pitchPt = props.docGrid.linePitch / 20;
+                if (isFinite(pitchPt) && pitchPt > 0) {
+                    style.lineHeight = `${pitchPt}pt`;
+                }
+            }
+            if (props.lineNumbering && props.lineNumbering.countBy > 0) {
+                const countBy = Math.max(1, Math.floor(Number(props.lineNumbering.countBy)) || 1);
+                const restart = props.lineNumbering.restart || "newPage";
+                if (restart !== "continuous") {
+                    const start = Math.max(0, (props.lineNumbering.start ?? 1) - 1);
+                    style.counterReset = `docx-line ${start}`;
+                }
+                const seq = ++this.lineNumberingArticleSeq;
+                const scopeClass = `${this.className}-lnno-${seq}`;
+                classNames.push(scopeClass);
+                const rule = `.${scopeClass} > p { counter-increment: docx-line; }\n` +
+                    `.${scopeClass} > p:nth-of-type(${countBy}n)::before { ` +
+                    `content: counter(docx-line); display: inline-block; ` +
+                    `width: 2.5em; margin-left: -3em; margin-right: 0.5em; ` +
+                    `text-align: right; color: #666; font-size: 0.85em; ` +
+                    `vertical-align: top; }`;
+                extraChildren.push(this.h({ tagName: "style", children: [rule] }));
+            }
+            const className = classNames.length ? classNames.join(" ") : undefined;
+            return this.h({ tagName: "article", className, style, children: extraChildren });
         }
         renderSections(document) {
             const result = [];
@@ -4068,7 +4348,7 @@
                 this.currentFootnoteIds = [];
                 const section = pages[i][0];
                 let props = section.sectProps;
-                const pageElement = this.createPageElement(this.className, props, document.cssStyle);
+                const pageElement = this.createPageElement(this.className, props, document.cssStyle, result.length);
                 this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props, result.length, prevProps != props, pageElement);
                 for (const sect of pages[i]) {
                     var contentElement = this.createSectionContent(sect.sectProps);
@@ -4093,8 +4373,9 @@
         renderHeaderFooter(refs, props, page, firstOfSection, into) {
             if (!refs)
                 return;
+            const evenAndOdd = this.document?.settingsPart?.settings?.evenAndOddHeaders === true;
             var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-                ?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+                ?? (evenAndOdd && page % 2 == 1 ? refs.find(x => x.type == "even") : null)
                 ?? refs.find(x => x.type == "default");
             var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart);
             if (part) {
@@ -4863,7 +5144,10 @@ section.${c}>ol>li::before {
             return this.h({ ns, tagName, children: this.renderElements(elem.children), ...props });
         }
         renderParagraph(elem) {
-            var result = this.toHTML(elem, ns.html, "p");
+            this.applyParagraphBreakControls(elem);
+            this.applyParagraphDropCap(elem);
+            const tagName = getHeadingTagName(elem, this.styleMap);
+            var result = this.toHTML(elem, ns.html, tagName);
             const style = this.findStyle(elem.styleName);
             elem.tabs ?? (elem.tabs = style?.paragraphProps?.tabs);
             const numbering = elem.numbering ?? style?.paragraphProps?.numbering;
@@ -4878,6 +5162,45 @@ section.${c}>ol>li::before {
                 result.dataset.paraId = elem.paraId;
             }
             return result;
+        }
+        applyParagraphBreakControls(elem) {
+            const css = elem.cssStyle ?? (elem.cssStyle = {});
+            const style = this.findStyle(elem.styleName);
+            const styleProps = style?.paragraphProps;
+            const widowControl = elem.widowControl ?? styleProps?.widowControl;
+            const keepNext = elem.keepNext ?? styleProps?.keepNext;
+            const keepLines = elem.keepLines ?? styleProps?.keepLines;
+            const pageBreakBefore = elem.pageBreakBefore ?? styleProps?.pageBreakBefore;
+            if (widowControl === false) {
+                css["widows"] = "0";
+                css["orphans"] = "0";
+            }
+            if (keepNext === true && !css["break-after"]) {
+                css["break-after"] = "avoid";
+            }
+            if (keepLines === true && !css["break-inside"]) {
+                css["break-inside"] = "avoid";
+            }
+            if (pageBreakBefore === true && !css["break-before"]) {
+                css["break-before"] = "page";
+            }
+        }
+        applyParagraphDropCap(elem) {
+            if (!elem.dropCap)
+                return;
+            const lines = (Number.isInteger(elem.dropCapLines) && elem.dropCapLines >= 1)
+                ? elem.dropCapLines
+                : 3;
+            const css = elem.cssStyle ?? (elem.cssStyle = {});
+            css["float"] = "left";
+            css["font-size"] = `${lines}em`;
+            css["line-height"] = "0.9";
+            if (elem.dropCap === "drop") {
+                css["margin"] = "0 0.1em 0 0";
+            }
+            else {
+                css["margin-left"] = `-${lines * 0.5}em`;
+            }
         }
         appendParagraphMarkRevision(paragraphEl, elem) {
             const c = this.className;
@@ -5278,12 +5601,35 @@ section.${c}>ol>li::before {
             this.tableVerticalMerges.push(this.currentVerticalMerge);
             this.currentVerticalMerge = {};
             this.currentCellPosition = { col: 0, row: 0 };
+            this.tableBandSizes.push(this.currentTableBandSizes);
+            this.currentTableBandSizes = {
+                col: Math.max(1, elem.colBandSize ?? 1),
+                row: Math.max(1, elem.rowBandSize ?? 1),
+            };
             const children = [];
             if (elem.columns)
                 children.push(this.renderTableColumns(elem.columns));
-            children.push(...this.renderElements(elem.children));
+            const headerRendered = [];
+            const bodyRendered = [];
+            for (const child of (elem.children ?? [])) {
+                const rendered = this.renderElement(child);
+                if (rendered == null)
+                    continue;
+                const bucket = (child.type === DomType.Row && child.isHeader) ? headerRendered : bodyRendered;
+                if (Array.isArray(rendered))
+                    bucket.push(...rendered);
+                else
+                    bucket.push(rendered);
+            }
+            if (headerRendered.length > 0) {
+                children.push(this.h({ tagName: "thead", children: headerRendered }));
+            }
+            if (bodyRendered.length > 0) {
+                children.push(this.h({ tagName: "tbody", children: bodyRendered }));
+            }
             this.currentVerticalMerge = this.tableVerticalMerges.pop();
             this.currentCellPosition = this.tableCellPositions.pop();
+            this.currentTableBandSizes = this.tableBandSizes.pop();
             return this.toHTML(elem, ns.html, "table", children);
         }
         renderTableColumns(columns) {
@@ -5318,6 +5664,14 @@ section.${c}>ol>li::before {
                 children.push(this.renderTableCellPlaceholder(elem.gridAfter));
             this.currentCellPosition.row++;
             const tr = this.toHTML(elem, ns.html, "tr", children);
+            if (elem.cantSplit) {
+                tr.setAttribute("data-cant-split", "");
+            }
+            const rowBandSize = this.currentTableBandSizes.row;
+            if (rowBandSize > 0) {
+                const rowIdx = Math.max(0, (this.currentCellPosition.row - 1) | 0);
+                tr.setAttribute("data-band", String(Math.floor(rowIdx / rowBandSize) % 2));
+            }
             if (rowBookmarks.length > 0) {
                 const cellNodes = [];
                 let idx = 0;
@@ -5381,6 +5735,8 @@ section.${c}>ol>li::before {
         }
         renderTableCell(elem) {
             const tagName = this.currentRowIsHeader ? "th" : "td";
+            const diagTlBr = elem.cssStyle?.["$diag-tlbr"];
+            const diagTrBl = elem.cssStyle?.["$diag-trbl"];
             let result = this.toHTML(elem, ns.html, tagName);
             if (this.currentRowIsHeader) {
                 result.setAttribute("scope", "col");
@@ -5401,8 +5757,65 @@ section.${c}>ol>li::before {
             }
             if (elem.span)
                 result.colSpan = elem.span;
+            const colBandSize = this.currentTableBandSizes.col;
+            if (colBandSize > 0) {
+                result.setAttribute("data-band", String(Math.floor(this.currentCellPosition.col / colBandSize) % 2));
+            }
             this.currentCellPosition.col += result.colSpan;
+            if (diagTlBr || diagTrBl) {
+                this.applyDiagonalBorders(result, diagTlBr, diagTrBl);
+            }
             return result;
+        }
+        parseBorderStroke(border) {
+            if (!border || border === "none")
+                return { color: "black", width: "1" };
+            const parts = border.split(/\s+/);
+            if (parts.length < 3)
+                return { color: "black", width: "1" };
+            const w = parts[0].replace(/pt$/, "");
+            const color = parts.slice(2).join(" ");
+            return { color, width: w || "1" };
+        }
+        applyDiagonalBorders(cell, tlBr, trBl) {
+            const existing = Array.from(cell.childNodes);
+            const content = this.h({ tagName: "div", style: { position: "relative", zIndex: "1" } });
+            for (const node of existing)
+                content.appendChild(node);
+            const overlay = this.h({
+                ns: ns.svg,
+                tagName: "svg",
+                style: { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "0" },
+                preserveAspectRatio: "none",
+                viewBox: "0 0 100 100",
+            });
+            if (tlBr) {
+                const { color, width } = this.parseBorderStroke(tlBr);
+                const line = this.h({
+                    ns: ns.svg,
+                    tagName: "line",
+                    x1: "0", y1: "0", x2: "100", y2: "100",
+                    stroke: color,
+                    "stroke-width": width,
+                    vectorEffect: "non-scaling-stroke",
+                });
+                overlay.appendChild(line);
+            }
+            if (trBl) {
+                const { color, width } = this.parseBorderStroke(trBl);
+                const line = this.h({
+                    ns: ns.svg,
+                    tagName: "line",
+                    x1: "100", y1: "0", x2: "0", y2: "100",
+                    stroke: color,
+                    "stroke-width": width,
+                    vectorEffect: "non-scaling-stroke",
+                });
+                overlay.appendChild(line);
+            }
+            cell.style.position = cell.style.position || "relative";
+            cell.appendChild(overlay);
+            cell.appendChild(content);
         }
         renderVmlPicture(elem) {
             return this.renderContainer(elem, "div");
@@ -5518,7 +5931,8 @@ section.${c}>ol>li::before {
             return this.toHTML(elem, ns.mathML, "mtable", children);
         }
         toH(elem, ns, tagName, children = null) {
-            const { "$lang": lang, ...style } = elem.cssStyle ?? {};
+            const { "$lang": rawLang, ...style } = elem.cssStyle ?? {};
+            const lang = isValidBcp47LanguageTag(rawLang) ? rawLang : undefined;
             const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
             return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) };
         }
@@ -5972,6 +6386,19 @@ section.${c}>ol>li::before {
             return null;
         if (cutIndex === rows.length - 1)
             return null;
+        const nextRow = rows[cutIndex + 1];
+        if (nextRow && nextRow.hasAttribute('data-cant-split')) {
+            let safe = cutIndex;
+            while (safe >= 0) {
+                const candidate = rows[safe + 1];
+                if (!candidate || !candidate.hasAttribute('data-cant-split'))
+                    break;
+                safe--;
+            }
+            if (safe >= 0) {
+                cutIndex = safe;
+            }
+        }
         const tail = table.cloneNode(false);
         tail.removeAttribute('id');
         const colgroup = table.querySelector(':scope > colgroup');
