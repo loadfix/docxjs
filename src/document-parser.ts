@@ -969,29 +969,58 @@ export class DocumentParser {
 		var result = <OpenXmlElement>{ type: DomType.Drawing, children: [], cssStyle: {} };
 		var isAnchor = node.localName == "anchor";
 
-		//TODO
-		// result.style["margin-left"] = xml.sizeAttr(node, "distL", SizeType.Emu);
-		// result.style["margin-top"] = xml.sizeAttr(node, "distT", SizeType.Emu);
-		// result.style["margin-right"] = xml.sizeAttr(node, "distR", SizeType.Emu);
-		// result.style["margin-bottom"] = xml.sizeAttr(node, "distB", SizeType.Emu);
+		// DrawingML stores offsets in English Metric Units: 914400 EMU = 1 inch = 96 CSS pixels.
+		// For dist*/wrapPolygon we want CSS pixels, so divide by 9525.
+		const EMU_PER_PX = 9525;
 
-		let wrapType: "wrapTopAndBottom" | "wrapNone" | null = null;
+		// Allowlists for DOCX-derived enum values so they can be used safely in CSS strings.
+		const WRAP_TEXT_ALLOWED = new Set(["bothSides", "left", "right", "largest"]);
+		const RELATIVE_FROM_ALLOWED = new Set([
+			"margin", "page", "column", "character", "leftMargin", "rightMargin",
+			"insideMargin", "outsideMargin", "paragraph", "line", "topMargin",
+			"bottomMargin"
+		]);
+
+		// dist* attributes are EMU integers describing padding around the wrapped shape.
+		// Parsed as floats explicitly so DOCX-controlled text never reaches a template
+		// literal unchecked.
+		const distT = xml.floatAttr(node, "distT", 0);
+		const distB = xml.floatAttr(node, "distB", 0);
+		const distL = xml.floatAttr(node, "distL", 0);
+		const distR = xml.floatAttr(node, "distR", 0);
+		const marginTopPx = (distT || 0) / EMU_PER_PX;
+		const marginBottomPx = (distB || 0) / EMU_PER_PX;
+		const marginLeftPx = (distL || 0) / EMU_PER_PX;
+		const marginRightPx = (distR || 0) / EMU_PER_PX;
+
+		let wrapType: "wrapTopAndBottom" | "wrapNone" | "wrapSquare" | "wrapTight" | "wrapThrough" | null = null;
+		let wrapText: string | null = null;
+		let wrapPolygonPoints: Array<[number, number]> | null = null;
 		let simplePos = xml.boolAttr(node, "simplePos");
 		let behindDoc = xml.boolAttr(node, "behindDoc");
 
-		let posX = { relative: "page", align: "left", offset: "0" };
-		let posY = { relative: "page", align: "top", offset: "0" };
+		// Raw extent in EMU (used for polygon coord scaling). cssStyle width/height
+		// keep their existing pt representation for back-compat.
+		let extentCx = 0;
+		let extentCy = 0;
+
+		let posX = { relative: "page", align: "left", offset: "0", offsetEmu: 0 };
+		let posY = { relative: "page", align: "top", offset: "0", offsetEmu: 0 };
 
 		for (var n of xml.elements(node)) {
 			switch (n.localName) {
 				case "simplePos":
 					if (simplePos) {
+						posX.offsetEmu = xml.floatAttr(n, "x", 0) || 0;
+						posY.offsetEmu = xml.floatAttr(n, "y", 0) || 0;
 						posX.offset = xml.lengthAttr(n, "x", LengthUsage.Emu);
 						posY.offset = xml.lengthAttr(n, "y", LengthUsage.Emu);
 					}
 					break;
 
 				case "extent":
+					extentCx = xml.floatAttr(n, "cx", 0) || 0;
+					extentCy = xml.floatAttr(n, "cy", 0) || 0;
 					result.cssStyle["width"] = xml.lengthAttr(n, "cx", LengthUsage.Emu);
 					result.cssStyle["height"] = xml.lengthAttr(n, "cy", LengthUsage.Emu);
 					break;
@@ -1008,8 +1037,11 @@ export class DocumentParser {
 						if (alignNode)
 							pos.align = alignNode.textContent;
 
-						if (offsetNode)
+						if (offsetNode) {
 							pos.offset = convertLength(offsetNode.textContent, LengthUsage.Emu);
+							const parsed = parseFloat(offsetNode.textContent);
+							pos.offsetEmu = Number.isFinite(parsed) ? parsed : 0;
+						}
 					}
 					break;
 
@@ -1021,6 +1053,33 @@ export class DocumentParser {
 					wrapType = "wrapNone";
 					break;
 
+				case "wrapSquare":
+					wrapType = "wrapSquare";
+					wrapText = xml.attr(n, "wrapText");
+					break;
+
+				case "wrapTight":
+				case "wrapThrough":
+					wrapType = n.localName as "wrapTight" | "wrapThrough";
+					wrapText = xml.attr(n, "wrapText");
+					{
+						const polyNode = xml.element(n, "wrapPolygon");
+						if (polyNode) {
+							const pts: Array<[number, number]> = [];
+							for (const child of xml.elements(polyNode)) {
+								if (child.localName !== "start" && child.localName !== "lineTo")
+									continue;
+								const x = xml.floatAttr(child, "x", NaN);
+								const y = xml.floatAttr(child, "y", NaN);
+								if (Number.isFinite(x) && Number.isFinite(y))
+									pts.push([x, y]);
+							}
+							if (pts.length >= 3)
+								wrapPolygonPoints = pts;
+						}
+					}
+					break;
+
 				case "graphic":
 					var g = this.parseGraphic(n);
 
@@ -1029,6 +1088,52 @@ export class DocumentParser {
 					break;
 			}
 		}
+
+		// Validate DOCX-derived enums against the allowlists before they reach any
+		// CSS string — the browser does not sanitise CSS property values.
+		const safeWrapText = wrapText && WRAP_TEXT_ALLOWED.has(wrapText) ? wrapText : null;
+		const safeRelativeH = RELATIVE_FROM_ALLOWED.has(posX.relative) ? posX.relative : "page";
+
+		// Decide which side the image floats on for the flowing-text wrap modes.
+		// "left" wrapText means text flows only on the left side — the image sits
+		// on the right, so it floats right. Mirror for "right". For "bothSides" /
+		// "largest" we fall back to the anchor's horizontal alignment (treating
+		// "center" as left).
+		const floatFromWrapText = (wt: string | null, align: string): "left" | "right" => {
+			if (wt === "left") return "right";
+			if (wt === "right") return "left";
+			if (align === "right") return "right";
+			return "left";
+		};
+
+		const applyMarginsToStyle = () => {
+			if (distT) result.cssStyle["margin-top"] = `${marginTopPx.toFixed(2)}px`;
+			if (distB) result.cssStyle["margin-bottom"] = `${marginBottomPx.toFixed(2)}px`;
+			if (distL) result.cssStyle["margin-left"] = `${marginLeftPx.toFixed(2)}px`;
+			if (distR) result.cssStyle["margin-right"] = `${marginRightPx.toFixed(2)}px`;
+		};
+
+		const applyShapeMargin = () => {
+			// shape-margin takes a single length. Use the largest dist* so text
+			// keeps a safe gap from the shape on every side.
+			const maxDist = Math.max(marginTopPx, marginBottomPx, marginLeftPx, marginRightPx);
+			if (maxDist > 0)
+				result.cssStyle["shape-margin"] = `${maxDist.toFixed(2)}px`;
+		};
+
+		const buildPolygonCss = (): string | null => {
+			if (!wrapPolygonPoints || wrapPolygonPoints.length < 3) return null;
+			if (extentCx <= 0 || extentCy <= 0) return null;
+			// Polygon points in wp:wrapPolygon are in EMU relative to the shape
+			// bounding box (extent cx/cy). Emitting percentages lets the polygon
+			// scale with the image element's box.
+			const segs = wrapPolygonPoints.map(([x, y]) => {
+				const px = (x / extentCx) * 100;
+				const py = (y / extentCy) * 100;
+				return `${px.toFixed(2)}% ${py.toFixed(2)}%`;
+			});
+			return `polygon(${segs.join(", ")})`;
+		};
 
 		if (wrapType == "wrapTopAndBottom") {
 			result.cssStyle['display'] = 'block';
@@ -1048,6 +1153,48 @@ export class DocumentParser {
 				result.cssStyle["left"] = posX.offset;
 			if (posY.offset)
 				result.cssStyle["top"] = posY.offset;
+		}
+		else if (wrapType == "wrapSquare" || wrapType == "wrapTight" || wrapType == "wrapThrough") {
+			const floatSide = floatFromWrapText(safeWrapText, posX.align);
+
+			// relativeFrom=margin → behave like a plain float (current default).
+			// relativeFrom=column → inline-block pulled into the text flow via a
+			//   negative margin on the opposite side of the float.
+			// relativeFrom=paragraph → absolute positioning using posX.offsetEmu
+			//   converted to px.
+			if (safeRelativeH === "paragraph") {
+				result.cssStyle["position"] = "absolute";
+				const leftPx = (posX.offsetEmu || 0) / EMU_PER_PX;
+				result.cssStyle["left"] = `${leftPx.toFixed(2)}px`;
+				if (posY.offsetEmu) {
+					const topPx = (posY.offsetEmu || 0) / EMU_PER_PX;
+					result.cssStyle["top"] = `${topPx.toFixed(2)}px`;
+				}
+				applyMarginsToStyle();
+			} else if (safeRelativeH === "column") {
+				result.cssStyle["display"] = "inline-block";
+				result.cssStyle["float"] = floatSide;
+				// Pull the shape slightly into the column by negating the
+				// corresponding dist* so text wraps tightly against the text
+				// column edge.
+				applyMarginsToStyle();
+				if (floatSide === "left" && distL)
+					result.cssStyle["margin-left"] = `${(-marginLeftPx).toFixed(2)}px`;
+				else if (floatSide === "right" && distR)
+					result.cssStyle["margin-right"] = `${(-marginRightPx).toFixed(2)}px`;
+			} else {
+				// "margin" (and any other allowlisted relativeFrom) — plain float.
+				result.cssStyle["float"] = floatSide;
+				applyMarginsToStyle();
+			}
+
+			applyShapeMargin();
+
+			if (wrapType === "wrapTight" || wrapType === "wrapThrough") {
+				const polyCss = buildPolygonCss();
+				if (polyCss)
+					result.cssStyle["shape-outside"] = polyCss;
+			}
 		}
 		else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
 			result.cssStyle["float"] = posX.align;
