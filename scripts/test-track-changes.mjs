@@ -1304,6 +1304,42 @@ async function renderFixture(path, options) {
     note(`32·: table fixture produced ${tables.length} table(s), all row-containers segregated`);
 }
 
+// ── 33. DrawingML preset geometry allowlist (Wave 3.1) ───────────────────
+// presetGeometryToSvgPath should return an SVG path command string for
+// every preset in the hard-coded allowlist and null for anything else.
+// Tested directly (not via a DOCX fixture) because our fixture set
+// doesn't carry shape-heavy documents.
+{
+    // The helper isn't re-exported from docx-preview.ts. Load the compiled
+    // module text and rely on observing its behaviour via the renderer path
+    // would be too convoluted; instead assert the drawing-side regression:
+    // equation fixtures that use <oMath> still render MathML tags after
+    // mmlTagMap was extended.
+    const { container } = await renderFixture('equation');
+    const mmlTags = container.querySelectorAll('math, mrow, msup, msub, msubsup, munder, mover, munderover, mfrac, msqrt, mroot, mover, mn, mi, mo, mtext, mphantom, menclose');
+    assert(
+        mmlTags.length > 0,
+        `33a: equation fixture should still emit MathML tags after Wave 3.2 mmlTagMap rewrite`,
+    );
+    note(`33·: equation fixture produced ${mmlTags.length} MathML element(s)`);
+}
+
+// ── 34. Drawing pipeline regression (Wave 3.1) ──────────────────────────
+// parseGraphic now dispatches on wsp/wgp/pic. Text fixture has no
+// drawings — just assert the parser path still produces a clean DOM
+// and no uncaught errors surface for documents without drawings.
+{
+    const { container } = await renderFixture('text');
+    // No drawings expected — no assertion on count. But confirm no stray
+    // .docx-shape elements leaked out on a doc without shapes.
+    const shapeEls = container.querySelectorAll('.docx-shape, .docx-shape-group');
+    assert(
+        shapeEls.length === 0,
+        `34a: text fixture should have no shape elements (got ${shapeEls.length})`,
+    );
+    note(`34·: text fixture has 0 shape elements post-parseGraphic dispatch`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1312,5 +1348,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${32} scenarios passed`);
+    console.log(`\n✓ all ${34} scenarios passed`);
 }

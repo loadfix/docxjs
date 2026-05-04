@@ -27,7 +27,11 @@ export function h(elem: HElement | Node | string) {
     if (style) {
         if (isString(style)) {
             result.setAttribute("style", style);
-        } else {
+        } else if (result.style) {
+            // MathML elements in some jsdom versions don't expose a .style
+            // IDL object. Real browsers do — the renderer never loses styles
+            // in production. This guard keeps the jsdom test harness from
+            // crashing while leaving browser behaviour unchanged.
             Object.assign(result.style, style);
         }
     }
