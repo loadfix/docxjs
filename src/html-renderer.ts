@@ -1106,22 +1106,70 @@ section.${c}>ol>li::before {
 			else if (num.levelText) {
 				let counter = this.numberingCounter(num.id, num.level);
 				const counterReset = counter + " " + (num.start - 1);
-				if (num.level > 0) {
-					styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
+				// w:lvlRestart picks an explicit ancestor level (0-based) at
+				// which this counter restarts. Its default (undefined / -1) is
+				// "restart at parent" — matched by the counter-set on the
+				// immediate parent-level selector below. A value of 0 means
+				// "never restart" in DOCX; we honour that by skipping the
+				// parent-level counter-set entirely. Any other value K maps to
+				// counter-reset on the K-level paragraph selector.
+				const restart = num.restart;
+				const restartDefault = restart === undefined || restart === -1;
+				if (restartDefault) {
+					if (num.level > 0) {
+						styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
+							"counter-set": counterReset
+						});
+					}
+				} else if (Number.isInteger(restart) && restart > 0 && restart <= num.level) {
+					// ECMA-376 w:lvlRestart is the 1-based ancestor level at
+					// which the counter resets. Our internal levels are
+					// 0-based, so a restart of K corresponds to the ancestor
+					// paragraph at ilvl = K - 1. Only meaningful for K <=
+					// current level; deeper targets are ignored.
+					styleText += this.styleToString(`p.${this.numberingClass(num.id, restart - 1)}`, {
 						"counter-set": counterReset
 					});
 				}
+				// When restart === 0, no per-ancestor reset is emitted: the
+				// counter keeps incrementing until the whole-document reset.
+
 				// reset all level counters with start value
 				resetCounters.push(counterReset);
 
 				// `levelTextToContent` escapes the attacker-controlled literal
 				// chunks before composing the `content` expression; counter
-				// names / numformat are validated above.
-				styleText += this.styleToString(`${selector}:before`, {
-					"content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
+				// names / numformat are validated above. `isLgl` forces every
+				// %N placeholder in the level text to arabic regardless of
+				// that level's own numFmt.
+				const levelFormat = this.numFormatToCssValue(num.format);
+				const beforeStyle: Record<string, string> = {
+					"content": this.levelTextToContent(
+						num.levelText,
+						num.suff,
+						num.id,
+						levelFormat,
+						num.isLgl === true,
+					),
 					"counter-increment": counter,
 					...num.rStyle,
-				});
+				};
+				// w:lvlJc — map to text-align on the marker container. Only
+				// emit values from the explicit allow list so a DOCX-derived
+				// string can't land raw in CSS. (jc is a type-safe enum in
+				// the schema, but we validate anyway.)
+				const justifyMap: Record<string, string> = {
+					left: "left",
+					right: "right",
+					center: "center",
+					start: "start",
+					end: "end",
+				};
+				const justify = num.justification && justifyMap[num.justification];
+				if (justify) {
+					beforeStyle["text-align"] = justify;
+				}
+				styleText += this.styleToString(`${selector}:before`, beforeStyle);
 			}
 			else {
 				listStyleType = this.numFormatToCssValue(num.format);
@@ -1136,6 +1184,10 @@ section.${c}>ol>li::before {
 		}
 
 		if (resetCounters.length > 0) {
+			// Each num/level counter appears here exactly once because the
+			// parser emits one IDomNumbering per (numId, level). Two <w:num>s
+			// sharing an abstractNumId therefore get independent counters
+			// rooted at the document root — Word's behaviour.
 			styleText += this.styleToString(this.rootSelector, {
 				"counter-reset": resetCounters.join(" ")
 			});
@@ -2197,13 +2249,18 @@ section.${c}>ol>li::before {
 		return `${this.className}-num-${id}-${lvl}`;
 	}
 
-	levelTextToContent(text: string, suff: string, id: string, numformat: string) {
+	levelTextToContent(text: string, suff: string, id: string, numformat: string, isLgl: boolean = false) {
 		// text, id, and numformat are all derived from DOCX. Callers have
 		// already validated `id` and `numformat`; the `text` body is the last
 		// DOCX-controlled value that lands inside a CSS `content` string, so
 		// we escape `\` and `"` before embedding. Without this, a crafted
 		// levelText of `"}a{background:url(…)}"` would break out of the
 		// declaration block. See SECURITY_REVIEW.md #3.
+		//
+		// When `isLgl` is true (w:isLgl), every %N placeholder in the level
+		// text must render as arabic even if the referenced level's own
+		// numFmt is roman/alpha/etc. We achieve that by hard-coding the
+		// counter() format argument to `decimal` for sub-level references.
 		const suffMap = {
 			"tab": "\\9",
 			"space": "\\a0",
@@ -2222,7 +2279,10 @@ section.${c}>ol>li::before {
 				parts.push(`"${escapeCssStringContent(text.slice(last, m.index))}"`);
 			}
 			const lvl = parseInt(m[0].substring(1), 10) - 1;
-			parts.push(`counter(${this.numberingCounter(id, lvl)}, ${numformat})`);
+			// isLgl: force arabic on every placeholder. The literal `decimal`
+			// is a CSS-builtin keyword so this is safe.
+			const fmt = isLgl ? "decimal" : numformat;
+			parts.push(`counter(${this.numberingCounter(id, lvl)}, ${fmt})`);
 			last = re.lastIndex;
 		}
 		if (last < text.length) {

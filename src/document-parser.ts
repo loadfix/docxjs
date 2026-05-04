@@ -432,15 +432,22 @@ export class DocumentParser {
 	}
 
 	parseNumberingFile(node: Element): IDomNumbering[] {
-		var result = [];
-		var mapping = {};
+		// Group abstract-num levels by their abstractNumId so each <w:num>
+		// can clone and optionally override them. The previous implementation
+		// kept a single abstractNumId -> numId map, which silently dropped
+		// every <w:num> but the last when several nums shared an abstract —
+		// a pattern common in legal / spec documents where the second list
+		// is supposed to restart its counter. Emitting one entry per
+		// (numId, level) lets each num own a distinct CSS counter.
+		var abstractLevels: Record<string, IDomNumbering[]> = {};
 		var bullets = [];
+		var numElements: Element[] = [];
 
 		for (const n of xml.elements(node)) {
 			switch (n.localName) {
 				case "abstractNum":
-					this.parseAbstractNumbering(n, bullets)
-						.forEach(x => result.push(x));
+					var absId = xml.attr(n, "abstractNumId");
+					abstractLevels[absId] = this.parseAbstractNumbering(n, bullets);
 					break;
 
 				case "numPicBullet":
@@ -448,14 +455,72 @@ export class DocumentParser {
 					break;
 
 				case "num":
-					var numId = xml.attr(n, "numId");
-					var abstractNumId = xml.elementAttr(n, "abstractNumId", "val");
-					mapping[abstractNumId] = numId;
+					// Defer until all abstractNums are collected (DOCX files
+					// may list nums before abstracts, though this is rare).
+					numElements.push(n);
 					break;
 			}
 		}
 
-		result.forEach(x => x.id = mapping[x.id]);
+		var result: IDomNumbering[] = [];
+		for (const n of numElements) {
+			var numId = xml.attr(n, "numId");
+			var abstractNumId = xml.elementAttr(n, "abstractNumId", "val");
+			var baseLevels = abstractLevels[abstractNumId];
+			if (!baseLevels) continue;
+
+			// Parse lvlOverride entries keyed by ilvl.
+			var overrides: Record<number, { start?: number; level?: IDomNumbering }> = {};
+			for (const child of xml.elements(n, "lvlOverride")) {
+				var ilvl = xml.intAttr(child, "ilvl");
+				var entry: { start?: number; level?: IDomNumbering } = {};
+				for (const sub of xml.elements(child)) {
+					if (sub.localName === "startOverride") {
+						entry.start = xml.intAttr(sub, "val");
+					} else if (sub.localName === "lvl") {
+						entry.level = this.parseNumberingLevel(abstractNumId, sub, bullets);
+					}
+				}
+				overrides[ilvl] = entry;
+			}
+
+			for (const base of baseLevels) {
+				// Shallow-clone the level so each num owns its own copy.
+				// pStyle / rStyle are nested objects the renderer mutates via
+				// spread, so we clone those too.
+				var clone: IDomNumbering = {
+					...base,
+					pStyle: { ...base.pStyle },
+					rStyle: { ...base.rStyle },
+					id: numId,
+				};
+				var ov = overrides[base.level];
+				if (ov) {
+					if (ov.level) {
+						// Property-level override: any field present on the
+						// override <w:lvl> replaces the abstract value.
+						if (ov.level.start !== undefined) clone.start = ov.level.start;
+						if (ov.level.levelText !== undefined) clone.levelText = ov.level.levelText;
+						if (ov.level.format !== undefined) clone.format = ov.level.format;
+						if (ov.level.suff !== undefined) clone.suff = ov.level.suff;
+						if (ov.level.restart !== undefined) clone.restart = ov.level.restart;
+						if (ov.level.justification !== undefined) clone.justification = ov.level.justification;
+						if (ov.level.isLgl !== undefined) clone.isLgl = ov.level.isLgl;
+						if (ov.level.bullet !== undefined) clone.bullet = ov.level.bullet;
+						if (ov.level.pStyleName !== undefined) clone.pStyleName = ov.level.pStyleName;
+						if (ov.level.pStyle && Object.keys(ov.level.pStyle).length) {
+							clone.pStyle = { ...clone.pStyle, ...ov.level.pStyle };
+						}
+						if (ov.level.rStyle && Object.keys(ov.level.rStyle).length) {
+							clone.rStyle = { ...clone.rStyle, ...ov.level.rStyle };
+						}
+					}
+					// startOverride wins over any property-level start.
+					if (ov.start !== undefined) clone.start = ov.start;
+				}
+				result.push(clone);
+			}
+		}
 
 		return result;
 	}
@@ -531,6 +596,29 @@ export class DocumentParser {
 
 				case "suff":
 					result.suff = xml.attr(n, "val");
+					break;
+
+				case "lvlRestart":
+					// w:val is the 1-based ancestor level at which this level's
+					// counter restarts. Absence of the element (undefined here)
+					// means "default — restart at the parent level".
+					result.restart = xml.intAttr(n, "val");
+					break;
+
+				case "lvlJc":
+					// left | right | center | start | end; validated at render
+					// time before emission into CSS.
+					result.justification = xml.attr(n, "val");
+					break;
+
+				case "isLgl":
+					// w:isLgl is a boolean toggle-element. When present with no
+					// val / val=1 / val="true", every %N placeholder in lvlText
+					// must render as arabic, regardless of that lower level's
+					// own numFmt.
+					var lglVal = xml.attr(n, "val");
+					result.isLgl = lglVal === undefined || lglVal === "" ||
+						lglVal === "1" || lglVal === "true" || lglVal === "on";
 					break;
 			}
 		}
