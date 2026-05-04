@@ -18,6 +18,110 @@ import { sanitizeCssColor } from '../utils';
 import { ns } from '../html';
 import { DrawingShape, DrawingGroup } from '../document/drawing';
 
+// Parsed <a:custGeom>. `paths` holds one entry per <a:path> inside
+// <a:pathLst>; the `d` string is already in path-local coordinates
+// (0..w, 0..h). The renderer scales those to the shape's px render
+// size. See customGeometryToSvgPaths below.
+//
+// Security: every number reaching `d` has been coerced through
+// Number.isFinite in the parser; the command letters are hard-coded
+// in the parser/renderer. No DOCX string ever reaches an SVG
+// attribute via this type.
+export interface CustomGeometry {
+    paths: Array<{
+        w: number;   // path-local coordinate space width
+        h: number;   // path-local coordinate space height
+        d: string;   // SVG path data string, path-local coords
+    }>;
+}
+
+// Rescales a custGeom path `d` string from path-local coordinates
+// (0..w, 0..h) to the shape's render pixel coordinates. Because the
+// `d` string is composed by the parser from a fixed vocabulary of
+// command letters plus numeric tokens, we can safely tokenize and
+// multiply without risk of injecting attacker-controlled content —
+// any non-numeric token that isn't a known command letter is
+// dropped.
+const VALID_COMMANDS = new Set(['M', 'L', 'C', 'Q', 'A', 'Z']);
+
+function scalePathD(
+    d: string,
+    pathW: number,
+    pathH: number,
+    renderW: number,
+    renderH: number,
+): string {
+    if (pathW <= 0 || pathH <= 0) return '';
+    const sx = renderW / pathW;
+    const sy = renderH / pathH;
+    // Tokens are whitespace-separated in parser output. Inside an
+    // arc's 6-tuple, args 3 (x-axis-rotation) and 4/5 (large-arc /
+    // sweep flags) are not coordinates; track argument index per
+    // command to scale only the positional values.
+    const tokens = d.split(/\s+/).filter(Boolean);
+    let out = '';
+    let cmd = '';
+    let argIdx = 0;
+    const argsPerCmd: Record<string, number> = {
+        M: 2, L: 2, C: 6, Q: 4, A: 7, Z: 0,
+    };
+    for (const t of tokens) {
+        if (VALID_COMMANDS.has(t)) {
+            cmd = t;
+            argIdx = 0;
+            out += (out ? ' ' : '') + cmd;
+            continue;
+        }
+        const n = Number(t);
+        if (!Number.isFinite(n)) continue;
+        let v = n;
+        // For arc commands the 3rd (x-axis rotation), 4th (large-arc
+        // flag), and 5th (sweep flag) arguments are not scaled. Radii
+        // (args 0, 1) and endpoint (args 5, 6) are scaled.
+        if (cmd === 'A') {
+            const ai = argIdx % 7;
+            if (ai === 0) v = n * sx;        // rx
+            else if (ai === 1) v = n * sy;   // ry
+            else if (ai === 2) v = n;         // x-axis-rotation
+            else if (ai === 3) v = n;         // large-arc-flag
+            else if (ai === 4) v = n;         // sweep-flag
+            else if (ai === 5) v = n * sx;   // x
+            else v = n * sy;                  // y
+        } else if (argsPerCmd[cmd]) {
+            const ai = argIdx % argsPerCmd[cmd];
+            v = ai % 2 === 0 ? n * sx : n * sy;
+        }
+        out += ' ' + (Number.isFinite(v) ? v : 0);
+        argIdx++;
+    }
+    return out;
+}
+
+/**
+ * Convert each parsed custGeom path into a render-space SVG `d`
+ * string scaled to (renderWidth, renderHeight) px. Returns one entry
+ * per path. Empty array if `renderWidth` / `renderHeight` are
+ * non-positive.
+ */
+export function customGeometryToSvgPaths(
+    custGeom: CustomGeometry,
+    renderWidth: number,
+    renderHeight: number,
+): string[] {
+    if (!custGeom || !custGeom.paths || renderWidth <= 0 || renderHeight <= 0) {
+        return [];
+    }
+    const out: string[] = [];
+    for (const p of custGeom.paths) {
+        if (!p || !p.d) continue;
+        if (!Number.isFinite(p.w) || !Number.isFinite(p.h)) continue;
+        if (p.w <= 0 || p.h <= 0) continue;
+        const scaled = scalePathD(p.d, p.w, p.h, renderWidth, renderHeight);
+        if (scaled) out.push(scaled);
+    }
+    return out;
+}
+
 // Default DrawingML text-frame insets, EMU. Used when <wps:bodyPr>
 // omits lIns/tIns/rIns/bIns.
 const DEFAULT_INSET_LR_EMU = 91440;
@@ -364,50 +468,57 @@ export function renderShape(
     svg.style.inset = '0';
     svg.style.overflow = 'visible';
 
-    const d =
-        presetGeometryToSvgPath(shape.presetGeometry || 'rect', widthPx, heightPx)
-        // custGeom / unknown preset → plain rectangle placeholder.
-        ?? presetGeometryToSvgPath('rect', widthPx, heightPx);
+    // Determine which `d` strings to emit. Custom geometry wins when
+    // present; otherwise fall back to the preset allowlist. Final
+    // fallback is a plain rectangle so an unknown preset still
+    // renders something visible.
+    const customDs =
+        shape.custGeom && shape.custGeom.paths && shape.custGeom.paths.length > 0
+            ? customGeometryToSvgPaths(shape.custGeom, widthPx, heightPx)
+            : [];
+    const presetD = customDs.length === 0
+        ? (presetGeometryToSvgPath(shape.presetGeometry || 'rect', widthPx, heightPx)
+            ?? presetGeometryToSvgPath('rect', widthPx, heightPx))
+        : null;
+    const dStrings = customDs.length > 0 ? customDs : (presetD ? [presetD] : []);
 
-    const path = document.createElementNS(ns.svg, 'path');
-    path.setAttribute('d', d!);
-
-    // Fill. `sanitizeCssColor` returns null for anything that isn't a
-    // pure hex / rgb()/hsl() value.
+    // Resolve fill / stroke once — the same attributes apply to every
+    // path we emit for this shape.
+    let fillAttr = '#4472C4';
     if (shape.fill && shape.fill.type === 'solid') {
         const c = sanitizeCssColor(shape.fill.color);
-        path.setAttribute('fill', c ?? 'none');
+        fillAttr = c ?? 'none';
     } else if (shape.fill && shape.fill.type === 'none') {
-        path.setAttribute('fill', 'none');
-    } else {
-        // Word's default for an un-styled shape: light blue fill.
-        // We emit the literal string, not a DOCX-derived value.
-        path.setAttribute('fill', '#4472C4');
+        fillAttr = 'none';
     }
-
-    // Stroke.
-    if (shape.stroke) {
-        const stroke = sanitizeCssColor(shape.stroke.color);
-        if (stroke) path.setAttribute('stroke', stroke);
-        if (shape.stroke.width != null && Number.isFinite(shape.stroke.width)) {
-            const wPx = emuToPx(shape.stroke.width);
-            path.setAttribute('stroke-width', `${wPx.toFixed(2)}`);
-        }
-    } else {
-        // No <a:ln> authored — Word draws a 0.75pt stroke in the theme
-        // line colour. Emit a neutral fallback.
-        path.setAttribute('stroke', '#2F5496');
-        path.setAttribute('stroke-width', '1');
-    }
-
     // Preset `line` is an open path — force fill none regardless of
     // what the author set, otherwise the browser closes the stroke
     // into a triangle and floods it.
-    if (shape.presetGeometry === 'line') {
-        path.setAttribute('fill', 'none');
+    if (shape.presetGeometry === 'line' && customDs.length === 0) {
+        fillAttr = 'none';
     }
 
-    svg.appendChild(path);
+    let strokeAttr: string | null = '#2F5496';
+    let strokeWidthAttr: string | null = '1';
+    if (shape.stroke) {
+        strokeAttr = null;
+        strokeWidthAttr = null;
+        const stroke = sanitizeCssColor(shape.stroke.color);
+        if (stroke) strokeAttr = stroke;
+        if (shape.stroke.width != null && Number.isFinite(shape.stroke.width)) {
+            const wPx = emuToPx(shape.stroke.width);
+            strokeWidthAttr = `${wPx.toFixed(2)}`;
+        }
+    }
+
+    for (const d of dStrings) {
+        const path = document.createElementNS(ns.svg, 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('fill', fillAttr);
+        if (strokeAttr) path.setAttribute('stroke', strokeAttr);
+        if (strokeWidthAttr) path.setAttribute('stroke-width', strokeWidthAttr);
+        svg.appendChild(path);
+    }
     wrapper.appendChild(svg);
 
     // --- Text frame (<wps:txbx>/<w:txbxContent>) ---
