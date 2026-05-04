@@ -84,11 +84,59 @@ export enum DomType {
 
 // Structured Document Tag (content control). Parsed from w:sdt when
 // w:sdtPr contains a w:alias or w:tag — otherwise parseSdt unwraps
-// directly to sdtContent children. See parseSdt in document-parser.ts
-// and the DomType.Sdt branch of renderElement in html-renderer.ts.
+// directly to sdtContent children (unless a typed form control is
+// detected below, which also forces a wrapper). See parseSdt in
+// document-parser.ts and the DomType.Sdt branch of renderElement in
+// html-renderer.ts.
 export interface WmlSdt extends OpenXmlElement {
     sdtAlias?: string;
     sdtTag?: string;
+    sdtControl?: SdtControl;
+}
+
+// Typed form-control metadata extracted from w:sdtPr. All DOCX-derived
+// string fields (displayText, value, format, fullDate) are attacker
+// controlled — they must only reach the DOM via setAttribute /
+// textContent, never innerHTML or className interpolation.
+export type SdtControl =
+    | SdtCheckboxControl
+    | SdtDropdownControl
+    | SdtDateControl
+    | SdtPictureControl
+    | SdtGalleryControl;
+
+export interface SdtCheckboxControl {
+    type: "checkbox";
+    checked: boolean;
+    checkedChar?: number;
+    uncheckedChar?: number;
+}
+
+export interface SdtDropdownItem {
+    displayText: string;
+    value: string;
+}
+
+export interface SdtDropdownControl {
+    // Shared shape for w:dropDownList and w:comboBox — the only rendering
+    // difference Word draws between them (editable combo vs strict list)
+    // doesn't apply in a read-only HTML view, so both emit <select>.
+    type: "dropdown";
+    items: SdtDropdownItem[];
+}
+
+export interface SdtDateControl {
+    type: "date";
+    format?: string;
+    fullDate?: string;
+}
+
+export interface SdtPictureControl {
+    type: "picture";
+}
+
+export interface SdtGalleryControl {
+    type: "gallery";
 }
 
 export interface Revision {

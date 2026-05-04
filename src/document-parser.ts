@@ -2,7 +2,7 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk, Revision, FormattingRevision, WmlSdt,
+	WmlAltChunk, Revision, FormattingRevision, WmlSdt, SdtControl, SdtCheckboxControl,
 	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
 import { DrawingShape, DrawingGroup } from './document/drawing';
@@ -642,23 +642,94 @@ export class DocumentParser {
 
 		// w:sdtPr holds the content-control metadata. w:alias is the visible
 		// label ("Publication Date", etc.); w:tag is the programmatic id.
-		// When either is present we wrap the content so the renderer can emit
-		// a role="group" with an aria-label — otherwise we unwrap as before.
+		// When either is present — or a typed form control (checkbox,
+		// dropdown, date, picture, gallery) is detected — we wrap the
+		// content so the renderer can emit an a11y group and/or form
+		// control. Otherwise we unwrap as before.
 		const sdtPr = xml.element(node, "sdtPr");
 		if (sdtPr) {
 			const aliasEl = xml.element(sdtPr, "alias");
 			const tagEl = xml.element(sdtPr, "tag");
 			const alias = aliasEl ? xml.attr(aliasEl, "val") : null;
 			const tag = tagEl ? xml.attr(tagEl, "val") : null;
-			if (alias || tag) {
+			const control = this.parseSdtControl(sdtPr);
+			if (alias || tag || control) {
 				const wrapper: WmlSdt = { type: DomType.Sdt, children };
 				if (alias) wrapper.sdtAlias = alias;
 				if (tag) wrapper.sdtTag = tag;
+				if (control) wrapper.sdtControl = control;
 				return [wrapper];
 			}
 		}
 
 		return children;
+	}
+
+	// Inspect w:sdtPr for a typed content-control marker. Matches are by
+	// localName so w14:* elements are found regardless of namespace prefix,
+	// the same pattern xml.element() uses elsewhere.
+	private parseSdtControl(sdtPr: Element): SdtControl | null {
+		for (const el of xml.elements(sdtPr)) {
+			switch (el.localName) {
+				case "checkbox": {
+					// w14:checkbox — children w14:checked, w14:checkedState,
+					// w14:uncheckedState each carry a w14:val.
+					const checkedEl = xml.element(el, "checked");
+					const checkedStateEl = xml.element(el, "checkedState");
+					const uncheckedStateEl = xml.element(el, "uncheckedState");
+					const checkedRaw = checkedEl ? xml.attr(checkedEl, "val") : null;
+					const checked = checkedRaw === "1" || checkedRaw === "true";
+					// w14:checkedState w14:val is always a hex codepoint
+					// ("2611" for ☑, "2610" for ☐). Renderer currently emits a
+					// native <input type="checkbox"> and doesn't use these,
+					// but they're captured for any future glyph-style render.
+					const checkedChar = checkedStateEl ? xml.hexAttr(checkedStateEl, "val") : undefined;
+					const uncheckedChar = uncheckedStateEl ? xml.hexAttr(uncheckedStateEl, "val") : undefined;
+					const result: SdtCheckboxControl = { type: "checkbox", checked };
+					if (checkedChar != null) result.checkedChar = checkedChar;
+					if (uncheckedChar != null) result.uncheckedChar = uncheckedChar;
+					return result;
+				}
+				case "dropDownList":
+				case "comboBox": {
+					// Both carry the same w:listItem children. Word
+					// distinguishes editable vs strict, but in a read-only
+					// renderer both collapse to a disabled <select>.
+					const items: { displayText: string; value: string }[] = [];
+					for (const li of xml.elements(el, "listItem")) {
+						const displayText = xml.attr(li, "displayText");
+						const value = xml.attr(li, "value");
+						items.push({
+							displayText: displayText ?? value ?? "",
+							value: value ?? displayText ?? ""
+						});
+					}
+					return { type: "dropdown", items };
+				}
+				case "date":
+				case "sdtDate": {
+					// Both w:date and w14:sdtDate are observed in the wild.
+					const formatEl = xml.element(el, "dateFormat");
+					const fullDateEl = xml.element(el, "fullDate");
+					const format = formatEl ? xml.attr(formatEl, "val") : null;
+					// w:date often has a w:fullDate attribute on the element
+					// itself rather than a child element.
+					const fullDateAttr = xml.attr(el, "fullDate");
+					const fullDate = fullDateEl ? xml.attr(fullDateEl, "val") : fullDateAttr;
+					return {
+						type: "date",
+						format: format ?? undefined,
+						fullDate: fullDate ?? undefined
+					};
+				}
+				case "picture":
+					return { type: "picture" };
+				case "docPartList":
+				case "docPartObj":
+					return { type: "gallery" };
+			}
+		}
+		return null;
 	}
 
 	parseInserted(node: Element, parentParser: Function): OpenXmlElement {
