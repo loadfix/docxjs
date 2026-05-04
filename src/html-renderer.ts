@@ -4,7 +4,8 @@ import {
 	WmlHyperlink, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlSmartTag,
 	WmlTableRow,
-	WmlSdt
+	WmlSdt,
+	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
@@ -29,8 +30,10 @@ import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReferen
 import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
-import { DrawingShape, DrawingGroup } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
 import { renderShape, renderShapeGroup } from './drawing/shapes';
+import { ChartPart } from './charts/chart-part';
+import { renderChart as renderChartSvg } from './charts/render';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -1605,6 +1608,9 @@ section.${c}>ol>li::before {
 			case DomType.DrawingGroup:
 				return this.renderDrawingShapeGroup(elem as DrawingGroup);
 
+			case DomType.Chart:
+				return this.renderChart(elem as DrawingChart);
+
 			case DomType.Text:
 				return this.renderText(elem as WmlText);
 
@@ -1761,6 +1767,26 @@ section.${c}>ol>li::before {
 
 			case DomType.Sdt:
 				return this.renderSdt(elem as WmlSdt);
+
+			case DomType.Ruby:
+				return this.renderRuby(elem as WmlRuby);
+
+			case DomType.RubyBase:
+				// Base characters — render inline; the <ruby> parent puts
+				// them before the <rt>. Wrapping in a <span> keeps child
+				// structure clean without adding semantic noise.
+				return this.renderContainer(elem, "span");
+
+			case DomType.RubyText:
+				// Ruby annotation — rendered as <rt> inside the parent
+				// <ruby>. See renderRuby.
+				return this.renderContainer(elem, "rt");
+
+			case DomType.FitText:
+				return this.renderFitText(elem as WmlFitText);
+
+			case DomType.BidiOverride:
+				return this.renderBidiOverride(elem as WmlBidiOverride);
 		}
 
 		return null;
@@ -2099,12 +2125,138 @@ section.${c}>ol>li::before {
 		return this.renderContainer(elem, "span");
 	}
 
-	// Structured Document Tag (content control). parseSdt only emits a
-	// DomType.Sdt wrapper when w:alias or w:tag is set on w:sdtPr — that's
-	// the only case where wrapping the content adds accessibility value.
-	// Otherwise the parser unwraps directly and this method isn't reached.
-	renderSdt(elem: WmlSdt) {
+	// w:ruby — phonetic guide. HTML's <ruby> takes the base text followed
+	// by <rt>, so we emit children in that order. The parser already splits
+	// the ruby into DomType.RubyBase and DomType.RubyText sub-elements —
+	// each of which renders as a <span> / <rt>. Ruby run contents go through
+	// renderElements → renderRun, inheriting all existing sanitisation. The
+	// only DOCX-derived strings on the ruby wrapper itself are rubyPr.lid
+	// (language tag) and rubyPr.hps (numeric); both land on attributes via
+	// setAttribute, which the browser encodes.
+	renderRuby(elem: WmlRuby) {
+		// Split children into RubyBase / RubyText ordering. DOCX allows the
+		// two in either order but HTML's <ruby> requires base first so the
+		// browser can align the annotation above it.
+		const baseNodes: OpenXmlElement[] = [];
+		const rtNodes: OpenXmlElement[] = [];
+		for (const c of elem.children ?? []) {
+			if (c.type === DomType.RubyText) rtNodes.push(c);
+			else baseNodes.push(c);
+		}
+		const children: Node[] = [
+			...this.renderElements(baseNodes),
+			...this.renderElements(rtNodes)
+		];
+		const rubyEl = this.h({ tagName: "ruby", children }) as HTMLElement;
+
+		if (elem.rubyPr?.lid) {
+			// Language tag — attribute-encoded by the browser.
+			rubyEl.setAttribute("lang", elem.rubyPr.lid);
+		}
+
+		return rubyEl;
+	}
+
+	// w:fitText — wrap the run content in an inline-block of a fixed point
+	// width. The width comes from DOCX as twips and is converted numerically
+	// (parseFloat in the parser) before being divided by 20 here — no raw
+	// DOCX string reaches CSS. For v1 we clip/constrain to the target width
+	// rather than scaling glyphs.
+	renderFitText(elem: WmlFitText) {
+		const widthTwips = typeof elem.width === "number" ? elem.width : parseFloat(elem.width as any);
 		const children = this.renderElements(elem.children);
+
+		if (!Number.isFinite(widthTwips) || widthTwips <= 0) {
+			// Target width is malformed — just render the contents unwrapped.
+			return this.h({ tagName: "span", children }) as HTMLElement;
+		}
+
+		const pt = widthTwips / 20;
+		const span = this.h({
+			tagName: "span",
+			children,
+			style: {
+				"display": "inline-block",
+				"width": `${pt}pt`,
+				"white-space": "nowrap",
+				"overflow": "hidden"
+			}
+		}) as HTMLElement;
+		return span;
+	}
+
+	// w:bdo — explicit bidi override. The dir value was already allowlisted
+	// against /^(ltr|rtl)$/ in parseRunProperties, so the field is safe to
+	// set via setAttribute. Defaults to "ltr" if somehow missing.
+	renderBidiOverride(elem: WmlBidiOverride) {
+		const dir = elem.dir === "rtl" ? "rtl" : "ltr";
+		const children = this.renderElements(elem.children);
+		const bdo = this.h({ tagName: "bdo", children }) as HTMLElement;
+		bdo.setAttribute("dir", dir);
+		return bdo;
+	}
+
+	// Structured Document Tag (content control). parseSdt emits a
+	// DomType.Sdt wrapper when w:alias / w:tag is set (Wave 1.4 a11y),
+	// or when a typed form control (checkbox, dropdown, date, picture,
+	// gallery) is detected in w:sdtPr. Otherwise the parser unwraps
+	// directly and this method isn't reached.
+	renderSdt(elem: WmlSdt) {
+		const control = elem.sdtControl;
+
+		// Checkbox: emit a disabled <input type="checkbox"> in place of the
+		// sdtContent glyph run. The w:sdtContent for a checkbox just holds
+		// the ☑ / ☐ character — replacing it with a real checkbox is a
+		// more useful read-only rendering.
+		let children: Node[];
+		if (control?.type === "checkbox") {
+			const box = this.h({ tagName: "input" }) as HTMLInputElement;
+			box.setAttribute("type", "checkbox");
+			box.setAttribute("disabled", "");
+			if (control.checked) box.setAttribute("checked", "");
+			children = [box];
+		} else if (control?.type === "dropdown") {
+			// Dropdown / combo: disabled <select> populated from w:listItem.
+			// The currently-selected value is whatever text the sdtContent
+			// renders. We extract it as plain text (textContent of the
+			// rendered children) and mark the matching <option> selected.
+			const rendered = this.renderElements(elem.children) ?? [];
+			const selectedText = rendered
+				.map(n => (n instanceof Node ? (n.textContent ?? "") : String(n)))
+				.join("")
+				.trim();
+			const select = this.h({ tagName: "select" }) as HTMLSelectElement;
+			select.setAttribute("disabled", "");
+			for (const item of control.items) {
+				const option = this.h({ tagName: "option" }) as HTMLOptionElement;
+				// DOCX-derived — setAttribute + textContent only.
+				option.setAttribute("value", item.value);
+				option.textContent = item.displayText;
+				if (
+					item.value === selectedText ||
+					item.displayText === selectedText
+				) {
+					option.setAttribute("selected", "");
+				}
+				select.appendChild(option);
+			}
+			children = [select];
+		} else if (control?.type === "date") {
+			// Wrap the rendered sdtContent in <time>. fullDate is DOCX-
+			// attacker-controlled; only emit datetime="…" when it matches
+			// an ISO-8601 allowlist, drop otherwise.
+			const rendered = this.renderElements(elem.children) ?? [];
+			const time = this.h({ tagName: "time" }) as HTMLTimeElement;
+			const ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/;
+			if (control.fullDate && ISO.test(control.fullDate)) {
+				time.setAttribute("datetime", control.fullDate);
+			}
+			for (const c of rendered) time.appendChild(c);
+			children = [time];
+		} else {
+			children = this.renderElements(elem.children) ?? [];
+		}
+
 		const span = this.h({ tagName: "span", children }) as HTMLSpanElement;
 		// DOCX-derived strings — setAttribute, never innerHTML / className.
 		span.setAttribute("role", "group");
@@ -2115,6 +2267,12 @@ section.${c}>ol>li::before {
 			// Surface the programmatic tag as a data-attr; the browser
 			// HTML-encodes attribute values so this is safe for DOCX strings.
 			span.dataset.sdtTag = elem.sdtTag;
+		}
+		if (control) {
+			// Lets downstream CSS / JS target the wrapper without
+			// re-parsing. dataset setter HTML-encodes, so the string is
+			// safe even though the values here are renderer-owned literals.
+			span.dataset.sdtType = control.type;
 		}
 		return span;
 	}
@@ -2289,6 +2447,41 @@ section.${c}>ol>li::before {
 		}
 
 		return result;
+	}
+
+	// Renders a <c:chart> reference by looking up the associated
+	// ChartPart through the current part's relationship map, then
+	// delegating to the SVG renderer in src/charts/render.ts.
+	//
+	// The rel id is DOCX-controlled; we look it up via findPartByRelId
+	// (a Map lookup) so there's no way for an attacker-supplied string
+	// to break out of an attribute or selector. A missing chart part
+	// falls back to an empty inline-block so the caller's layout
+	// doesn't collapse.
+	renderChart(elem: DrawingChart): HTMLElement {
+		const fallback = this.createElement("span");
+		fallback.className = `${this.className}-chart`;
+		fallback.style.display = "inline-block";
+
+		if (!elem.relId || !this.document) return fallback;
+
+		const part = this.document.findPartByRelId(
+			elem.relId,
+			this.currentPart ?? this.document.documentPart,
+		);
+		if (!part || !(part instanceof ChartPart) || !part.chart) return fallback;
+
+		try {
+			const svg = renderChartSvg(part.chart);
+			const wrapper = this.createElement("span");
+			wrapper.className = `${this.className}-chart`;
+			wrapper.style.display = "inline-block";
+			wrapper.appendChild(svg);
+			return wrapper;
+		} catch {
+			// Never let a malformed chart abort the whole render.
+			return fallback;
+		}
 	}
 
 	renderText(elem: WmlText) {

@@ -2,9 +2,10 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk, Revision, FormattingRevision, WmlSdt
+	WmlAltChunk, Revision, FormattingRevision, WmlSdt, SdtControl, SdtCheckboxControl,
+	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
-import { DrawingShape, DrawingGroup } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
 import { sanitizeCssColor } from './utils';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -641,23 +642,94 @@ export class DocumentParser {
 
 		// w:sdtPr holds the content-control metadata. w:alias is the visible
 		// label ("Publication Date", etc.); w:tag is the programmatic id.
-		// When either is present we wrap the content so the renderer can emit
-		// a role="group" with an aria-label — otherwise we unwrap as before.
+		// When either is present — or a typed form control (checkbox,
+		// dropdown, date, picture, gallery) is detected — we wrap the
+		// content so the renderer can emit an a11y group and/or form
+		// control. Otherwise we unwrap as before.
 		const sdtPr = xml.element(node, "sdtPr");
 		if (sdtPr) {
 			const aliasEl = xml.element(sdtPr, "alias");
 			const tagEl = xml.element(sdtPr, "tag");
 			const alias = aliasEl ? xml.attr(aliasEl, "val") : null;
 			const tag = tagEl ? xml.attr(tagEl, "val") : null;
-			if (alias || tag) {
+			const control = this.parseSdtControl(sdtPr);
+			if (alias || tag || control) {
 				const wrapper: WmlSdt = { type: DomType.Sdt, children };
 				if (alias) wrapper.sdtAlias = alias;
 				if (tag) wrapper.sdtTag = tag;
+				if (control) wrapper.sdtControl = control;
 				return [wrapper];
 			}
 		}
 
 		return children;
+	}
+
+	// Inspect w:sdtPr for a typed content-control marker. Matches are by
+	// localName so w14:* elements are found regardless of namespace prefix,
+	// the same pattern xml.element() uses elsewhere.
+	private parseSdtControl(sdtPr: Element): SdtControl | null {
+		for (const el of xml.elements(sdtPr)) {
+			switch (el.localName) {
+				case "checkbox": {
+					// w14:checkbox — children w14:checked, w14:checkedState,
+					// w14:uncheckedState each carry a w14:val.
+					const checkedEl = xml.element(el, "checked");
+					const checkedStateEl = xml.element(el, "checkedState");
+					const uncheckedStateEl = xml.element(el, "uncheckedState");
+					const checkedRaw = checkedEl ? xml.attr(checkedEl, "val") : null;
+					const checked = checkedRaw === "1" || checkedRaw === "true";
+					// w14:checkedState w14:val is always a hex codepoint
+					// ("2611" for ☑, "2610" for ☐). Renderer currently emits a
+					// native <input type="checkbox"> and doesn't use these,
+					// but they're captured for any future glyph-style render.
+					const checkedChar = checkedStateEl ? xml.hexAttr(checkedStateEl, "val") : undefined;
+					const uncheckedChar = uncheckedStateEl ? xml.hexAttr(uncheckedStateEl, "val") : undefined;
+					const result: SdtCheckboxControl = { type: "checkbox", checked };
+					if (checkedChar != null) result.checkedChar = checkedChar;
+					if (uncheckedChar != null) result.uncheckedChar = uncheckedChar;
+					return result;
+				}
+				case "dropDownList":
+				case "comboBox": {
+					// Both carry the same w:listItem children. Word
+					// distinguishes editable vs strict, but in a read-only
+					// renderer both collapse to a disabled <select>.
+					const items: { displayText: string; value: string }[] = [];
+					for (const li of xml.elements(el, "listItem")) {
+						const displayText = xml.attr(li, "displayText");
+						const value = xml.attr(li, "value");
+						items.push({
+							displayText: displayText ?? value ?? "",
+							value: value ?? displayText ?? ""
+						});
+					}
+					return { type: "dropdown", items };
+				}
+				case "date":
+				case "sdtDate": {
+					// Both w:date and w14:sdtDate are observed in the wild.
+					const formatEl = xml.element(el, "dateFormat");
+					const fullDateEl = xml.element(el, "fullDate");
+					const format = formatEl ? xml.attr(formatEl, "val") : null;
+					// w:date often has a w:fullDate attribute on the element
+					// itself rather than a child element.
+					const fullDateAttr = xml.attr(el, "fullDate");
+					const fullDate = fullDateEl ? xml.attr(fullDateEl, "val") : fullDateAttr;
+					return {
+						type: "date",
+						format: format ?? undefined,
+						fullDate: fullDate ?? undefined
+					};
+				}
+				case "picture":
+					return { type: "picture" };
+				case "docPartList":
+				case "docPartObj":
+					return { type: "gallery" };
+			}
+		}
+		return null;
 	}
 
 	parseInserted(node: Element, parentParser: Function): OpenXmlElement {
@@ -775,6 +847,14 @@ export class DocumentParser {
 					// children so renderSimpleField gets real content; store
 					// the instruction so the renderer can wrap the result.
 					result.children.push(this.parseFieldSimple(el, result));
+					break;
+
+				case "ruby":
+					// w:ruby at paragraph scope. OOXML allows ruby as a direct
+					// child of <w:p>; Wave 4.1 added the handler at run scope
+					// only. Flagging here so paragraph-level ruby doesn't get
+					// silently dropped.
+					result.children.push(this.parseRuby(el, result));
 					break;
 			}
 		}
@@ -919,7 +999,7 @@ export class DocumentParser {
 		return result;
 	}
 
-	parseRun(node: Element, parent?: OpenXmlElement): WmlRun {
+	parseRun(node: Element, parent?: OpenXmlElement): OpenXmlElement {
 		var result: WmlRun = <WmlRun>{ type: DomType.Run, parent: parent, children: [] };
 
 		for (let c of xml.elements(node)) {
@@ -1032,9 +1112,116 @@ export class DocumentParser {
 					result.children.push(this.parseVmlPicture(c));
 					break;
 
+				case "ruby":
+					result.children.push(this.parseRuby(c, result));
+					break;
+
 				case "rPr":
 					this.parseRunProperties(c, result);
 					break;
+			}
+		}
+
+		// w:rPr/w:fitText and w:rPr/w:bdo are captured as run-level metadata
+		// by parseRunProperties. When either is set, wrap the run in a
+		// DomType.FitText / DomType.BidiOverride element so the renderer can
+		// emit the appropriate host element without touching renderRun.
+		let wrapped: OpenXmlElement = result;
+		if (result.bidiOverride) {
+			const bidi: WmlBidiOverride = {
+				type: DomType.BidiOverride,
+				dir: result.bidiOverride,
+				parent,
+				children: [wrapped]
+			};
+			wrapped.parent = bidi;
+			delete result.bidiOverride;
+			wrapped = bidi;
+		}
+		if (result.fitText) {
+			const fit: WmlFitText = {
+				type: DomType.FitText,
+				width: result.fitText.width,
+				id: result.fitText.id,
+				parent,
+				children: [wrapped]
+			};
+			wrapped.parent = fit;
+			delete result.fitText;
+			wrapped = fit;
+		}
+
+		return wrapped;
+	}
+
+	// w:ruby — East-Asian phonetic guide (furigana). Structure:
+	//   <w:ruby>
+	//     <w:rubyPr> <w:rt> <w:rubyBase>
+	// rubyPr carries layout hints (alignment, font sizes, language). The
+	// rt / rubyBase wrappers each contain one or more <w:r>. The browser
+	// renders <ruby><rb>base</rb><rt>annotation</rt></ruby> natively, so
+	// we just emit wrapper elements here. DOCX-derived strings from this
+	// branch reach the DOM only via renderElements of the child runs,
+	// which already sanitise text content and style.
+	parseRuby(node: Element, parent?: OpenXmlElement): WmlRuby {
+		const result: WmlRuby = { type: DomType.Ruby, parent, children: [] };
+
+		for (const c of xml.elements(node)) {
+			switch (c.localName) {
+				case "rubyPr": {
+					const rubyPr: WmlRuby["rubyPr"] = {};
+					for (const p of xml.elements(c)) {
+						const v = xml.attr(p, "val");
+						switch (p.localName) {
+							case "rubyAlign":
+								// Allowlist rubyAlign — it would reach a CSS value
+								// if we ever styled the ruby container.
+								if (/^(center|distributeLetter|distributeSpace|left|right|rightVertical|start|end)$/.test(v))
+									rubyPr.rubyAlign = v;
+								break;
+							case "hps": {
+								const n = xml.intAttr(p, "val");
+								if (Number.isFinite(n) && n > 0 && n < 1000) rubyPr.hps = n;
+								break;
+							}
+							case "hpsBaseText": {
+								const n = xml.intAttr(p, "val");
+								if (Number.isFinite(n) && n > 0 && n < 1000) rubyPr.hpsBaseText = n;
+								break;
+							}
+							case "hpsRaise": {
+								const n = xml.intAttr(p, "val");
+								if (Number.isFinite(n) && n >= 0 && n < 1000) rubyPr.hpsRaise = n;
+								break;
+							}
+							case "lid":
+								// Language tag — reaches `lang` attribute only,
+								// which the browser attribute-encodes.
+								if (v) rubyPr.lid = v;
+								break;
+						}
+					}
+					result.rubyPr = rubyPr;
+					break;
+				}
+				case "rubyBase": {
+					const base: OpenXmlElement = { type: DomType.RubyBase, parent: result, children: [] };
+					for (const r of xml.elements(c)) {
+						if (r.localName === "r")
+							base.children.push(this.parseRun(r, base));
+					}
+					result.children.push(base);
+					break;
+				}
+				case "rt": {
+					const rt: OpenXmlElement = { type: DomType.RubyText, parent: result, children: [] };
+					for (const r of xml.elements(c)) {
+						if (r.localName === "r")
+							rt.children.push(this.parseRun(r, rt));
+					}
+					result.children.push(rt);
+					break;
+				}
 			}
 		}
 
@@ -1094,6 +1281,28 @@ export class DocumentParser {
 				case "rPrChange":
 					run.formattingRevision = parseFormattingRevision(c);
 					break;
+
+				case "fitText": {
+					// w:fitText — run-level "fit to width" directive. val is
+					// the target width in twips. Numeric via floatAttr so the
+					// raw string never reaches CSS.
+					const w = xml.floatAttr(c, "val");
+					if (Number.isFinite(w) && w > 0) {
+						run.fitText = { width: w, id: xml.attr(c, "id") || undefined };
+					}
+					break;
+				}
+
+				case "bdo": {
+					// w:bdo — explicit bidi override. The DOCX-derived val is
+					// allowlisted against /^(ltr|rtl)$/ before being stored.
+					// Any other value is silently dropped.
+					const raw = xml.attr(c, "val");
+					if (raw === "ltr" || raw === "rtl") {
+						run.bidiOverride = raw;
+					}
+					break;
+				}
 
 				default:
 					return false;
@@ -1426,10 +1635,29 @@ export class DocumentParser {
 					// parseDrawingShapeGroup recurses back through
 					// parseGraphicDataChild for every entry.
 					return this.parseDrawingShapeGroup(n);
+				case "chart":
+					// DrawingML chart reference. Actual SVG rendering
+					// happens in html-renderer.ts after looking up the
+					// ChartPart via the enclosing part's rel map. See
+					// src/charts/render.ts and SECURITY above.
+					return this.parseChartReference(n);
 			}
 		}
 
 		return null;
+	}
+
+	// <c:chart r:id="rIdX"/> inside <a:graphicData
+	// uri="…/drawingml/2006/chart">. We record the rel id only; the
+	// renderer resolves it against the document's relationship map.
+	// Attacker-controlled string never reaches a CSS selector or class
+	// name — only read via findPartByRelId's Map/Object lookup.
+	parseChartReference(elem: Element): DrawingChart {
+		const relId = xml.attr(elem, "id");
+		return {
+			type: DomType.Chart,
+			relId: relId ?? "",
+		};
 	}
 
 	// Hard-coded allowlist of DrawingML preset-geometry names that
@@ -1549,6 +1777,129 @@ export class DocumentParser {
 		return result;
 	}
 
+	// Parses <a:custGeom> into a CustomGeometry. Only <a:pathLst> is
+	// consumed; <a:avLst>, <a:gdLst>, <a:ahLst>, <a:cxnLst>, and
+	// <a:rect> are out of scope for v1 (adjustment values, guide
+	// formulas, and connection points parameterise preset geometries
+	// rather than the path list; the text rectangle will matter once
+	// nested text boxes track it).
+	//
+	// Each <a:path> contributes one `d` string composed entirely of
+	// hard-coded SVG command letters (`M L C Q A Z`) plus numeric
+	// tokens parsed via xml.intAttr. A non-finite or missing number
+	// collapses to 0. No DOCX-supplied string ever reaches the output
+	// `d` attribute.
+	private parseCustGeom(
+		custGeom: Element | null | undefined,
+	): import("./drawing/shapes").CustomGeometry | undefined {
+		if (!custGeom) return undefined;
+		const paths: { w: number; h: number; d: string }[] = [];
+		const pathLst = xml.element(custGeom, "pathLst");
+		if (!pathLst) return undefined;
+		for (const pathEl of xml.elements(pathLst, "path")) {
+			const w = this.safeNum(xml.intAttr(pathEl, "w", 0));
+			const h = this.safeNum(xml.intAttr(pathEl, "h", 0));
+			if (w <= 0 || h <= 0) continue;
+			let d = "";
+			// Track the pen position so <a:arcTo> can compute its end
+			// point. DrawingML arcTo is relative to the current pen,
+			// not absolute.
+			let penX = 0;
+			let penY = 0;
+			for (const cmd of xml.elements(pathEl)) {
+				switch (cmd.localName) {
+					case "moveTo": {
+						const pt = xml.element(cmd, "pt");
+						if (!pt) break;
+						const x = this.safeNum(xml.intAttr(pt, "x", 0));
+						const y = this.safeNum(xml.intAttr(pt, "y", 0));
+						d += `M ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "lnTo": {
+						const pt = xml.element(cmd, "pt");
+						if (!pt) break;
+						const x = this.safeNum(xml.intAttr(pt, "x", 0));
+						const y = this.safeNum(xml.intAttr(pt, "y", 0));
+						d += `L ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "cubicBezTo": {
+						const pts = xml.elements(cmd, "pt");
+						if (pts.length < 3) break;
+						const x1 = this.safeNum(xml.intAttr(pts[0], "x", 0));
+						const y1 = this.safeNum(xml.intAttr(pts[0], "y", 0));
+						const x2 = this.safeNum(xml.intAttr(pts[1], "x", 0));
+						const y2 = this.safeNum(xml.intAttr(pts[1], "y", 0));
+						const x = this.safeNum(xml.intAttr(pts[2], "x", 0));
+						const y = this.safeNum(xml.intAttr(pts[2], "y", 0));
+						d += `C ${x1} ${y1} ${x2} ${y2} ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "quadBezTo": {
+						const pts = xml.elements(cmd, "pt");
+						if (pts.length < 2) break;
+						const x1 = this.safeNum(xml.intAttr(pts[0], "x", 0));
+						const y1 = this.safeNum(xml.intAttr(pts[0], "y", 0));
+						const x = this.safeNum(xml.intAttr(pts[1], "x", 0));
+						const y = this.safeNum(xml.intAttr(pts[1], "y", 0));
+						d += `Q ${x1} ${y1} ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "arcTo": {
+						// DrawingML arc: centred at (penX + wR, penY + hR),
+						// starts at `stAng` (60000ths of a degree), sweeps
+						// `swAng`. Convert to an SVG A command.
+						const wR = this.safeNum(xml.intAttr(cmd, "wR", 0));
+						const hR = this.safeNum(xml.intAttr(cmd, "hR", 0));
+						const stAng = this.safeNum(xml.intAttr(cmd, "stAng", 0));
+						const swAng = this.safeNum(xml.intAttr(cmd, "swAng", 0));
+						if (wR === 0 || hR === 0) break;
+						const stRad = (stAng / 60000) * (Math.PI / 180);
+						const swRad = (swAng / 60000) * (Math.PI / 180);
+						// Ellipse centre: the pen sits on the ellipse at
+						// angle stAng, so centre = pen - (wR*cos, hR*sin).
+						const cx = penX - wR * Math.cos(stRad);
+						const cy = penY - hR * Math.sin(stRad);
+						const endAng = stRad + swRad;
+						const endX = cx + wR * Math.cos(endAng);
+						const endY = cy + hR * Math.sin(endAng);
+						const largeArc = Math.abs(swRad) > Math.PI ? 1 : 0;
+						const sweep = swRad >= 0 ? 1 : 0;
+						d += `A ${wR} ${hR} 0 ${largeArc} ${sweep} ${endX} ${endY} `;
+						penX = endX;
+						penY = endY;
+						break;
+					}
+					case "close": {
+						d += "Z ";
+						break;
+					}
+				}
+			}
+			d = d.trim();
+			if (d) {
+				paths.push({ w, h, d });
+			}
+		}
+		return { paths };
+	}
+
+	// Coerces any number-like to a finite value or 0. Used throughout
+	// parseCustGeom so a malformed DOCX attribute can never leak
+	// NaN / Infinity into the SVG path data.
+	private safeNum(n: number | null | undefined): number {
+		return typeof n === "number" && Number.isFinite(n) ? n : 0;
+	}
+
 	parseDrawingShape(elem: Element): DrawingShape {
 		const result: DrawingShape = {
 			type: DomType.DrawingShape,
@@ -1567,11 +1918,17 @@ export class DocumentParser {
 				// attacker-controlled string into SVG/CSS.
 				result.presetGeometry = this.PRESET_GEOMETRY_ALLOWLIST.has(prst) ? prst : "rect";
 			} else if (xml.element(spPr, "custGeom")) {
-				// TODO: custGeom path rendering (a:pathLst / a:moveTo /
-				// a:lnTo / a:cubicBezTo / a:close). Out of scope for
-				// this PR — fall back to a plain rectangle.
+				// <a:custGeom> — caller-defined path list. Parsed into
+				// CustomGeometry; presetGeometry is left blank so the
+				// renderer takes the custGeom branch. Leave the plain
+				// 'rect' as a safe fallback in case parsing yields no
+				// usable paths.
 				result.presetGeometry = "rect";
 				result.hasCustomGeometry = true;
+				const custGeom = this.parseCustGeom(xml.element(spPr, "custGeom"));
+				if (custGeom && custGeom.paths.length > 0) {
+					result.custGeom = custGeom;
+				}
 			} else {
 				result.presetGeometry = "rect";
 			}
@@ -2207,22 +2564,78 @@ export class DocumentParser {
 						style["direction"] = "rtl";
 					break;
 
+				case "cs":
+					// Run marked as "complex script". For a read-only viewer
+					// without a Unicode character-class database, the best we
+					// can do is surface a direction hint — renderRun / rPr
+					// consumers on an RTL paragraph will already have
+					// direction:rtl. We avoid forcing rtl here (cs can mean
+					// Arabic/Hebrew but also Thai/Vietnamese, which are LTR),
+					// so this is a no-op beyond acknowledgement.
+					break;
+
 				case "bCs":
+					// Complex-script bold. v1: mirror w:b.
+					style["font-weight"] = xml.boolAttr(c, "val", true) ? "bold" : "normal";
+					break;
+
 				case "iCs":
-				case "szCs":
+					// Complex-script italic. v1: mirror w:i.
+					style["font-style"] = xml.boolAttr(c, "val", true) ? "italic" : "normal";
+					break;
+
+				case "szCs": {
+					// Complex-script font size (half-points). Without a per-
+					// character script classifier we can't selectively apply
+					// szCs only to complex-script chars, so v1 treats it as
+					// a secondary font-size — recorded in the side channel
+					// $cs-font-size and also set as font-size when no w:sz
+					// has been seen. DOCX value is numeric via lengthAttr.
+					const csSize = xml.lengthAttr(c, "val", LengthUsage.FontSize);
+					if (csSize) {
+						style["$cs-font-size"] = csSize;
+						if (!style["font-size"])
+							style["font-size"] = csSize;
+					}
+					break;
+				}
+
+				case "em": {
+					// w:em — East-Asian emphasis marks (dot/comma/circle/
+					// underDot). DOCX-derived val goes through an explicit
+					// allowlist before being mapped to a hand-picked CSS
+					// string, so no raw DOCX text reaches the style sink.
+					const raw = xml.attr(c, "val");
+					switch (raw) {
+						case "dot":
+							style["text-emphasis"] = "filled dot";
+							break;
+						case "comma":
+							style["text-emphasis"] = "filled sesame";
+							break;
+						case "circle":
+							style["text-emphasis"] = "filled circle";
+							break;
+						case "underDot":
+							style["text-emphasis"] = "filled dot";
+							style["text-emphasis-position"] = "under";
+							break;
+						// "none" or anything else → no-op
+					}
+					break;
+				}
+
 				case "tabs": //ignore - tabs is parsed by other parser
 				case "outlineLvl": //TODO
 				case "contextualSpacing": //TODO
 				case "tblStyleColBandSize": //TODO
 				case "tblStyleRowBandSize": //TODO
 				case "webHidden": //TODO - maybe web-hidden should be implemented
-				case "pageBreakBefore": //TODO - maybe ignore 
+				case "pageBreakBefore": //TODO - maybe ignore
 				case "suppressLineNumbers": //TODO - maybe ignore
 				case "keepLines": //TODO - maybe ignore
 				case "keepNext": //TODO - maybe ignore
-				case "widowControl": //TODO - maybe ignore 
-				case "bidi": //TODO - maybe ignore
-				case "rtl": //TODO - maybe ignore
+				case "widowControl": //TODO - maybe ignore
 				case "noProof": //ignore spellcheck
 					//TODO ignore
 					break;

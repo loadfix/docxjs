@@ -1,4 +1,5 @@
 import { DomType, OpenXmlElement } from './dom';
+import { CustomGeometry } from '../drawing/shapes';
 
 // DrawingML shape — the shapes authored as "Insert > Shapes" in Word
 // (rectangles, ellipses, arrows, callouts, stars, …). Parsed from
@@ -42,8 +43,16 @@ export interface DrawingShape extends OpenXmlElement {
     // the existing renderElement pipeline so txbx content inherits all
     // body-paragraph sanitisation.
     txbxParagraphs?: OpenXmlElement[];
-    // TODO: custGeom path rendering (tracked upstream).
+    // Flag kept for back-compat with earlier wave-3.1 callers; set true
+    // whenever custGeom was seen regardless of whether parsing yielded
+    // usable paths.
     hasCustomGeometry?: boolean;
+    // Parsed <a:custGeom> paths. When present, the renderer emits one
+    // <path> per entry (scaled from path-local coords to the shape's
+    // render size) and ignores presetGeometry. All values are numeric
+    // — the `d` string is composed from hard-coded SVG command letters
+    // plus validated numbers, never from DOCX strings.
+    custGeom?: CustomGeometry;
 }
 
 // DrawingML shape group — <wpg:wgp>. Groups can nest. The group
@@ -66,4 +75,17 @@ export interface DrawingGroup extends OpenXmlElement {
     };
     // Children may be DrawingShape, DrawingGroup, or IDomImage.
     children: OpenXmlElement[];
+}
+
+// Chart reference inside an <a:graphic>/<a:graphicData uri="…/chart">.
+// The relationship id resolves to a ChartPart via the enclosing part's
+// relationship map; the renderer looks that part up and turns it into
+// SVG. Parsed by parseChartReference in document-parser.ts; rendered
+// by the DomType.Chart branch of html-renderer.
+export interface DrawingChart extends OpenXmlElement {
+    type: DomType.Chart;
+    // r:id of the chart part inside the document's relationships.
+    // Attacker-controlled — validated against the rel map on lookup,
+    // never interpolated into a CSS class or selector.
+    relId: string;
 }

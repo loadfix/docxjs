@@ -70,16 +70,74 @@ export enum DomType {
 	CommentRangeStart = "commentRangeStart",
 	CommentRangeEnd = "commentRangeEnd",
     AltChunk = "altChunk",
-    Sdt = "sdt"
+    Sdt = "sdt",
+    // East-Asian / bidi typography (see document-parser.ts parseRuby,
+    // parseFitText, parseBidiOverride). Ruby wraps rubyBase and rt children;
+    // the renderer emits native HTML <ruby><rt>. FitText wraps a run with a
+    // target width in twips. BidiOverride wraps content in <bdo dir="…">.
+    Ruby = "ruby",
+    RubyBase = "rubyBase",
+    RubyText = "rubyText",
+    FitText = "fitText",
+    BidiOverride = "bidiOverride",
+    Chart = "chart"
 }
 
 // Structured Document Tag (content control). Parsed from w:sdt when
 // w:sdtPr contains a w:alias or w:tag — otherwise parseSdt unwraps
-// directly to sdtContent children. See parseSdt in document-parser.ts
-// and the DomType.Sdt branch of renderElement in html-renderer.ts.
+// directly to sdtContent children (unless a typed form control is
+// detected below, which also forces a wrapper). See parseSdt in
+// document-parser.ts and the DomType.Sdt branch of renderElement in
+// html-renderer.ts.
 export interface WmlSdt extends OpenXmlElement {
     sdtAlias?: string;
     sdtTag?: string;
+    sdtControl?: SdtControl;
+}
+
+// Typed form-control metadata extracted from w:sdtPr. All DOCX-derived
+// string fields (displayText, value, format, fullDate) are attacker
+// controlled — they must only reach the DOM via setAttribute /
+// textContent, never innerHTML or className interpolation.
+export type SdtControl =
+    | SdtCheckboxControl
+    | SdtDropdownControl
+    | SdtDateControl
+    | SdtPictureControl
+    | SdtGalleryControl;
+
+export interface SdtCheckboxControl {
+    type: "checkbox";
+    checked: boolean;
+    checkedChar?: number;
+    uncheckedChar?: number;
+}
+
+export interface SdtDropdownItem {
+    displayText: string;
+    value: string;
+}
+
+export interface SdtDropdownControl {
+    // Shared shape for w:dropDownList and w:comboBox — the only rendering
+    // difference Word draws between them (editable combo vs strict list)
+    // doesn't apply in a read-only HTML view, so both emit <select>.
+    type: "dropdown";
+    items: SdtDropdownItem[];
+}
+
+export interface SdtDateControl {
+    type: "date";
+    format?: string;
+    fullDate?: string;
+}
+
+export interface SdtPictureControl {
+    type: "picture";
+}
+
+export interface SdtGalleryControl {
+    type: "gallery";
 }
 
 export interface Revision {
@@ -147,6 +205,38 @@ export interface WmlAltChunk extends OpenXmlElement {
 export interface WmlSmartTag extends OpenXmlElement {
 	uri?: string;
     element?: string;
+}
+
+// w:ruby — East-Asian phonetic guide (furigana). Children are RubyBase and
+// RubyText sub-elements; rubyPr is captured as a bag of numeric/bool props.
+// See parseRuby in document-parser.ts and renderRuby in html-renderer.ts.
+export interface WmlRuby extends OpenXmlElement {
+    rubyPr?: {
+        // w:hps — half-point font size for the ruby text
+        hps?: number;
+        // w:hpsBaseText — half-point font size for the base characters
+        hpsBaseText?: number;
+        // w:hpsRaise — amount to raise the ruby above its base
+        hpsRaise?: number;
+        // w:lid — language identifier (e.g. "ja-JP")
+        lid?: string;
+        // w:rubyAlign — center | distributeLetter | distributeSpace | left | right | rightVertical
+        rubyAlign?: string;
+    };
+}
+
+// w:fitText — "fit text" character / run wrapper. val is target width in twips,
+// id groups consecutive fitText runs into a single stretched unit.
+export interface WmlFitText extends OpenXmlElement {
+    // Target width in twips (1/20 pt). Numeric by construction in the parser.
+    width?: number;
+    id?: string;
+}
+
+// w:bdo — explicit bidi override ("ltr" | "rtl"). The `dir` field is
+// allowlisted in the parser before it ever reaches the DOM.
+export interface WmlBidiOverride extends OpenXmlElement {
+    dir?: "ltr" | "rtl";
 }
 
 export interface WmlNoteReference extends OpenXmlElement {

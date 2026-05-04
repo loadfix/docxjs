@@ -1340,6 +1340,64 @@ async function renderFixture(path, options) {
     note(`34·: text fixture has 0 shape elements post-parseGraphic dispatch`);
 }
 
+// ── 35. East-Asian / RTL (Wave 4.1) ──────────────────────────────────────
+// Regression guard: the text fixture still renders runs after parseRun
+// gained ruby/fitText/bdo wrapping branches and parseDefaultProperties
+// gained em/cs/bCs/iCs/szCs cases.
+{
+    const { container } = await renderFixture('text');
+    const runs = container.querySelectorAll('span');
+    assert(
+        runs.length > 0,
+        `35a: text fixture should still produce run spans after Wave 4.1 i18n rewrite`,
+    );
+    // No test fixture currently exercises ruby / bdo / fitText; this is a
+    // guard, not a positive-case test. Actual rendering is browser-verified.
+    note(`35·: text fixture produced ${runs.length} run span(s) post-i18n rewrite`);
+}
+
+// ── 36. SDT form controls (Wave 4.2) ─────────────────────────────────────
+// parseSdt now emits a WmlSdt wrapper when a typed form control (checkbox,
+// dropdown, date, picture, gallery) is in sdtPr. Test fixtures don't use
+// typed controls, so this is a regression guard that rendering without
+// typed controls still drops the wrapper (the Wave 1.4 path).
+{
+    const { container } = await renderFixture('text');
+    const sdtWrappers = container.querySelectorAll('[data-sdt-type]');
+    // text fixture has no sdt controls → no data-sdt-type attributes.
+    assert(
+        sdtWrappers.length === 0,
+        `36a: text fixture should not produce sdt wrappers when no typed control exists (got ${sdtWrappers.length})`,
+    );
+    note(`36·: text fixture emits 0 data-sdt-type wrappers (correct)`);
+}
+
+// ── 37. Custom geometry regression (Wave 4.3) ───────────────────────────
+// parseCustGeom / customGeometryToSvgPaths are reached only for DrawingML
+// shapes that carry <a:custGeom>. Without a fixture, just guard that the
+// text fixture's parseGraphic dispatch still produces no shape elements
+// (no drawings in text fixture).
+{
+    const { container } = await renderFixture('text');
+    const customGeomPaths = container.querySelectorAll('svg path[d]');
+    note(`37·: text fixture produced ${customGeomPaths.length} <path d> element(s) — no custGeom expected`);
+    // No strong assertion; this scenario is a smoke test that parseCustGeom
+    // doesn't crash on documents without custom-geometry shapes.
+}
+
+// ── 38. Chart rendering regression (Wave 4.4) ───────────────────────────
+// ChartPart loading is gated behind the graphic URI dispatch. Text fixture
+// has no charts — just assert nothing chart-related leaked into the DOM.
+{
+    const { container } = await renderFixture('text');
+    const chartEls = container.querySelectorAll('[data-chart], .docx-chart');
+    assert(
+        chartEls.length === 0,
+        `38a: text fixture should not produce chart elements (got ${chartEls.length})`,
+    );
+    note(`38·: text fixture has 0 chart elements post-chart-pipeline addition`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1348,5 +1406,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${34} scenarios passed`);
+    console.log(`\n✓ all ${38} scenarios passed`);
 }
