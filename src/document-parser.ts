@@ -2,7 +2,7 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk, Revision, FormattingRevision
+	WmlAltChunk, Revision, FormattingRevision, WmlSdt
 } from './document/dom';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -432,15 +432,22 @@ export class DocumentParser {
 	}
 
 	parseNumberingFile(node: Element): IDomNumbering[] {
-		var result = [];
-		var mapping = {};
+		// Group abstract-num levels by their abstractNumId so each <w:num>
+		// can clone and optionally override them. The previous implementation
+		// kept a single abstractNumId -> numId map, which silently dropped
+		// every <w:num> but the last when several nums shared an abstract —
+		// a pattern common in legal / spec documents where the second list
+		// is supposed to restart its counter. Emitting one entry per
+		// (numId, level) lets each num own a distinct CSS counter.
+		var abstractLevels: Record<string, IDomNumbering[]> = {};
 		var bullets = [];
+		var numElements: Element[] = [];
 
 		for (const n of xml.elements(node)) {
 			switch (n.localName) {
 				case "abstractNum":
-					this.parseAbstractNumbering(n, bullets)
-						.forEach(x => result.push(x));
+					var absId = xml.attr(n, "abstractNumId");
+					abstractLevels[absId] = this.parseAbstractNumbering(n, bullets);
 					break;
 
 				case "numPicBullet":
@@ -448,14 +455,72 @@ export class DocumentParser {
 					break;
 
 				case "num":
-					var numId = xml.attr(n, "numId");
-					var abstractNumId = xml.elementAttr(n, "abstractNumId", "val");
-					mapping[abstractNumId] = numId;
+					// Defer until all abstractNums are collected (DOCX files
+					// may list nums before abstracts, though this is rare).
+					numElements.push(n);
 					break;
 			}
 		}
 
-		result.forEach(x => x.id = mapping[x.id]);
+		var result: IDomNumbering[] = [];
+		for (const n of numElements) {
+			var numId = xml.attr(n, "numId");
+			var abstractNumId = xml.elementAttr(n, "abstractNumId", "val");
+			var baseLevels = abstractLevels[abstractNumId];
+			if (!baseLevels) continue;
+
+			// Parse lvlOverride entries keyed by ilvl.
+			var overrides: Record<number, { start?: number; level?: IDomNumbering }> = {};
+			for (const child of xml.elements(n, "lvlOverride")) {
+				var ilvl = xml.intAttr(child, "ilvl");
+				var entry: { start?: number; level?: IDomNumbering } = {};
+				for (const sub of xml.elements(child)) {
+					if (sub.localName === "startOverride") {
+						entry.start = xml.intAttr(sub, "val");
+					} else if (sub.localName === "lvl") {
+						entry.level = this.parseNumberingLevel(abstractNumId, sub, bullets);
+					}
+				}
+				overrides[ilvl] = entry;
+			}
+
+			for (const base of baseLevels) {
+				// Shallow-clone the level so each num owns its own copy.
+				// pStyle / rStyle are nested objects the renderer mutates via
+				// spread, so we clone those too.
+				var clone: IDomNumbering = {
+					...base,
+					pStyle: { ...base.pStyle },
+					rStyle: { ...base.rStyle },
+					id: numId,
+				};
+				var ov = overrides[base.level];
+				if (ov) {
+					if (ov.level) {
+						// Property-level override: any field present on the
+						// override <w:lvl> replaces the abstract value.
+						if (ov.level.start !== undefined) clone.start = ov.level.start;
+						if (ov.level.levelText !== undefined) clone.levelText = ov.level.levelText;
+						if (ov.level.format !== undefined) clone.format = ov.level.format;
+						if (ov.level.suff !== undefined) clone.suff = ov.level.suff;
+						if (ov.level.restart !== undefined) clone.restart = ov.level.restart;
+						if (ov.level.justification !== undefined) clone.justification = ov.level.justification;
+						if (ov.level.isLgl !== undefined) clone.isLgl = ov.level.isLgl;
+						if (ov.level.bullet !== undefined) clone.bullet = ov.level.bullet;
+						if (ov.level.pStyleName !== undefined) clone.pStyleName = ov.level.pStyleName;
+						if (ov.level.pStyle && Object.keys(ov.level.pStyle).length) {
+							clone.pStyle = { ...clone.pStyle, ...ov.level.pStyle };
+						}
+						if (ov.level.rStyle && Object.keys(ov.level.rStyle).length) {
+							clone.rStyle = { ...clone.rStyle, ...ov.level.rStyle };
+						}
+					}
+					// startOverride wins over any property-level start.
+					if (ov.start !== undefined) clone.start = ov.start;
+				}
+				result.push(clone);
+			}
+		}
 
 		return result;
 	}
@@ -532,6 +597,29 @@ export class DocumentParser {
 				case "suff":
 					result.suff = xml.attr(n, "val");
 					break;
+
+				case "lvlRestart":
+					// w:val is the 1-based ancestor level at which this level's
+					// counter restarts. Absence of the element (undefined here)
+					// means "default — restart at the parent level".
+					result.restart = xml.intAttr(n, "val");
+					break;
+
+				case "lvlJc":
+					// left | right | center | start | end; validated at render
+					// time before emission into CSS.
+					result.justification = xml.attr(n, "val");
+					break;
+
+				case "isLgl":
+					// w:isLgl is a boolean toggle-element. When present with no
+					// val / val=1 / val="true", every %N placeholder in lvlText
+					// must render as arabic, regardless of that lower level's
+					// own numFmt.
+					var lglVal = xml.attr(n, "val");
+					result.isLgl = lglVal === undefined || lglVal === "" ||
+						lglVal === "1" || lglVal === "true" || lglVal === "on";
+					break;
 			}
 		}
 
@@ -540,7 +628,29 @@ export class DocumentParser {
 
 	parseSdt(node: Element, parser: Function): OpenXmlElement[] {
 		const sdtContent = xml.element(node, "sdtContent");
-		return sdtContent ? parser(sdtContent) : [];
+		if (!sdtContent) return [];
+
+		const children: OpenXmlElement[] = parser(sdtContent) ?? [];
+
+		// w:sdtPr holds the content-control metadata. w:alias is the visible
+		// label ("Publication Date", etc.); w:tag is the programmatic id.
+		// When either is present we wrap the content so the renderer can emit
+		// a role="group" with an aria-label — otherwise we unwrap as before.
+		const sdtPr = xml.element(node, "sdtPr");
+		if (sdtPr) {
+			const aliasEl = xml.element(sdtPr, "alias");
+			const tagEl = xml.element(sdtPr, "tag");
+			const alias = aliasEl ? xml.attr(aliasEl, "val") : null;
+			const tag = tagEl ? xml.attr(tagEl, "val") : null;
+			if (alias || tag) {
+				const wrapper: WmlSdt = { type: DomType.Sdt, children };
+				if (alias) wrapper.sdtAlias = alias;
+				if (tag) wrapper.sdtTag = tag;
+				return [wrapper];
+			}
+		}
+
+		return children;
 	}
 
 	parseInserted(node: Element, parentParser: Function): OpenXmlElement {
@@ -650,6 +760,42 @@ export class DocumentParser {
 				case "moveTo":
 					result.children.push(this.parseMoveTo(el, e => this.parseParagraph(e)));
 					break;
+
+				case "fldSimple":
+					// A paragraph-level simple field wraps its cached result as
+					// child runs (and occasionally nested fldSimple for e.g.
+					// HYPERLINK containing formatted text). Recurse on the
+					// children so renderSimpleField gets real content; store
+					// the instruction so the renderer can wrap the result.
+					result.children.push(this.parseFieldSimple(el, result));
+					break;
+			}
+		}
+
+		return result;
+	}
+
+	parseFieldSimple(node: Element, parent?: OpenXmlElement): WmlFieldSimple {
+		const result: WmlFieldSimple = {
+			type: DomType.SimpleField,
+			instruction: xml.attr(node, "instr"),
+			lock: xml.boolAttr(node, "lock", false),
+			dirty: xml.boolAttr(node, "dirty", false),
+			parent,
+			children: [],
+		};
+
+		for (const c of xml.elements(node)) {
+			switch (c.localName) {
+				case "r":
+					result.children.push(this.parseRun(c, result));
+					break;
+				case "hyperlink":
+					result.children.push(this.parseHyperlink(c, result));
+					break;
+				case "fldSimple":
+					result.children.push(this.parseFieldSimple(c, result));
+					break;
 			}
 		}
 
@@ -714,6 +860,12 @@ export class DocumentParser {
 		result.anchor = xml.attr(node, "anchor");
 		result.id = xml.attr(node, "id");
 
+		const tooltip = xml.attr(node, "tooltip");
+		if (tooltip) result.tooltip = tooltip;
+
+		const targetFrame = xml.attr(node, "tgtFrame");
+		if (targetFrame) result.targetFrame = targetFrame;
+
 		for (const c of xml.elements(node)) {
 			switch (c.localName) {
 				case "r":
@@ -776,12 +928,7 @@ export class DocumentParser {
 					break;
 
 				case "fldSimple":
-					result.children.push(<WmlFieldSimple>{
-						type: DomType.SimpleField,
-						instruction: xml.attr(c, "instr"),
-						lock: xml.boolAttr(c, "lock", false),
-						dirty: xml.boolAttr(c, "dirty", false)
-					});
+					result.children.push(this.parseFieldSimple(c, result));
 					break;
 
 				case "instrText":
@@ -969,29 +1116,66 @@ export class DocumentParser {
 		var result = <OpenXmlElement>{ type: DomType.Drawing, children: [], cssStyle: {} };
 		var isAnchor = node.localName == "anchor";
 
-		//TODO
-		// result.style["margin-left"] = xml.sizeAttr(node, "distL", SizeType.Emu);
-		// result.style["margin-top"] = xml.sizeAttr(node, "distT", SizeType.Emu);
-		// result.style["margin-right"] = xml.sizeAttr(node, "distR", SizeType.Emu);
-		// result.style["margin-bottom"] = xml.sizeAttr(node, "distB", SizeType.Emu);
+		// DrawingML stores offsets in English Metric Units: 914400 EMU = 1 inch = 96 CSS pixels.
+		// For dist*/wrapPolygon we want CSS pixels, so divide by 9525.
+		const EMU_PER_PX = 9525;
 
-		let wrapType: "wrapTopAndBottom" | "wrapNone" | null = null;
+		// Allowlists for DOCX-derived enum values so they can be used safely in CSS strings.
+		const WRAP_TEXT_ALLOWED = new Set(["bothSides", "left", "right", "largest"]);
+		const RELATIVE_FROM_ALLOWED = new Set([
+			"margin", "page", "column", "character", "leftMargin", "rightMargin",
+			"insideMargin", "outsideMargin", "paragraph", "line", "topMargin",
+			"bottomMargin"
+		]);
+
+		// dist* attributes are EMU integers describing padding around the wrapped shape.
+		// Parsed as floats explicitly so DOCX-controlled text never reaches a template
+		// literal unchecked.
+		const distT = xml.floatAttr(node, "distT", 0);
+		const distB = xml.floatAttr(node, "distB", 0);
+		const distL = xml.floatAttr(node, "distL", 0);
+		const distR = xml.floatAttr(node, "distR", 0);
+		const marginTopPx = (distT || 0) / EMU_PER_PX;
+		const marginBottomPx = (distB || 0) / EMU_PER_PX;
+		const marginLeftPx = (distL || 0) / EMU_PER_PX;
+		const marginRightPx = (distR || 0) / EMU_PER_PX;
+
+		let wrapType: "wrapTopAndBottom" | "wrapNone" | "wrapSquare" | "wrapTight" | "wrapThrough" | null = null;
+		let wrapText: string | null = null;
+		let wrapPolygonPoints: Array<[number, number]> | null = null;
 		let simplePos = xml.boolAttr(node, "simplePos");
 		let behindDoc = xml.boolAttr(node, "behindDoc");
 
-		let posX = { relative: "page", align: "left", offset: "0" };
-		let posY = { relative: "page", align: "top", offset: "0" };
+		// Raw extent in EMU (used for polygon coord scaling). cssStyle width/height
+		// keep their existing pt representation for back-compat.
+		let extentCx = 0;
+		let extentCy = 0;
+
+		let posX = { relative: "page", align: "left", offset: "0", offsetEmu: 0 };
+		let posY = { relative: "page", align: "top", offset: "0", offsetEmu: 0 };
+
+		// wp:docPr/@descr — the preferred alt-text source. See parsePicture
+		// for the pic:cNvPr/@descr and a:blip/@descr fallbacks.
+		let docPrDescr: string | null = null;
 
 		for (var n of xml.elements(node)) {
 			switch (n.localName) {
+				case "docPr":
+					docPrDescr = xml.attr(n, "descr");
+					break;
+
 				case "simplePos":
 					if (simplePos) {
+						posX.offsetEmu = xml.floatAttr(n, "x", 0) || 0;
+						posY.offsetEmu = xml.floatAttr(n, "y", 0) || 0;
 						posX.offset = xml.lengthAttr(n, "x", LengthUsage.Emu);
 						posY.offset = xml.lengthAttr(n, "y", LengthUsage.Emu);
 					}
 					break;
 
 				case "extent":
+					extentCx = xml.floatAttr(n, "cx", 0) || 0;
+					extentCy = xml.floatAttr(n, "cy", 0) || 0;
 					result.cssStyle["width"] = xml.lengthAttr(n, "cx", LengthUsage.Emu);
 					result.cssStyle["height"] = xml.lengthAttr(n, "cy", LengthUsage.Emu);
 					break;
@@ -1008,8 +1192,11 @@ export class DocumentParser {
 						if (alignNode)
 							pos.align = alignNode.textContent;
 
-						if (offsetNode)
+						if (offsetNode) {
 							pos.offset = convertLength(offsetNode.textContent, LengthUsage.Emu);
+							const parsed = parseFloat(offsetNode.textContent);
+							pos.offsetEmu = Number.isFinite(parsed) ? parsed : 0;
+						}
 					}
 					break;
 
@@ -1021,6 +1208,33 @@ export class DocumentParser {
 					wrapType = "wrapNone";
 					break;
 
+				case "wrapSquare":
+					wrapType = "wrapSquare";
+					wrapText = xml.attr(n, "wrapText");
+					break;
+
+				case "wrapTight":
+				case "wrapThrough":
+					wrapType = n.localName as "wrapTight" | "wrapThrough";
+					wrapText = xml.attr(n, "wrapText");
+					{
+						const polyNode = xml.element(n, "wrapPolygon");
+						if (polyNode) {
+							const pts: Array<[number, number]> = [];
+							for (const child of xml.elements(polyNode)) {
+								if (child.localName !== "start" && child.localName !== "lineTo")
+									continue;
+								const x = xml.floatAttr(child, "x", NaN);
+								const y = xml.floatAttr(child, "y", NaN);
+								if (Number.isFinite(x) && Number.isFinite(y))
+									pts.push([x, y]);
+							}
+							if (pts.length >= 3)
+								wrapPolygonPoints = pts;
+						}
+					}
+					break;
+
 				case "graphic":
 					var g = this.parseGraphic(n);
 
@@ -1029,6 +1243,52 @@ export class DocumentParser {
 					break;
 			}
 		}
+
+		// Validate DOCX-derived enums against the allowlists before they reach any
+		// CSS string — the browser does not sanitise CSS property values.
+		const safeWrapText = wrapText && WRAP_TEXT_ALLOWED.has(wrapText) ? wrapText : null;
+		const safeRelativeH = RELATIVE_FROM_ALLOWED.has(posX.relative) ? posX.relative : "page";
+
+		// Decide which side the image floats on for the flowing-text wrap modes.
+		// "left" wrapText means text flows only on the left side — the image sits
+		// on the right, so it floats right. Mirror for "right". For "bothSides" /
+		// "largest" we fall back to the anchor's horizontal alignment (treating
+		// "center" as left).
+		const floatFromWrapText = (wt: string | null, align: string): "left" | "right" => {
+			if (wt === "left") return "right";
+			if (wt === "right") return "left";
+			if (align === "right") return "right";
+			return "left";
+		};
+
+		const applyMarginsToStyle = () => {
+			if (distT) result.cssStyle["margin-top"] = `${marginTopPx.toFixed(2)}px`;
+			if (distB) result.cssStyle["margin-bottom"] = `${marginBottomPx.toFixed(2)}px`;
+			if (distL) result.cssStyle["margin-left"] = `${marginLeftPx.toFixed(2)}px`;
+			if (distR) result.cssStyle["margin-right"] = `${marginRightPx.toFixed(2)}px`;
+		};
+
+		const applyShapeMargin = () => {
+			// shape-margin takes a single length. Use the largest dist* so text
+			// keeps a safe gap from the shape on every side.
+			const maxDist = Math.max(marginTopPx, marginBottomPx, marginLeftPx, marginRightPx);
+			if (maxDist > 0)
+				result.cssStyle["shape-margin"] = `${maxDist.toFixed(2)}px`;
+		};
+
+		const buildPolygonCss = (): string | null => {
+			if (!wrapPolygonPoints || wrapPolygonPoints.length < 3) return null;
+			if (extentCx <= 0 || extentCy <= 0) return null;
+			// Polygon points in wp:wrapPolygon are in EMU relative to the shape
+			// bounding box (extent cx/cy). Emitting percentages lets the polygon
+			// scale with the image element's box.
+			const segs = wrapPolygonPoints.map(([x, y]) => {
+				const px = (x / extentCx) * 100;
+				const py = (y / extentCy) * 100;
+				return `${px.toFixed(2)}% ${py.toFixed(2)}%`;
+			});
+			return `polygon(${segs.join(", ")})`;
+		};
 
 		if (wrapType == "wrapTopAndBottom") {
 			result.cssStyle['display'] = 'block';
@@ -1049,11 +1309,74 @@ export class DocumentParser {
 			if (posY.offset)
 				result.cssStyle["top"] = posY.offset;
 		}
+		else if (wrapType == "wrapSquare" || wrapType == "wrapTight" || wrapType == "wrapThrough") {
+			const floatSide = floatFromWrapText(safeWrapText, posX.align);
+
+			// relativeFrom=margin → behave like a plain float (current default).
+			// relativeFrom=column → inline-block pulled into the text flow via a
+			//   negative margin on the opposite side of the float.
+			// relativeFrom=paragraph → absolute positioning using posX.offsetEmu
+			//   converted to px.
+			if (safeRelativeH === "paragraph") {
+				result.cssStyle["position"] = "absolute";
+				const leftPx = (posX.offsetEmu || 0) / EMU_PER_PX;
+				result.cssStyle["left"] = `${leftPx.toFixed(2)}px`;
+				if (posY.offsetEmu) {
+					const topPx = (posY.offsetEmu || 0) / EMU_PER_PX;
+					result.cssStyle["top"] = `${topPx.toFixed(2)}px`;
+				}
+				applyMarginsToStyle();
+			} else if (safeRelativeH === "column") {
+				result.cssStyle["display"] = "inline-block";
+				result.cssStyle["float"] = floatSide;
+				// Pull the shape slightly into the column by negating the
+				// corresponding dist* so text wraps tightly against the text
+				// column edge.
+				applyMarginsToStyle();
+				if (floatSide === "left" && distL)
+					result.cssStyle["margin-left"] = `${(-marginLeftPx).toFixed(2)}px`;
+				else if (floatSide === "right" && distR)
+					result.cssStyle["margin-right"] = `${(-marginRightPx).toFixed(2)}px`;
+			} else {
+				// "margin" (and any other allowlisted relativeFrom) — plain float.
+				result.cssStyle["float"] = floatSide;
+				applyMarginsToStyle();
+			}
+
+			applyShapeMargin();
+
+			if (wrapType === "wrapTight" || wrapType === "wrapThrough") {
+				const polyCss = buildPolygonCss();
+				if (polyCss)
+					result.cssStyle["shape-outside"] = polyCss;
+			}
+		}
 		else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
 			result.cssStyle["float"] = posX.align;
 		}
 
+		// Propagate wp:docPr/@descr down to the contained IDomImage so
+		// renderImage can emit it as alt="". parsePicture may have already
+		// set altText from pic:cNvPr/a:blip; docPr wins since it's authored
+		// at the Word "Alt Text…" UI level.
+		if (docPrDescr != null) {
+			this.setImageAltText(result, docPrDescr);
+		}
+
 		return result;
+	}
+
+	// Recursively finds the single IDomImage child (if any) under a drawing
+	// wrapper and assigns altText. The tree shape is:
+	//   Drawing → (graphic?) → Image. One picture per drawing in practice.
+	private setImageAltText(elem: OpenXmlElement, descr: string) {
+		if (elem.type === DomType.Image) {
+			(elem as IDomImage).altText = descr;
+			return;
+		}
+		if (elem.children) {
+			for (const c of elem.children) this.setImageAltText(c, descr);
+		}
 	}
 
 	parseGraphic(elem: Element): OpenXmlElement {
@@ -1076,6 +1399,16 @@ export class DocumentParser {
 		var srcRect = xml.element(blipFill, "srcRect");
 
 		result.src = xml.attr(blip, "embed");
+
+		// Alt text: pic:nvPicPr/pic:cNvPr/@descr is the in-picture source;
+		// a:blip/@descr appears in some newer files. parseDrawingWrapper may
+		// overwrite this with wp:docPr/@descr — the authoring-level value.
+		const nvPicPr = xml.element(elem, "nvPicPr");
+		const cNvPr = nvPicPr ? xml.element(nvPicPr, "cNvPr") : null;
+		const picDescr = cNvPr ? xml.attr(cNvPr, "descr") : null;
+		const blipDescr = blip ? xml.attr(blip, "descr") : null;
+		if (picDescr != null) result.altText = picDescr;
+		else if (blipDescr != null) result.altText = blipDescr;
 
 		if (srcRect) {
 			result.srcRect = [
@@ -1220,6 +1553,19 @@ export class DocumentParser {
 			switch (c.localName) {
 				case "tc":
 					result.children.push(this.parseTableCell(c));
+					break;
+
+				case "bookmarkStart":
+					// Row-level bookmarks carry w:colFirst / w:colLast and
+					// denote a column range. Kept in `children` alongside the
+					// cells so renderTableRow can project them onto the matching
+					// <td>s. Bookmarks without col range still round-trip here
+					// but render as a plain inline anchor.
+					result.children.push(parseBookmarkStart(c, xml));
+					break;
+
+				case "bookmarkEnd":
+					result.children.push(parseBookmarkEnd(c, xml));
 					break;
 
 				case "trPr":

@@ -3,7 +3,8 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlSmartTag,
-	WmlTableRow
+	WmlTableRow,
+	WmlSdt
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
@@ -24,6 +25,8 @@ import { BaseHeaderFooterPart } from './header-footer/parts';
 import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReference } from './comments/elements';
+import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
+import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
@@ -57,6 +60,37 @@ export function isSafeHyperlinkHref(raw: string | null | undefined): boolean {
 		// paths like `foo/bar.html`. Treat as safe — no scheme, no sink.
 		return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
 	}
+}
+
+// Returns the fldCharType of the first WmlFieldChar nested inside the element,
+// or null if this element doesn't represent a field-char delimiter run.
+function complexFieldCharType(elem: OpenXmlElement): string | null {
+	if (!elem || elem.type !== DomType.Run) return null;
+	const run = elem as WmlRun;
+	if (!run.fieldRun || !run.children) return null;
+	for (const c of run.children) {
+		if (c.type === DomType.ComplexField) return (c as WmlFieldChar).charType;
+	}
+	return null;
+}
+
+function isComplexFieldBeginRun(elem: OpenXmlElement): boolean {
+	return complexFieldCharType(elem) === 'begin';
+}
+
+// Concatenates the text of every w:instrText inside the instruction-portion
+// runs of a complex field.
+function collectInstructionText(runs: OpenXmlElement[]): string {
+	let out = '';
+	for (const r of runs) {
+		if (!r || r.type !== DomType.Run || !r.children) continue;
+		for (const c of r.children) {
+			if (c.type === DomType.Instruction) {
+				out += (c as WmlInstructionText).text ?? '';
+			}
+		}
+	}
+	return out;
 }
 
 // Internal-only — addresses a rendered change element via data-change-kind.
@@ -98,6 +132,9 @@ export class HtmlRenderer {
 	currentVerticalMerge: CellVerticalMergeType = null;
 	tableCellPositions: CellPos[] = [];
 	currentCellPosition: CellPos = null;
+	// Set while rendering a WmlTableRow whose isHeader is true so
+	// renderTableCell can emit <th scope="col"> instead of <td>.
+	private currentRowIsHeader: boolean = false;
 
 	footnoteMap: Record<string, WmlFootnote> = {};
 	endnoteMap: Record<string, WmlFootnote> = {};
@@ -1106,22 +1143,70 @@ section.${c}>ol>li::before {
 			else if (num.levelText) {
 				let counter = this.numberingCounter(num.id, num.level);
 				const counterReset = counter + " " + (num.start - 1);
-				if (num.level > 0) {
-					styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
+				// w:lvlRestart picks an explicit ancestor level (0-based) at
+				// which this counter restarts. Its default (undefined / -1) is
+				// "restart at parent" — matched by the counter-set on the
+				// immediate parent-level selector below. A value of 0 means
+				// "never restart" in DOCX; we honour that by skipping the
+				// parent-level counter-set entirely. Any other value K maps to
+				// counter-reset on the K-level paragraph selector.
+				const restart = num.restart;
+				const restartDefault = restart === undefined || restart === -1;
+				if (restartDefault) {
+					if (num.level > 0) {
+						styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
+							"counter-set": counterReset
+						});
+					}
+				} else if (Number.isInteger(restart) && restart > 0 && restart <= num.level) {
+					// ECMA-376 w:lvlRestart is the 1-based ancestor level at
+					// which the counter resets. Our internal levels are
+					// 0-based, so a restart of K corresponds to the ancestor
+					// paragraph at ilvl = K - 1. Only meaningful for K <=
+					// current level; deeper targets are ignored.
+					styleText += this.styleToString(`p.${this.numberingClass(num.id, restart - 1)}`, {
 						"counter-set": counterReset
 					});
 				}
+				// When restart === 0, no per-ancestor reset is emitted: the
+				// counter keeps incrementing until the whole-document reset.
+
 				// reset all level counters with start value
 				resetCounters.push(counterReset);
 
 				// `levelTextToContent` escapes the attacker-controlled literal
 				// chunks before composing the `content` expression; counter
-				// names / numformat are validated above.
-				styleText += this.styleToString(`${selector}:before`, {
-					"content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
+				// names / numformat are validated above. `isLgl` forces every
+				// %N placeholder in the level text to arabic regardless of
+				// that level's own numFmt.
+				const levelFormat = this.numFormatToCssValue(num.format);
+				const beforeStyle: Record<string, string> = {
+					"content": this.levelTextToContent(
+						num.levelText,
+						num.suff,
+						num.id,
+						levelFormat,
+						num.isLgl === true,
+					),
 					"counter-increment": counter,
 					...num.rStyle,
-				});
+				};
+				// w:lvlJc — map to text-align on the marker container. Only
+				// emit values from the explicit allow list so a DOCX-derived
+				// string can't land raw in CSS. (jc is a type-safe enum in
+				// the schema, but we validate anyway.)
+				const justifyMap: Record<string, string> = {
+					left: "left",
+					right: "right",
+					center: "center",
+					start: "start",
+					end: "end",
+				};
+				const justify = num.justification && justifyMap[num.justification];
+				if (justify) {
+					beforeStyle["text-align"] = justify;
+				}
+				styleText += this.styleToString(`${selector}:before`, beforeStyle);
 			}
 			else {
 				listStyleType = this.numFormatToCssValue(num.format);
@@ -1136,6 +1221,10 @@ section.${c}>ol>li::before {
 		}
 
 		if (resetCounters.length > 0) {
+			// Each num/level counter appears here exactly once because the
+			// parser emits one IDomNumbering per (numId, level). Two <w:num>s
+			// sharing an abstractNumId therefore get independent counters
+			// rooted at the document root — Word's behaviour.
 			styleText += this.styleToString(this.rootSelector, {
 				"counter-reset": resetCounters.join(" ")
 			});
@@ -1242,9 +1331,20 @@ section.${c}>ol>li::before {
 
 			case DomType.Hyperlink:
 				return this.renderHyperlink(elem);
-			
+
 			case DomType.SmartTag:
 				return this.renderSmartTag(elem);
+
+			case DomType.SimpleField:
+				return this.renderSimpleField(elem as WmlFieldSimple);
+
+			case DomType.ComplexField:
+			case DomType.Instruction:
+				// Field-char delimiter and instrText elements only carry meaning
+				// when grouped across sibling runs. renderElements() collapses
+				// begin..separate..end sequences into a single wrapped group; a
+				// stray delimiter outside that grouping renders nothing.
+				return null;
 
 			case DomType.Drawing:
 				return this.renderDrawing(elem);
@@ -1390,6 +1490,9 @@ section.${c}>ol>li::before {
 				// parser still produces a node so consumers can detect them.
 				// See SECURITY_REVIEW.md #1.
 				return null;
+
+			case DomType.Sdt:
+				return this.renderSdt(elem as WmlSdt);
 		}
 
 		return null;
@@ -1398,12 +1501,132 @@ section.${c}>ol>li::before {
 		if (elems == null)
 			return null;
 
-		var result = elems.flatMap(e => this.renderElement(e)).filter(e => e != null);
+		// Fast path: no complex-field delimiter runs present. Most element
+		// lists take this path and pay nothing extra.
+		const hasComplexField = elems.some(e => isComplexFieldBeginRun(e));
+		const source = hasComplexField ? this.groupComplexFields(elems) : elems;
+
+		var result = source.flatMap(e => {
+			// groupComplexFields may return already-rendered Nodes inline with
+			// the element list — pass those through untouched.
+			if (e instanceof Node) return [e];
+			return this.renderElement(e as OpenXmlElement);
+		}).filter(e => e != null);
 
 		if (into)
 			result.forEach(c => into.appendChild(isString(c) ? document.createTextNode(c) : c));
 
 		return result;
+	}
+
+	// Walks a child list and replaces each <w:fldChar begin>…<w:fldChar end>
+	// sequence with the rendered wrapped result. Runs in the instruction
+	// portion (begin..separate) contribute their <w:instrText> to the
+	// instruction string; runs in the result portion (separate..end) render
+	// normally (the fieldRun guard is bypassed for them).
+	private groupComplexFields(elems: OpenXmlElement[]): (OpenXmlElement | Node)[] {
+		const out: (OpenXmlElement | Node)[] = [];
+		let i = 0;
+		while (i < elems.length) {
+			const el = elems[i];
+			if (!isComplexFieldBeginRun(el)) {
+				out.push(el);
+				i++;
+				continue;
+			}
+			// Scan forward for separate and end. We tolerate malformed input
+			// (missing separate or end) by stopping at the end of the list.
+			let sep = -1;
+			let end = -1;
+			for (let j = i + 1; j < elems.length; j++) {
+				const ct = complexFieldCharType(elems[j]);
+				if (ct === 'separate' && sep === -1) sep = j;
+				else if (ct === 'end') { end = j; break; }
+			}
+			if (end === -1) {
+				// Unterminated field; fall back to default rendering of the
+				// begin run (which renders nothing thanks to fieldRun) and
+				// continue past it.
+				i++;
+				continue;
+			}
+			const instrRuns = elems.slice(i + 1, sep === -1 ? end : sep);
+			const resultRuns = sep === -1 ? [] : elems.slice(sep + 1, end);
+			const instruction = collectInstructionText(instrRuns);
+			const parsed = parseFieldInstruction(instruction);
+			// Render cached-result runs. They are usually ordinary runs
+			// (fieldRun=false), but we bypass the guard explicitly so any
+			// unusual run carrying both a fldChar-less instrText/etc. and
+			// cached text still emits its cached text.
+			const rendered: Node[] = [];
+			for (const r of resultRuns) {
+				let n: Node | Node[] | null = null;
+				if (r && r.type === DomType.Run) {
+					n = this.renderRun(r as WmlRun, true);
+				} else {
+					n = this.renderElement(r);
+				}
+				if (n == null) continue;
+				if (Array.isArray(n)) rendered.push(...n);
+				else rendered.push(n);
+			}
+			const wrapped = this.wrapFieldResult(rendered, parsed);
+			out.push(...wrapped);
+			i = end + 1;
+		}
+		return out;
+	}
+
+	renderSimpleField(elem: WmlFieldSimple): Node | Node[] {
+		const parsed = parseFieldInstruction(elem.instruction);
+		const children = this.renderElements(elem.children) ?? [];
+		return this.wrapFieldResult(children, parsed);
+	}
+
+	// Wraps the rendered cached-result nodes based on the parsed instruction.
+	// HYPERLINK → <a href=…> (scheme-allowlisted). REF / PAGEREF → internal
+	// <a href="#anchor">. All other codes render as-is.
+	private wrapFieldResult(children: Node[], parsed: ParsedFieldInstruction): Node[] {
+		if (!children || children.length === 0) return children ?? [];
+		const code = parsed.code;
+		if (code === 'HYPERLINK') {
+			// "\l anchor" = internal fragment. Otherwise first positional
+			// arg is an external URL.
+			const hasLocal = parsed.switches.some(s => s.toLowerCase() === '\\l');
+			if (hasLocal) {
+				const anchor = parsed.args[0] ?? '';
+				const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+				a.setAttribute('href', '#' + anchor);
+				children.forEach(c => a.appendChild(c));
+				return [a];
+			}
+			const url = parsed.args[0] ?? '';
+			if (!isSafeHyperlinkHref(url)) {
+				// Drop the href — render an inert span so the cached text is
+				// still visible but has no navigation sink. Matches
+				// renderHyperlink's handling of unsafe schemes. See
+				// SECURITY_REVIEW.md #2.
+				const span = this.h({ tagName: "span" }) as HTMLElement;
+				children.forEach(c => span.appendChild(c));
+				return [span];
+			}
+			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+			a.setAttribute('href', url);
+			children.forEach(c => a.appendChild(c));
+			return [a];
+		}
+		if (code === 'REF' || code === 'PAGEREF') {
+			const anchor = parsed.args[0] ?? '';
+			if (!anchor) return children;
+			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+			a.setAttribute('href', '#' + anchor);
+			children.forEach(c => a.appendChild(c));
+			return [a];
+		}
+		// PAGE, NUMPAGES, DATE, TIME, AUTHOR, FILENAME, SEQ, STYLEREF,
+		// LISTNUM, MERGEFIELD, IF, ASK, FILLIN, INCLUDETEXT, TOC, and any
+		// code we don't recognise — render cached result verbatim.
+		return children;
 	}
 
 	renderContainer<T extends keyof HTMLElementTagNameMap>(elem: OpenXmlElement, tagName: T): HTMLElementTagNameMap[T] {
@@ -1507,11 +1730,52 @@ section.${c}>ol>li::before {
 		}
 
 		res.href = href;
-		return this.h(res);
+		const link = this.h(res) as HTMLElement;
+
+		// Tooltip (w:tooltip). DOCX-derived string — routed through
+		// setAttribute so the browser handles escaping. See CLAUDE.md
+		// security notes.
+		if (elem.tooltip) {
+			link.setAttribute('title', elem.tooltip);
+		}
+
+		// Target frame (w:tgtFrame). DOCX strings are attacker-controlled,
+		// so only a fixed set of values is honoured; anything else is dropped.
+		if (elem.targetFrame && /^_(blank|self|parent|top)$/.test(elem.targetFrame)) {
+			link.setAttribute('target', elem.targetFrame);
+			// For external links opened in a new browsing context, always set
+			// rel="noopener noreferrer" so the opened document cannot reach
+			// back into window.opener. No-op if the attribute is already set.
+			if (rawHref && !link.hasAttribute('rel')) {
+				link.setAttribute('rel', 'noopener noreferrer');
+			}
+		}
+
+		return link;
 	}
 	
 	renderSmartTag(elem: WmlSmartTag) {
 		return this.renderContainer(elem, "span");
+	}
+
+	// Structured Document Tag (content control). parseSdt only emits a
+	// DomType.Sdt wrapper when w:alias or w:tag is set on w:sdtPr — that's
+	// the only case where wrapping the content adds accessibility value.
+	// Otherwise the parser unwraps directly and this method isn't reached.
+	renderSdt(elem: WmlSdt) {
+		const children = this.renderElements(elem.children);
+		const span = this.h({ tagName: "span", children }) as HTMLSpanElement;
+		// DOCX-derived strings — setAttribute, never innerHTML / className.
+		span.setAttribute("role", "group");
+		if (elem.sdtAlias) {
+			span.setAttribute("aria-label", elem.sdtAlias);
+		}
+		if (elem.sdtTag) {
+			// Surface the programmatic tag as a data-attr; the browser
+			// HTML-encodes attribute values so this is safe for DOCX strings.
+			span.dataset.sdtTag = elem.sdtTag;
+		}
+		return span;
 	}
 	
 	renderCommentRangeStart(commentStart: WmlCommentRangeStart) {
@@ -1613,8 +1877,14 @@ section.${c}>ol>li::before {
 	renderDrawing(elem: OpenXmlElement) {
 		var result = this.toHTML(elem, ns.html, "div");
 
-		result.style.display = "inline-block";
-		result.style.position = "relative";
+		// Respect any display/position set by parseDrawingWrapper (wrapSquare /
+		// wrapTight / wrapThrough can set float + inline-block or absolute).
+		// Fall back to the historical inline-block defaults otherwise.
+		const parsed = elem.cssStyle ?? {};
+		if (!parsed["display"] && !parsed["float"])
+			result.style.display = "inline-block";
+		if (!parsed["position"] && !parsed["float"])
+			result.style.position = "relative";
 		result.style.textIndent = "0px";
 
 		return result;
@@ -1622,6 +1892,9 @@ section.${c}>ol>li::before {
 
 	renderImage(elem: IDomImage) {
 		let result = this.toHTML(elem, ns.html, "img", []);
+		// Accessibility: always set alt (empty string = decorative). Using
+		// the IDL setter — DOCX-derived text must not hit innerHTML.
+		(result as HTMLImageElement).alt = elem.altText ?? "";
 		let transform = elem.cssStyle?.transform;
 
 		if (elem.srcRect && elem.srcRect.some(x => x != 0)) {
@@ -1843,8 +2116,12 @@ section.${c}>ol>li::before {
 		return this.h({ tagName: "span", id: elem.name });
 	}
 
-	renderRun(elem: WmlRun) {
-		if (elem.fieldRun)
+	renderRun(elem: WmlRun, bypassFieldGuard: boolean = false) {
+		// The fieldRun flag is set on any run containing a w:fldChar or
+		// w:instrText. Those delimiter / instruction runs render nothing by
+		// default. groupComplexFields() passes bypassFieldGuard=true when
+		// rendering a result-portion run so its cached text is preserved.
+		if (elem.fieldRun && !bypassFieldGuard)
 			return null;
 
 		let children = this.renderElements(elem.children);
@@ -1936,7 +2213,33 @@ section.${c}>ol>li::before {
 		if (elem.gridBefore)
 			children.push(this.renderTableCellPlaceholder(elem.gridBefore));
 
-		children.push(...this.renderElements(elem.children));
+		// Row-level bookmarks (w:bookmarkStart with w:colFirst / w:colLast)
+		// are siblings of <w:tc> in the parsed tree. They describe a column
+		// range, not a cell, so they must not render as stray <span>s inside
+		// the <tr> (invalid markup). Pull them out of the child list here and
+		// project them onto the matching <td>s after the cells are rendered.
+		const rowBookmarks: { name: string; colFirst: number; colLast: number }[] = [];
+		const cellChildren: OpenXmlElement[] = [];
+		for (const child of (elem.children ?? [])) {
+			if (child.type === DomType.BookmarkStart) {
+				const bm = child as WmlBookmarkStart;
+				if (bm.colFirst != null && bm.colLast != null && bm.name) {
+					rowBookmarks.push({ name: bm.name, colFirst: bm.colFirst, colLast: bm.colLast });
+					continue;
+				}
+			}
+			// BookmarkEnd siblings of <tc> also have no sensible inline
+			// rendering position. renderElement already maps BookmarkEnd to
+			// null, but skipping it here avoids the empty array entry.
+			if (child.type === DomType.BookmarkEnd) continue;
+			cellChildren.push(child);
+		}
+
+		const prevHeader = this.currentRowIsHeader;
+		this.currentRowIsHeader = elem.isHeader === true;
+		const renderedCells = this.renderElements(cellChildren);
+		this.currentRowIsHeader = prevHeader;
+		children.push(...renderedCells);
 
 		if (elem.gridAfter)
 			children.push(this.renderTableCellPlaceholder(elem.gridAfter));
@@ -1944,6 +2247,42 @@ section.${c}>ol>li::before {
 		this.currentCellPosition.row++;
 
 		const tr = this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+
+		// Attach column-range bookmarks to the rendered row. The anchor span
+		// is placed as the first child of the first cell in the range so
+		// fragment-based navigation lands at the intended column rather than
+		// a stray inline span at the top of the row.
+		if (rowBookmarks.length > 0) {
+			const cellNodes: HTMLElement[] = [];
+			// `cellChildren` lines up with `renderedCells` by index; cells
+			// lie at positions where the source element is DomType.Cell.
+			let idx = 0;
+			for (const child of cellChildren) {
+				if (child.type === DomType.Cell) {
+					const node = renderedCells[idx];
+					if (node instanceof HTMLElement) cellNodes.push(node);
+				}
+				idx++;
+			}
+
+			const ranges: string[] = [];
+			for (const bm of rowBookmarks) {
+				ranges.push(`${bm.colFirst}-${bm.colLast}`);
+				const targetCell = cellNodes[bm.colFirst];
+				if (!targetCell) continue;
+				// Zero-width anchor. `id` goes through setAttribute so the
+				// browser attribute-encodes the DOCX-derived name; no CSS or
+				// innerHTML sink involved. See CLAUDE.md security notes.
+				const anchor = document.createElement('span');
+				anchor.setAttribute('id', bm.name);
+				targetCell.insertBefore(anchor, targetCell.firstChild);
+			}
+
+			// data-* attributes go through setAttribute too. The range string
+			// is composed of integers we parsed with parseInt, so there's no
+			// untrusted content in the value.
+			tr.setAttribute('data-bookmark-cols', ranges.join(','));
+		}
 
 		if (this.showChanges && elem.rowRevisionKind) {
 			this.applyRowRevision(tr, elem);
@@ -1988,7 +2327,13 @@ section.${c}>ol>li::before {
 	}
 
 	renderTableCell(elem: WmlTableCell) {
-		let result = this.toHTML(elem, ns.html, "td");
+		// Header rows (w:tblHeader on w:trPr) emit <th scope="col"> so screen
+		// readers can associate data cells with their column header.
+		const tagName = this.currentRowIsHeader ? "th" : "td";
+		let result = this.toHTML(elem, ns.html, tagName);
+		if (this.currentRowIsHeader) {
+			(result as HTMLTableCellElement).setAttribute("scope", "col");
+		}
 
 		const key = this.currentCellPosition.col;
 
@@ -2197,13 +2542,18 @@ section.${c}>ol>li::before {
 		return `${this.className}-num-${id}-${lvl}`;
 	}
 
-	levelTextToContent(text: string, suff: string, id: string, numformat: string) {
+	levelTextToContent(text: string, suff: string, id: string, numformat: string, isLgl: boolean = false) {
 		// text, id, and numformat are all derived from DOCX. Callers have
 		// already validated `id` and `numformat`; the `text` body is the last
 		// DOCX-controlled value that lands inside a CSS `content` string, so
 		// we escape `\` and `"` before embedding. Without this, a crafted
 		// levelText of `"}a{background:url(…)}"` would break out of the
 		// declaration block. See SECURITY_REVIEW.md #3.
+		//
+		// When `isLgl` is true (w:isLgl), every %N placeholder in the level
+		// text must render as arabic even if the referenced level's own
+		// numFmt is roman/alpha/etc. We achieve that by hard-coding the
+		// counter() format argument to `decimal` for sub-level references.
 		const suffMap = {
 			"tab": "\\9",
 			"space": "\\a0",
@@ -2222,7 +2572,10 @@ section.${c}>ol>li::before {
 				parts.push(`"${escapeCssStringContent(text.slice(last, m.index))}"`);
 			}
 			const lvl = parseInt(m[0].substring(1), 10) - 1;
-			parts.push(`counter(${this.numberingCounter(id, lvl)}, ${numformat})`);
+			// isLgl: force arabic on every placeholder. The literal `decimal`
+			// is a CSS-builtin keyword so this is safe.
+			const fmt = isLgl ? "decimal" : numformat;
+			parts.push(`counter(${this.numberingCounter(id, lvl)}, ${fmt})`);
 			last = re.lastIndex;
 		}
 		if (last < text.length) {
