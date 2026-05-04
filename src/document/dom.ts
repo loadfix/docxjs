@@ -206,6 +206,14 @@ export interface IDomNumbering {
     suff: string;
     format?: string;
     bullet?: NumberingPicBullet;
+    // When set, every %N placeholder in the level text must render as
+    // arabic regardless of that level's own numFmt (w:isLgl).
+    isLgl?: boolean;
+    // w:lvlRestart — the ancestor level whose occurrence resets this
+    // counter. Omitted / -1 means "default" (restart at parent).
+    restart?: number;
+    // w:lvlJc — left | right | center | start | end.
+    justification?: string;
 }
 
 export interface NumberingPicBullet {
