@@ -8,3 +8,5 @@ docx.js.map
 *.log
 .screenshots
 .playwright-mcp
+test-results
+playwright-report
