@@ -1023,12 +1023,11 @@ export function renderTreemap(model: ChartExDataModel): SVGElement {
         return svg;
     }
 
-    // Slice-and-dice layout: alternate horizontal / vertical splits per
-    // level. Simpler than the squarified algorithm (Bruls et al.) and
-    // sufficient for v1 — the trade-off is thinner, more elongated
-    // rectangles for very uneven trees. Squarified treemap remains a
-    // future optimisation; the cut point is here.
-    layoutSliceAndDice(model.root, plot.x, plot.y, plot.w, plot.h, 0);
+    // Squarified layout (Bruls et al. 2000) — produces rectangles with
+    // aspect ratios closer to 1:1 than the slice-and-dice alternative,
+    // matching Excel / Word's own rendering more closely. The entry
+    // point renderTreemap is unchanged; the swap is internal.
+    layoutSquarifiedTree(model.root, plot.x, plot.y, plot.w, plot.h);
     renderTreemapNodes(svg, doc, model.root, 0);
     return svg;
 }
@@ -1041,37 +1040,230 @@ interface LaidOutNode extends ChartExTreeNode {
     _x?: number; _y?: number; _w?: number; _h?: number;
 }
 
-function layoutSliceAndDice(
-    node: ChartExTreeNode, x: number, y: number, w: number, h: number, depth: number,
+// Recursively lay out `node`'s subtree. The parent's rect is written
+// to the node, then we squarify its direct children across that rect
+// and recurse into any non-leaf children with their computed rects.
+function layoutSquarifiedTree(
+    node: ChartExTreeNode, x: number, y: number, w: number, h: number,
 ) {
     const ln = node as LaidOutNode;
     ln._x = x; ln._y = y; ln._w = w; ln._h = h;
 
     if (node.children.length === 0) return;
+    if (w <= 0 || h <= 0) {
+        // Propagate an empty rect down so descendants don't inherit
+        // stale values from a previous layout.
+        for (const c of node.children) layoutSquarifiedTree(c, x, y, 0, 0);
+        return;
+    }
 
-    const total = node.value > 0 ? node.value : sumChildValue(node);
-    if (total <= 0) return;
+    const layout = squarifiedLayout(node.children, { x, y, width: w, height: h });
+    for (const r of layout) {
+        layoutSquarifiedTree(r.node, r.x, r.y, r.width, r.height);
+    }
+}
 
-    // Alternate horizontal / vertical splits. Depth 0 (outermost) slices
-    // the plot rectangle horizontally into top-level groups, the next
-    // level slices each group vertically, and so on. This is the
-    // classic slice-and-dice.
-    const horizontal = depth % 2 === 0;
+// -----------------------------------------------------------------
+// Squarified treemap layout
+// -----------------------------------------------------------------
+//
+// See Bruls et al., 'Squarified Treemaps' (2000).
+//
+// Given a rectangle and a set of child values, greedily pack children
+// into rows along the shorter side. For each candidate child, compute
+// the worst aspect ratio among the row's rectangles; commit the child
+// to the row if the ratio improves, otherwise close the row, peel it
+// off the parent, and start a new row on the remaining space.
 
-    let cursor = horizontal ? x : y;
-    for (const child of node.children) {
-        const childVal = Math.max(0, child.value);
-        const share = childVal / total;
-        if (horizontal) {
-            const cw = w * share;
-            layoutSliceAndDice(child, cursor, y, cw, h, depth + 1);
-            cursor += cw;
+export interface TreemapLayoutRect {
+    node: ChartExTreeNode;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+interface PlainRect { x: number; y: number; width: number; height: number; }
+
+export function squarifiedLayout(
+    children: ChartExTreeNode[],
+    rect: PlainRect,
+): TreemapLayoutRect[] {
+    const out: TreemapLayoutRect[] = [];
+    if (children.length === 0) return out;
+    if (!(rect.width > 0) || !(rect.height > 0)) return out;
+
+    // Single-child fast path: it fills the whole rect regardless of
+    // value sign.
+    if (children.length === 1) {
+        out.push({
+            node: children[0],
+            x: rect.x, y: rect.y,
+            width: rect.width, height: rect.height,
+        });
+        return out;
+    }
+
+    // Coerce values to finite non-negative numbers, preserving the
+    // child reference. Sort descending — the algorithm assumes it.
+    const items = children
+        .map((node) => {
+            const raw = parseFloat(node.value as unknown as string);
+            const v = Number.isFinite(raw) && raw > 0 ? raw : 0;
+            return { node, value: v };
+        })
+        .sort((a, b) => b.value - a.value);
+
+    const total = items.reduce((s, i) => s + i.value, 0);
+    if (total <= 0) {
+        // Every child is zero / negative. Match Wave 7.2 semantics:
+        // leaves still render with a label but no area. Emit zero-area
+        // rects collapsed against the parent's top-left corner.
+        for (const it of items) {
+            out.push({
+                node: it.node,
+                x: rect.x, y: rect.y,
+                width: 0, height: 0,
+            });
+        }
+        return out;
+    }
+
+    // Scale value-space so the sum equals the rect's area. Keeping the
+    // algorithm in scaled units avoids recomputing the scale factor
+    // every step.
+    const area = rect.width * rect.height;
+    const scale = area / total;
+    const scaled = items.map((i) => ({ node: i.node, area: i.value * scale }));
+
+    squarifyInto(scaled, [], { ...rect }, out);
+    return out;
+}
+
+interface ScaledItem { node: ChartExTreeNode; area: number; }
+
+function squarifyInto(
+    remaining: ScaledItem[],
+    row: ScaledItem[],
+    rect: PlainRect,
+    out: TreemapLayoutRect[],
+): void {
+    // Iterate instead of recursing to dodge stack growth on pathological
+    // inputs. Each loop either extends the current row or closes it.
+    while (true) {
+        if (remaining.length === 0) {
+            if (row.length > 0) layoutRow(row, rect, out);
+            return;
+        }
+        const w = Math.min(rect.width, rect.height);
+        if (w <= 0) {
+            // No space left; drop remaining as zero-area against the
+            // current rect origin. Unreachable in practice because
+            // layoutRow peels off a strip of positive width whenever
+            // the row had positive area — defensive.
+            for (const it of [...row, ...remaining]) {
+                out.push({ node: it.node, x: rect.x, y: rect.y, width: 0, height: 0 });
+            }
+            return;
+        }
+        const head = remaining[0];
+        const extended = row.length === 0
+            ? [head]
+            : [...row, head];
+        // Zero-area items never worsen the row (numerator collapses);
+        // cheaper to skip the ratio comparison and just keep going.
+        if (row.length === 0 || worstRatio(extended, w) <= worstRatio(row, w)) {
+            row = extended;
+            remaining = remaining.slice(1);
         } else {
-            const ch = h * share;
-            layoutSliceAndDice(child, x, cursor, w, ch, depth + 1);
-            cursor += ch;
+            rect = layoutRow(row, rect, out);
+            row = [];
         }
     }
+}
+
+function worstRatio(row: ScaledItem[], w: number): number {
+    let s = 0;
+    let rmax = -Infinity;
+    let rmin = Infinity;
+    for (const r of row) {
+        s += r.area;
+        if (r.area > rmax) rmax = r.area;
+        if (r.area < rmin) rmin = r.area;
+    }
+    if (s <= 0) return Infinity;
+    const w2 = w * w;
+    const s2 = s * s;
+    // rmin can be 0 — when the row contains a zero-area item, its
+    // aspect ratio is unbounded. Report Infinity so the row closes
+    // rather than absorbing a sliver of nothing.
+    const a = (w2 * rmax) / s2;
+    const b = rmin > 0 ? s2 / (w2 * rmin) : Infinity;
+    return Math.max(a, b);
+}
+
+// Place `row` along the shorter side of `rect`; return the remaining
+// rect for subsequent rows.
+function layoutRow(row: ScaledItem[], rect: PlainRect, out: TreemapLayoutRect[]): PlainRect {
+    let sum = 0;
+    for (const r of row) sum += r.area;
+    if (sum <= 0) {
+        // Row is all zero-area. Emit collapsed rects at the origin and
+        // leave the parent rect untouched so the next row has the full
+        // remaining space.
+        for (const r of row) {
+            out.push({ node: r.node, x: rect.x, y: rect.y, width: 0, height: 0 });
+        }
+        return rect;
+    }
+    const horizontal = rect.width >= rect.height;
+    if (horizontal) {
+        // Row is a vertical strip of width `sum / height` along the
+        // left edge.
+        const stripW = sum / rect.height;
+        let cy = rect.y;
+        for (const r of row) {
+            const hh = rect.height * (r.area / sum);
+            out.push({
+                node: r.node,
+                x: rect.x, y: cy,
+                width: stripW, height: hh,
+            });
+            cy += hh;
+        }
+        return {
+            x: rect.x + stripW, y: rect.y,
+            width: Math.max(0, rect.width - stripW), height: rect.height,
+        };
+    } else {
+        // Row is a horizontal strip of height `sum / width` along the
+        // top edge.
+        const stripH = sum / rect.width;
+        let cx = rect.x;
+        for (const r of row) {
+            const ww = rect.width * (r.area / sum);
+            out.push({
+                node: r.node,
+                x: cx, y: rect.y,
+                width: ww, height: stripH,
+            });
+            cx += ww;
+        }
+        return {
+            x: rect.x, y: rect.y + stripH,
+            width: rect.width, height: Math.max(0, rect.height - stripH),
+        };
+    }
+}
+
+// Harness-facing helper. Lays out a node list into `rect` and returns
+// the positioned rectangles directly, so jsdom tests can assert on
+// positions without needing a chart fixture or DOM.
+export function layoutTreemap(
+    nodes: ChartExTreeNode[],
+    rect: PlainRect,
+): TreemapLayoutRect[] {
+    return squarifiedLayout(nodes, rect);
 }
 
 function renderTreemapNodes(
@@ -1106,10 +1298,13 @@ function renderTreemapLeaf(
         ?? DEFAULT_PALETTE[paletteIdx % DEFAULT_PALETTE.length];
 
     const rect = doc.createElementNS(SVG_NS, "rect");
-    rect.setAttribute("x", fmt(x));
-    rect.setAttribute("y", fmt(y));
-    rect.setAttribute("width", fmt(w));
-    rect.setAttribute("height", fmt(h));
+    // Use higher precision here than the default two-decimal `fmt`:
+    // squarified rows share edges and need to line up sub-pixel so we
+    // don't leave visible gaps or overlaps between siblings.
+    rect.setAttribute("x", fmt6(x));
+    rect.setAttribute("y", fmt6(y));
+    rect.setAttribute("width", fmt6(w));
+    rect.setAttribute("height", fmt6(h));
     rect.setAttribute("fill", color);
     rect.setAttribute("stroke", "#fff");
     rect.setAttribute("stroke-width", "1");
@@ -1124,4 +1319,10 @@ function renderTreemapLeaf(
         });
         svg.appendChild(label);
     }
+}
+
+function fmt6(n: number): string {
+    if (!Number.isFinite(n)) return "0";
+    // Trim trailing zeros to keep the emitted SVG compact.
+    return Number(n.toFixed(6)).toString();
 }
