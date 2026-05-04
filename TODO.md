@@ -401,3 +401,114 @@ most improve perceived fidelity:
    without honouring `startOverride`. Adds a small parser change in
    `parseNumberingFile` (`document-parser.ts:434`) and one CSS
    `counter-reset` on the paragraph with the override.
+
+---
+
+## Conformance gaps (auto-filed from corpus 2026-05-04 overnight run)
+
+The 950-case OOXML conformance corpus run
+(`loadfix/ooxml-validate` → `conformance/results/docxjs/`) surfaced 16
+rendering gaps against the docxjs fork at `26c54dd`. Grouped below by
+root cause. Each bullet links to the result JSON on GitHub and ends
+with an actionable fix hypothesis.
+
+- **Paragraph-level computed styles never reach the DOM (7 fixtures).**
+  The assertion `selector .docx-wrapper p:not(:has(*)) matched no nodes`
+  fires on `docx/alignment-left`, `docx/alignment-center`,
+  `docx/alignment-right`, `docx/alignment-justify`,
+  `docx/line-spacing-double`, `docx/paragraph-indent-first-line`, and
+  every `docx/paragraph-alignment-param--*` variant
+  (`both` / `center` / `distribute` / `left` / `right` / `start`). Result
+  JSONs:
+  [alignment-left](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/alignment-left.json),
+  [alignment-center](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/alignment-center.json),
+  [alignment-right](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/alignment-right.json),
+  [alignment-justify](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/alignment-justify.json),
+  [line-spacing-double](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/line-spacing-double.json),
+  [paragraph-indent-first-line](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-indent-first-line.json),
+  [paragraph-alignment-param--both](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-alignment-param--both.json),
+  [paragraph-alignment-param--center](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-alignment-param--center.json),
+  [paragraph-alignment-param--distribute](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-alignment-param--distribute.json),
+  [paragraph-alignment-param--left](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-alignment-param--left.json),
+  [paragraph-alignment-param--right](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-alignment-param--right.json),
+  [paragraph-alignment-param--start](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/paragraph-alignment-param--start.json).
+  Root cause: `renderParagraph` emits `<p class="docx-N">` but all
+  per-paragraph properties (`text-align`, `line-height`, `text-indent`,
+  etc.) are written onto the class rule in the injected stylesheet, so
+  selectors keyed on computed style against a bare `<p>` see
+  specificity-zero fallbacks. Fix: add a stable, queryable hook per
+  paragraph — either emit a `docx-paragraph` utility class on every
+  `<p>` and include `text-align` / `line-height` / `text-indent` inline
+  via `style=` (or a `data-*` attribute) so conformance checkers and
+  downstream consumers can read the computed value without loading the
+  injected stylesheet. Matching fix for the border-around-paragraph
+  case below.
+- **Paragraph border computed width is 0px.**
+  [border-around-paragraph](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/border-around-paragraph.json)
+  fails `border-top-width="0px" does not match "^[1-9]"`. `parsePBdr`
+  reads `w:pBdr` correctly but the emitted `.docx-N { border-top: ... }`
+  rule is lost when a paragraph sits inside a table cell that sets
+  `border-collapse: collapse`, or when the paragraph class is overridden
+  by a style-inherited `border: 0`. Fix: after computing the border in
+  `parseBorderProperties`, write `border-top`/`border-*` inline on the
+  paragraph element so it survives cascade; alternatively bump
+  selector specificity with `.docx-wrapper p.docx-N`.
+- **Inline image rewritten to `blob:` rather than `data:` URL.**
+  [image-inline](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/image-inline.json)
+  fails `img-src-is-data-url`: 0 nodes match. `loadDocumentImage`
+  (`src/word-document.ts:166`) currently wraps every image blob through
+  `URL.createObjectURL`, which produces `blob:` URIs. Fix: add an
+  `Options.inlineImagesAsDataUrl` flag (default off for byte-stable
+  behaviour) that runs the blob through `FileReader.readAsDataURL` and
+  emits `src="data:<mime>;base64,..."` — useful for headless snapshot
+  testing and for hosts that need self-contained HTML.
+- **Page-break and landscape markers not emitted.**
+  [page-break](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/page-break.json)
+  fails `page-break-after-text-rendered` and `page-break-marker-present`
+  (0 nodes matched);
+  [page-orientation-landscape](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/page-orientation-landscape.json)
+  fails `landscape-marker-present` (0 nodes matched). Both are
+  rendered visually when `experimentalPageBreaks` is on but expose no
+  DOM hook. Fix: regardless of the option, emit
+  `<div class="docx-page-break" data-page-break>` for every `w:br
+  w:type="page"` and add `data-page-orientation="portrait|landscape"`
+  on the page wrapper (section) so downstream tooling can query both
+  without enabling experimental pagination.
+- **Multi-level list only emits level-0 text.**
+  [multi-level-list](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/multi-level-list.json)
+  finds `"Level 0 item"` where the fixture also declares `"Level 1 item"`
+  and `"Level 2 item"`. Root cause hypothesis: `parseNumberingLevel`
+  reads `ilvl` correctly but `renderParagraph` collapses nested-list
+  paragraphs into the top-level `<ul>` because it does not re-nest on
+  `ilvl` change; deeper levels get rendered as siblings of the first and
+  the test's `nth-of-type(n+2)` fails. Fix: track previous `ilvl` across
+  consecutive `NumberingList` paragraphs in `renderParagraph` and open
+  additional nested `<ul>`/`<ol>` when `ilvl` increases, close them when
+  it decreases — see `html-renderer.ts:1110` where the counter-reset is
+  emitted but the nesting itself is not.
+- **Table header row absent from DOM.**
+  [table-with-header-row](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/table-with-header-row.json)
+  fails `table-header-row-rendered` with "No node to match against" —
+  the selector targets `<thead>` / `[data-header-row]`. `row.isHeader` is
+  set (`document-parser.ts:1242`) but `renderTable` always emits `<tr>` /
+  `<td>` inside `<tbody>`. Fix: when `isHeader` is true, lift those rows
+  into a `<thead>` and emit `<th scope="col">` cells (ties into the
+  existing accessibility note on `w:tblHeader` → `scope="col"` at the
+  bottom of the "Accessibility and semantics" table above).
+- **Reference-type elements have no DOM anchor.**
+  [comment](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/comment.json),
+  [footnote](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/footnote.json),
+  and [field-ref](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/docxjs/docx/field-ref.json)
+  all fail with "0 node(s) matched" for their anchor selectors
+  (`comment-anchor-rendered`, `footnote-anchor-rendered`,
+  `ref-field-rendered`). Comments render into the sidebar, footnotes
+  render at section end, REF fields currently emit nothing
+  (`fieldRun=true` early-return in `renderRun`, see priority
+  recommendation #1 above). Fix: in the body flow emit
+  `<sup class="docx-comment-ref" data-comment-id="...">` for
+  `w:commentReference`, `<sup class="docx-footnote-ref"
+  data-footnote-id="...">` for `w:footnoteReference`, and for REF fields
+  promote the cached result from the `fldChar/@separate` … `fldChar/@end`
+  text range into an `<a class="docx-field-ref" data-field-instr="REF">`
+  wrapping the cached text — so that "See: Bookmarked passage" actually
+  renders end-to-end.
