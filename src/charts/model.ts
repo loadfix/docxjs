@@ -112,11 +112,14 @@ export type ChartExKind =
     | "box_whisker"
     | "unknown";
 
-// Placeholder emitted for `/word/charts/chartEx*.xml` parts. We don't
-// attempt to render these as real charts in v1; the renderer instead
-// produces a labelled `<div class="docx-chartex-placeholder">` so
-// the reader sees something where a chart would otherwise be missing.
+// Placeholder emitted for `/word/charts/chartEx*.xml` parts whose kind
+// we don't yet render as a real SVG chart (waterfall / funnel /
+// histogram / pareto / box_whisker). The renderer produces a labelled
+// `<div class="docx-chartex-placeholder">` so the reader sees
+// something where a chart would otherwise be missing.
 export interface ChartExPlaceholder {
+    // Discriminator separating the placeholder from parsed data models.
+    shape: "placeholder";
     // Unique key (the chartEx part's path without extension).
     key: string;
     // Extracted <cx:title> text, or "" when the chartEx had no title.
@@ -126,3 +129,54 @@ export interface ChartExPlaceholder {
     // the renderer writes it into the `data-chart-kind` attribute.
     kind: ChartExKind;
 }
+
+// A node in the hierarchical category tree used by both sunburst and
+// treemap. Built from <cx:strDim type="cat"><cx:lvl> multi-level
+// category data: each `<cx:lvl>` describes one depth of the tree and
+// each `<cx:pt>` at level N declares its parent's idx at level N-1
+// (via the `parent` / legacy `parentIdx` attribute).
+//
+// `value` on a leaf is the raw <cx:numDim type="val"> entry for that
+// point. On an intermediate node `value` is the sum of its
+// descendants' leaf values — computed by `buildCategoryTree`.
+//
+// `color` is the sanitised fill colour from the matching <cx:dataPt>
+// override, or null when the series didn't declare one (renderer
+// falls back to the palette by leaf index).
+//
+// Security: `label` is attacker-controlled and reaches the DOM only
+// via textContent. `color` has already passed sanitizeCssColor.
+export interface ChartExTreeNode {
+    label: string;
+    value: number;
+    color: string | null;
+    children: ChartExTreeNode[];
+    // 0-based depth. Root placeholder is at level -1 and never renders;
+    // the first real level is 0 (innermost ring for sunburst).
+    level: number;
+    // Original leaf index within the flattened <cx:numDim> (used to
+    // look up per-point overrides and to rotate the palette). -1 on
+    // intermediate nodes.
+    leafIndex: number;
+}
+
+// Parsed data model for the two chartEx kinds we render as real
+// SVG: sunburst and treemap. Both share the same tree shape; only
+// the layout differs at render time.
+export interface ChartExDataModel {
+    shape: "data";
+    key: string;
+    title: string;
+    // Restricted to the kinds we actually render; chartex-part.ts
+    // falls back to a placeholder for anything else.
+    kind: "sunburst" | "treemap";
+    // Root of the parsed category tree. Children are the level-0
+    // nodes. The root itself is a synthetic container with label "".
+    root: ChartExTreeNode;
+    // Maximum depth across the tree (root = 0, first real level = 1,
+    // etc.). Used by the sunburst renderer to size rings.
+    maxDepth: number;
+}
+
+// Union consumed by renderChartEx in html-renderer.ts.
+export type ChartExModel = ChartExPlaceholder | ChartExDataModel;

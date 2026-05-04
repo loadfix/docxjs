@@ -1,5 +1,12 @@
 import { sanitizeCssColor } from "../utils";
-import { ChartAxisColorRef, ChartAxisStyle, ChartModel, ChartSeries } from "./model";
+import {
+    ChartAxisColorRef,
+    ChartAxisStyle,
+    ChartExDataModel,
+    ChartExTreeNode,
+    ChartModel,
+    ChartSeries,
+} from "./model";
 import { resolveSchemeColor } from "../drawing/theme";
 
 // Options threaded into the SVG chart renderer. Currently carries only
@@ -815,5 +822,306 @@ function adjustLegendIfNeeded(svg: SVGElement) {
             const next = `${prev} translate(${(-shift).toFixed(2)},0)`.trim();
             node.setAttribute("transform", next);
         }
+    }
+}
+
+// -----------------------------------------------------------------
+// ChartEx: sunburst and treemap
+// -----------------------------------------------------------------
+//
+// ChartEx schema uses a multi-level category tree (<cx:strDim
+// type="cat"><cx:lvl>) plus a flat value dim (<cx:numDim type="val">).
+// chartex-part.ts does the data-model work; here we only take the
+// parsed tree and lay it out in SVG.
+//
+// Security: same rules as the classic chart renderer — labels reach
+// the DOM via textContent only, colours via sanitizeCssColor. SVG
+// path `d` strings are built from hard-coded command letters plus
+// numbers formatted through `fmt`. No DOCX content reaches `d`.
+
+// Minimum angular sweep (radians) before we render a sunburst label.
+// ~0.12 rad ≈ 7°, below which the text would collide with the arc
+// boundary even at the outer ring. Small slices still render the arc,
+// just without a label.
+const SUNBURST_LABEL_THRESHOLD = 0.12;
+// Minimum rectangle width/height (px) before we render a treemap label.
+const TREEMAP_LABEL_MIN_W = 32;
+const TREEMAP_LABEL_MIN_H = 14;
+
+export function renderSunburst(model: ChartExDataModel): SVGElement {
+    const doc: Document = document;
+    const svg = doc.createElementNS(SVG_NS, "svg") as SVGElement;
+    svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.style.maxWidth = "100%";
+    svg.style.height = "auto";
+    svg.style.display = "block";
+
+    const title = (model.title ?? "").trim();
+    const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
+    if (title) {
+        svg.appendChild(mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, title, {
+            fontSize: 14, fontWeight: "600", anchor: "middle",
+        }));
+    }
+
+    const plotTop = titleBottom + 4;
+    const plotBottom = VIEW_H - PADDING;
+    const cx = VIEW_W / 2;
+    const cy = (plotTop + plotBottom) / 2;
+    // Leave an inner hole so nested rings aren't squashed onto a point.
+    const outerR = Math.max(0, Math.min(VIEW_W - 2 * PADDING, plotBottom - plotTop) / 2 - 4);
+    if (outerR <= 0 || model.root.value <= 0 || model.maxDepth === 0) {
+        // Nothing to render — emit a neutral "empty" marker so the
+        // caller's wrapper still has something inside.
+        svg.appendChild(mkText(doc, VIEW_W / 2, VIEW_H / 2, title || "[sunburst]", {
+            fontSize: 12, anchor: "middle", fill: "#888",
+        }));
+        return svg;
+    }
+    // Innermost ring gets a small radius so it reads as a hub; each
+    // subsequent ring adds uniform thickness.
+    const innerR = Math.min(outerR * 0.15, 24);
+    const ringThickness = (outerR - innerR) / model.maxDepth;
+
+    // Walk the tree, emitting an SVG <path> arc for each non-root node.
+    // Each child's angular sweep is proportional to its value share
+    // of the parent; siblings are placed consecutively.
+    renderSunburstNode(
+        svg, doc, model.root, cx, cy, innerR, ringThickness,
+        -Math.PI / 2, 2 * Math.PI, 0,
+    );
+
+    return svg;
+}
+
+function renderSunburstNode(
+    svg: SVGElement, doc: Document, node: ChartExTreeNode,
+    cx: number, cy: number, innerR: number, ringThickness: number,
+    startAngle: number, sweep: number, paletteIdx: number,
+) {
+    const total = node.value > 0 ? node.value : sumChildValue(node);
+    if (total <= 0 || node.children.length === 0) return;
+
+    let angle = startAngle;
+    for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        // Leaf values that degenerated to 0 (negative / NaN source)
+        // contribute nothing to the sweep; skip them silently.
+        if (child.value <= 0) continue;
+
+        const share = child.value / total;
+        const slice = sweep * share;
+        const r0 = innerR + ringThickness * child.level;
+        const r1 = r0 + ringThickness;
+
+        // Colour precedence: explicit tree-node colour (set by
+        // parse-time dataPt override or propagated from an ancestor);
+        // fall back to palette rotation seeded by the top-level index
+        // so the visual grouping follows the root's children.
+        const basePaletteIdx = child.level === 0 ? i : paletteIdx;
+        const color = sanitizeCssColor(child.color)
+            ?? DEFAULT_PALETTE[basePaletteIdx % DEFAULT_PALETTE.length];
+
+        const path = doc.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", sunburstArcPath(cx, cy, r0, r1, angle, angle + slice));
+        path.setAttribute("fill", color);
+        path.setAttribute("stroke", "#fff");
+        path.setAttribute("stroke-width", "1");
+        svg.appendChild(path);
+
+        // Label the slice when there's room. "Enough room" is an
+        // approximation: the midpoint of the arc, rotated back so
+        // text sits upright. Skip very small sweeps to stop labels
+        // overlapping.
+        if (slice >= SUNBURST_LABEL_THRESHOLD && child.label) {
+            const midAngle = angle + slice / 2;
+            const midR = (r0 + r1) / 2;
+            const tx = cx + midR * Math.cos(midAngle);
+            const ty = cy + midR * Math.sin(midAngle);
+            // Baseline adjustment keeps the label centred on the mid-
+            // radius rather than hanging below it.
+            const text = mkText(doc, tx, ty + 4, child.label, {
+                fontSize: Math.min(FONT_SIZE, Math.max(8, ringThickness * 0.45)),
+                anchor: "middle",
+                fill: "#fff",
+            });
+            svg.appendChild(text);
+        }
+
+        // Recurse into descendants — they occupy the outer rings within
+        // this slice's angular range.
+        renderSunburstNode(
+            svg, doc, child, cx, cy, innerR, ringThickness,
+            angle, slice, basePaletteIdx,
+        );
+
+        angle += slice;
+    }
+}
+
+function sumChildValue(node: ChartExTreeNode): number {
+    let total = 0;
+    for (const c of node.children) total += c.value;
+    return total;
+}
+
+// Builds a filled annular sector (pie-slice ring) from (r0, r1) ×
+// (a0, a1). SVG path:
+//   M outer-start  A outer-arc  L inner-end  A inner-arc  Z
+// All tokens are command letters plus numbers — no DOCX string ever
+// reaches the `d` attribute.
+function sunburstArcPath(
+    cx: number, cy: number, r0: number, r1: number,
+    a0: number, a1: number,
+): string {
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    const x0o = cx + r1 * Math.cos(a0);
+    const y0o = cy + r1 * Math.sin(a0);
+    const x1o = cx + r1 * Math.cos(a1);
+    const y1o = cy + r1 * Math.sin(a1);
+    const x0i = cx + r0 * Math.cos(a1);
+    const y0i = cy + r0 * Math.sin(a1);
+    const x1i = cx + r0 * Math.cos(a0);
+    const y1i = cy + r0 * Math.sin(a0);
+    return `M ${fmt(x0o)} ${fmt(y0o)}`
+        + ` A ${fmt(r1)} ${fmt(r1)} 0 ${large} 1 ${fmt(x1o)} ${fmt(y1o)}`
+        + ` L ${fmt(x0i)} ${fmt(y0i)}`
+        + ` A ${fmt(r0)} ${fmt(r0)} 0 ${large} 0 ${fmt(x1i)} ${fmt(y1i)}`
+        + ` Z`;
+}
+
+export function renderTreemap(model: ChartExDataModel): SVGElement {
+    const doc: Document = document;
+    const svg = doc.createElementNS(SVG_NS, "svg") as SVGElement;
+    svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.style.maxWidth = "100%";
+    svg.style.height = "auto";
+    svg.style.display = "block";
+
+    const title = (model.title ?? "").trim();
+    const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
+    if (title) {
+        svg.appendChild(mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, title, {
+            fontSize: 14, fontWeight: "600", anchor: "middle",
+        }));
+    }
+
+    const plotTop = titleBottom + 4;
+    const plotBottom = VIEW_H - PADDING;
+    const plot = {
+        x: PADDING, y: plotTop,
+        w: VIEW_W - 2 * PADDING, h: plotBottom - plotTop,
+    };
+    if (plot.w <= 0 || plot.h <= 0 || model.root.value <= 0) {
+        svg.appendChild(mkText(doc, VIEW_W / 2, VIEW_H / 2, title || "[treemap]", {
+            fontSize: 12, anchor: "middle", fill: "#888",
+        }));
+        return svg;
+    }
+
+    // Slice-and-dice layout: alternate horizontal / vertical splits per
+    // level. Simpler than the squarified algorithm (Bruls et al.) and
+    // sufficient for v1 — the trade-off is thinner, more elongated
+    // rectangles for very uneven trees. Squarified treemap remains a
+    // future optimisation; the cut point is here.
+    layoutSliceAndDice(model.root, plot.x, plot.y, plot.w, plot.h, 0);
+    renderTreemapNodes(svg, doc, model.root, 0);
+    return svg;
+}
+
+// Each node owns a {x, y, w, h} rectangle computed during layout. We
+// stash the rect on the node itself rather than a side map because
+// the tree is single-use (we rebuild it per part). This keeps render
+// traversal trivial.
+interface LaidOutNode extends ChartExTreeNode {
+    _x?: number; _y?: number; _w?: number; _h?: number;
+}
+
+function layoutSliceAndDice(
+    node: ChartExTreeNode, x: number, y: number, w: number, h: number, depth: number,
+) {
+    const ln = node as LaidOutNode;
+    ln._x = x; ln._y = y; ln._w = w; ln._h = h;
+
+    if (node.children.length === 0) return;
+
+    const total = node.value > 0 ? node.value : sumChildValue(node);
+    if (total <= 0) return;
+
+    // Alternate horizontal / vertical splits. Depth 0 (outermost) slices
+    // the plot rectangle horizontally into top-level groups, the next
+    // level slices each group vertically, and so on. This is the
+    // classic slice-and-dice.
+    const horizontal = depth % 2 === 0;
+
+    let cursor = horizontal ? x : y;
+    for (const child of node.children) {
+        const childVal = Math.max(0, child.value);
+        const share = childVal / total;
+        if (horizontal) {
+            const cw = w * share;
+            layoutSliceAndDice(child, cursor, y, cw, h, depth + 1);
+            cursor += cw;
+        } else {
+            const ch = h * share;
+            layoutSliceAndDice(child, x, cursor, w, ch, depth + 1);
+            cursor += ch;
+        }
+    }
+}
+
+function renderTreemapNodes(
+    svg: SVGElement, doc: Document, node: ChartExTreeNode, paletteIdx: number,
+) {
+    // Walk depth-first; render each leaf as a <rect> with its label.
+    // Intermediate nodes don't render themselves — only their leaves
+    // do — but their children inherit the seeded palette index so
+    // colours cluster visually.
+    for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        const seedIdx = child.level === 0 ? i : paletteIdx;
+        if (child.children.length === 0) {
+            renderTreemapLeaf(svg, doc, child, seedIdx);
+        } else {
+            renderTreemapNodes(svg, doc, child, seedIdx);
+        }
+    }
+}
+
+function renderTreemapLeaf(
+    svg: SVGElement, doc: Document, node: ChartExTreeNode, paletteIdx: number,
+) {
+    const ln = node as LaidOutNode;
+    const x = ln._x ?? 0;
+    const y = ln._y ?? 0;
+    const w = ln._w ?? 0;
+    const h = ln._h ?? 0;
+    if (w <= 0 || h <= 0) return;
+
+    const color = sanitizeCssColor(node.color)
+        ?? DEFAULT_PALETTE[paletteIdx % DEFAULT_PALETTE.length];
+
+    const rect = doc.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", fmt(x));
+    rect.setAttribute("y", fmt(y));
+    rect.setAttribute("width", fmt(w));
+    rect.setAttribute("height", fmt(h));
+    rect.setAttribute("fill", color);
+    rect.setAttribute("stroke", "#fff");
+    rect.setAttribute("stroke-width", "1");
+    svg.appendChild(rect);
+
+    // Label only when the rect is large enough to hold readable text.
+    if (node.label && w >= TREEMAP_LABEL_MIN_W && h >= TREEMAP_LABEL_MIN_H) {
+        const label = mkText(doc, x + 4, y + 14, node.label, {
+            fontSize: Math.min(FONT_SIZE, Math.max(9, Math.floor(h / 3))),
+            anchor: "start",
+            fill: "#fff",
+        });
+        svg.appendChild(label);
     }
 }
