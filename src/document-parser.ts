@@ -5,7 +5,7 @@ import {
 	WmlAltChunk, Revision, FormattingRevision, WmlSdt, SdtControl, SdtCheckboxControl,
 	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
-import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx } from './document/drawing';
 import { sanitizeCssColor } from './utils';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -1620,7 +1620,21 @@ export class DocumentParser {
 	parseGraphic(elem: Element): OpenXmlElement {
 		var graphicData = xml.element(elem, "graphicData");
 
+		// Inspect graphicData@uri once so we can dispatch chartEx
+		// (which embeds <cx:chart>, not <c:chart>) without widening
+		// the localName switch below. The classic chart URI is
+		// recognised by localName "chart" and continues to go through
+		// parseChartReference.
+		const uri = graphicData ? xml.attr(graphicData, "uri") : null;
+		const CHARTEX_URI = "http://schemas.microsoft.com/office/drawingml/2014/chartex";
+
 		for (let n of xml.elements(graphicData)) {
+			// ChartEx: the child is <cx:chart r:id="..."/>. URI gates
+			// the branch so an attacker-supplied local name can't hit
+			// the chartEx path for a classic chart.
+			if (uri === CHARTEX_URI && n.localName === "chart") {
+				return this.parseChartExReference(n);
+			}
 			switch (n.localName) {
 				case "pic":
 					return this.parsePicture(n);
@@ -1656,6 +1670,18 @@ export class DocumentParser {
 		const relId = xml.attr(elem, "id");
 		return {
 			type: DomType.Chart,
+			relId: relId ?? "",
+		};
+	}
+
+	// <cx:chart r:id="rIdX"/> inside <a:graphicData
+	// uri="http://schemas.microsoft.com/office/drawingml/2014/chartex">.
+	// Same shape as parseChartReference but the relId resolves to a
+	// ChartExPart and renders as a placeholder.
+	parseChartExReference(elem: Element): DrawingChartEx {
+		const relId = xml.attr(elem, "id");
+		return {
+			type: DomType.ChartEx,
 			relId: relId ?? "",
 		};
 	}

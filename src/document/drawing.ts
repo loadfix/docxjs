@@ -89,3 +89,14 @@ export interface DrawingChart extends OpenXmlElement {
     // never interpolated into a CSS class or selector.
     relId: string;
 }
+
+// ChartEx reference inside an <a:graphic>/<a:graphicData
+// uri="http://schemas.microsoft.com/office/drawingml/2014/chartex">.
+// Resolves to a `ChartExPart`; rendered as a placeholder div by the
+// DomType.ChartEx branch of html-renderer (never as a real SVG chart
+// in v1). See src/charts/chartex-part.ts.
+export interface DrawingChartEx extends OpenXmlElement {
+    type: DomType.ChartEx;
+    // r:id of the chartEx part. Same safety notes as DrawingChart.relId.
+    relId: string;
+}

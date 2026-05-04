@@ -220,7 +220,9 @@ function renderBarChart(
                 const value = percentStacked
                     ? (slotTotal === 0 ? 0 : raw / slotTotal)
                     : raw;
-                const color = seriesColor(series[si], si);
+                // Per-data-point override by point index `i` wins over
+                // the series colour; series colour wins over palette.
+                const color = pointColor(series[si], i, si);
                 appendBar(svg, doc, {
                     horizontal, rect, yMin, yMax, plotW, plotH,
                     slotIndex: i, slotSize, barIndex: 0,
@@ -234,7 +236,7 @@ function renderBarChart(
             for (let si = 0; si < series.length; si++) {
                 const value = finite(series[si].values[i]);
                 if (value == null) continue;
-                const color = seriesColor(series[si], si);
+                const color = pointColor(series[si], i, si);
                 appendBar(svg, doc, {
                     horizontal, rect, yMin, yMax, plotW, plotH,
                     slotIndex: i, slotSize, barIndex: si,
@@ -341,30 +343,32 @@ function renderLineChart(
 
     for (let si = 0; si < series.length; si++) {
         const s = series[si];
-        const color = seriesColor(s, si);
-        const points: string[] = [];
+        // The line itself uses the series colour — a stroke with per-
+        // segment colours would require rendering N sub-paths, which
+        // isn't worth the complexity for v1.
+        const lineColor = seriesColor(s, si);
+        const entries: { x: number; y: number; pointIndex: number }[] = [];
         for (let i = 0; i < catCount; i++) {
             const v = finite(s.values[i]);
             if (v == null) continue;
             const x = catCount > 1 ? rect.left + xStep * i : rect.left + plotW / 2;
             const y = rect.bottom - ((v - yMin) / (yMax - yMin)) * plotH;
-            points.push(`${fmt(x)},${fmt(y)}`);
+            entries.push({ x, y, pointIndex: i });
         }
-        if (points.length === 0) continue;
+        if (entries.length === 0) continue;
         const polyline = doc.createElementNS(SVG_NS, "polyline");
-        polyline.setAttribute("points", points.join(" "));
+        polyline.setAttribute("points", entries.map((e) => `${fmt(e.x)},${fmt(e.y)}`).join(" "));
         polyline.setAttribute("fill", "none");
-        polyline.setAttribute("stroke", color);
+        polyline.setAttribute("stroke", lineColor);
         polyline.setAttribute("stroke-width", "2");
         svg.appendChild(polyline);
-        // Data-point markers.
-        for (const p of points) {
-            const [px, py] = p.split(",");
+        // Data-point markers honour per-point overrides.
+        for (const e of entries) {
             const circle = doc.createElementNS(SVG_NS, "circle");
-            circle.setAttribute("cx", px);
-            circle.setAttribute("cy", py);
+            circle.setAttribute("cx", fmt(e.x));
+            circle.setAttribute("cy", fmt(e.y));
             circle.setAttribute("r", "2.5");
-            circle.setAttribute("fill", color);
+            circle.setAttribute("fill", pointColor(s, e.pointIndex, si));
             svg.appendChild(circle);
         }
     }
@@ -401,9 +405,16 @@ function renderPieChart(
         const path = pieSlicePath(cx, cy, r, startAngle, endAngle);
         const slice = doc.createElementNS(SVG_NS, "path");
         slice.setAttribute("d", path);
-        // Series colours usually describe each slice in a pie; if set we
-        // use the series colour. Otherwise palette by slice index.
-        const color = sanitizeCssColor(series.color) ?? DEFAULT_PALETTE[i % DEFAULT_PALETTE.length];
+        // Per-slice precedence:
+        //   1. <c:dPt idx="i"> override (the common case in real Word
+        //      files — each slice gets its own colour).
+        //   2. Series-level colour.
+        //   3. Palette rotation by slice index.
+        const override = series.dataPointOverrides?.get(i)?.color;
+        const sanitisedOverride = override != null ? sanitizeCssColor(override) : null;
+        const color = sanitisedOverride
+            ?? sanitizeCssColor(series.color)
+            ?? DEFAULT_PALETTE[i % DEFAULT_PALETTE.length];
         slice.setAttribute("fill", color);
         slice.setAttribute("stroke", "#fff");
         slice.setAttribute("stroke-width", "1");
@@ -472,6 +483,10 @@ function layoutLegend(entries: ChartSeries[], maxWidth: number, doc: Document): 
                 const totalWidth = row.reduce((a, b, i) => a + b.width + (i === 0 ? 0 : entryGap), 0);
                 let x = (VIEW_W - totalWidth) / 2;
                 const y = top + r * LEGEND_ROW_HEIGHT + LEGEND_ROW_HEIGHT / 2;
+                // Row key used by scheduleLegendOverflowAdjust to group
+                // swatches + labels that should shift together. Safe
+                // static string (no DOCX input).
+                const rowKey = `r${r}`;
                 for (const { entry, seriesIndex, width } of row) {
                     const color = seriesColor(entry, seriesIndex);
                     const swatch = doc.createElementNS(SVG_NS, "rect");
@@ -480,10 +495,19 @@ function layoutLegend(entries: ChartSeries[], maxWidth: number, doc: Document): 
                     swatch.setAttribute("width", fmt(swatchW));
                     swatch.setAttribute("height", fmt(swatchW));
                     swatch.setAttribute("fill", color);
+                    swatch.setAttribute("data-legend-row", rowKey);
                     out.push(swatch);
                     const label = mkText(doc, x + swatchW + gap, y + 4, entry.title || `Series ${seriesIndex + 1}`, {
                         fontSize: FONT_SIZE, anchor: "start", fill: "#333",
                     });
+                    // Markers for the post-attach overflow pass. The
+                    // estimated text width is the label portion only
+                    // (the swatch+gap are added back during overflow
+                    // comparisons — simpler to stash the original
+                    // estimate than re-derive it).
+                    label.setAttribute("data-legend-entry", "1");
+                    label.setAttribute("data-legend-est-w", fmt(width - swatchW - gap));
+                    label.setAttribute("data-legend-row", rowKey);
                     out.push(label);
                     x += width + entryGap;
                 }
@@ -499,6 +523,23 @@ function layoutLegend(entries: ChartSeries[], maxWidth: number, doc: Document): 
 
 function seriesColor(s: ChartSeries, index: number): string {
     return sanitizeCssColor(s.color) ?? DEFAULT_PALETTE[index % DEFAULT_PALETTE.length];
+}
+
+// Per-data-point colour lookup with fallback chain:
+//   1. <c:dPt idx="pointIndex"> fill override if present.
+//   2. The series colour (<c:ser><c:spPr><a:solidFill>).
+//   3. Palette rotation by series index (so different series stay
+//      visually distinct even when nothing is explicitly coloured).
+//
+// Both override and series strings round-trip through sanitizeCssColor
+// so a malformed override can never reach `fill` unfiltered.
+function pointColor(s: ChartSeries, pointIndex: number, seriesIndex: number): string {
+    const override = s.dataPointOverrides?.get(pointIndex)?.color;
+    if (override != null) {
+        const safe = sanitizeCssColor(override);
+        if (safe) return safe;
+    }
+    return seriesColor(s, seriesIndex);
 }
 
 function finite(v: number): number | null {
@@ -593,4 +634,100 @@ function mkText(
     // DOCX-derived strings reach the DOM via textContent only.
     el.textContent = text;
     return el;
+}
+
+// -----------------------------------------------------------------
+// Post-attach legend overflow adjustment
+// -----------------------------------------------------------------
+//
+// layoutLegend estimates each entry's width from `title.length *
+// FONT_SIZE * 0.55`. That estimate is right most of the time but
+// wrong enough often enough (CJK / unusually wide fonts / very
+// long titles) to justify a second pass once the SVG is in the DOM
+// and `getBBox` returns real measurements.
+//
+// The adjustment is intentionally cheap:
+//   - We only re-measure `<text>` elements that carry a `data-legend-entry`
+//     marker (set by layoutLegend below).
+//   - If any entry's measured width exceeds its estimated width by more
+//     than TOLERANCE_PX, we assume the estimate was too generous and
+//     shift each legend row's contents leftward to stop them spilling
+//     past the right edge. We do not re-flow the whole chart.
+//
+// SSR-safe: `requestAnimationFrame` and `isConnected` guards prevent
+// the hook from firing inside jsdom or non-browser environments.
+
+export function scheduleLegendOverflowAdjust(svg: SVGElement) {
+    if (typeof requestAnimationFrame !== "function") return;
+    // isConnected is unreliable in jsdom-lite (undefined). The `!svg.isConnected`
+    // check also rejects SVGs that are parented but not yet in the document.
+    // Deferring to rAF gives the caller one tick to attach.
+    requestAnimationFrame(() => {
+        if (!svg.isConnected) return;
+        try {
+            adjustLegendIfNeeded(svg);
+        } catch {
+            // Never let measurement blow up the render.
+        }
+    });
+}
+
+function adjustLegendIfNeeded(svg: SVGElement) {
+    const entries = Array.from(
+        svg.querySelectorAll("text[data-legend-entry]"),
+    ) as SVGTextElement[];
+    if (entries.length === 0) return;
+
+    let overflow = false;
+    for (const entry of entries) {
+        if (typeof entry.getBBox !== "function") return;
+        const bbox = entry.getBBox();
+        const estAttr = entry.getAttribute("data-legend-est-w");
+        const est = estAttr ? parseFloat(estAttr) : NaN;
+        if (!Number.isFinite(est)) continue;
+        if (bbox.width > est + 2) {
+            overflow = true;
+            break;
+        }
+    }
+    if (!overflow) return;
+
+    // Cheap remediation: find each legend row (grouped by y-coord on
+    // the `data-legend-row` attribute) and shift the whole row left
+    // so its rightmost entry stays within VIEW_W - PADDING. If that
+    // would push the row off the left edge, clip the overflow and
+    // let the SVG's `overflow: hidden` crop it (still better than
+    // extending past the plot boundary).
+    const byRow = new Map<string, SVGGraphicsElement[]>();
+    const all = Array.from(
+        svg.querySelectorAll("[data-legend-row]"),
+    ) as SVGGraphicsElement[];
+    for (const node of all) {
+        const key = node.getAttribute("data-legend-row") ?? "";
+        const arr = byRow.get(key) ?? [];
+        arr.push(node);
+        byRow.set(key, arr);
+    }
+
+    for (const nodes of byRow.values()) {
+        let rowRight = -Infinity;
+        for (const node of nodes) {
+            if (typeof node.getBBox !== "function") continue;
+            const bbox = node.getBBox();
+            const right = bbox.x + bbox.width;
+            if (right > rowRight) rowRight = right;
+        }
+        if (!Number.isFinite(rowRight)) continue;
+        const allowed = VIEW_W - PADDING;
+        if (rowRight <= allowed) continue;
+        const shift = Math.min(rowRight - allowed, VIEW_W);
+        for (const node of nodes) {
+            // Stack shifts on top of any existing transform. The
+            // nodes we emit carry no transform at render time, so
+            // this is effectively set-once.
+            const prev = node.getAttribute("transform") ?? "";
+            const next = `${prev} translate(${(-shift).toFixed(2)},0)`.trim();
+            node.setAttribute("transform", next);
+        }
+    }
 }
