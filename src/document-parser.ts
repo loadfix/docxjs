@@ -4,6 +4,8 @@ import {
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlAltChunk, Revision, FormattingRevision, WmlSdt
 } from './document/dom';
+import { DrawingShape, DrawingGroup } from './document/drawing';
+import { sanitizeCssColor } from './utils';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
 import { parseSectionProperties, SectionProperties } from './document/section';
@@ -107,7 +109,12 @@ const mmlTagMap = {
 	"mr": DomType.MmlMatrixRow,
 	"box": DomType.MmlBox,
 	"bar": DomType.MmlBar,
-	"groupChr": DomType.MmlGroupChar
+	"groupChr": DomType.MmlGroupChar,
+	"acc": DomType.MmlAccent,
+	"borderBox": DomType.MmlBorderBox,
+	"sSubSup": DomType.MmlSubSuperscript,
+	"phant": DomType.MmlPhantom,
+	"sGroup": DomType.MmlGroup
 }
 
 export interface DocumentParserOptions {
@@ -1066,6 +1073,7 @@ export class DocumentParser {
 				case "degHide": result.hideDegree = xml.boolAttr(el, "val"); break;
 				case "begChr": result.beginChar = xml.attr(el, "val"); break;
 				case "endChr": result.endChar = xml.attr(el, "val"); break;
+				case "limLoc": result.limLoc = xml.attr(el, "val"); break;
 			}
 		}
 
@@ -1407,10 +1415,235 @@ export class DocumentParser {
 			switch (n.localName) {
 				case "pic":
 					return this.parsePicture(n);
+				case "wsp":
+					// DrawingML shape (rectangle, arrow, callout, text-
+					// box, …). See parseDrawingShape — hardened against
+					// DOCX-supplied strings via PRESET_GEOMETRY_ALLOWLIST
+					// and sanitizeCssColor.
+					return this.parseDrawingShape(n);
+				case "wgp":
+					// DrawingML shape group. Shapes can nest groups, so
+					// parseDrawingShapeGroup recurses back through
+					// parseGraphicDataChild for every entry.
+					return this.parseDrawingShapeGroup(n);
 			}
 		}
 
 		return null;
+	}
+
+	// Hard-coded allowlist of DrawingML preset-geometry names that
+	// parseDrawingShape is willing to emit. Anything outside the
+	// allowlist — and specifically `custGeom`, which we parse but do
+	// not render — falls back to `rect`. The strings returned here
+	// reach an SVG attribute value and a CSS class name, so they must
+	// never be DOCX-controlled.
+	//
+	// Keep in sync with the switch in presetGeometryToSvgPath in
+	// src/drawing/shapes.ts.
+	private readonly PRESET_GEOMETRY_ALLOWLIST = new Set([
+		"rect", "roundRect", "ellipse", "triangle", "rtTriangle", "diamond",
+		"parallelogram", "trapezoid", "pentagon", "hexagon", "octagon", "line",
+		"rightArrow", "leftArrow", "upArrow", "downArrow", "leftRightArrow",
+		"wedgeRectCallout", "wedgeRoundRectCallout", "wedgeEllipseCallout",
+		"star5", "star6", "star8", "cloudCallout",
+	]);
+
+	// Parses <a:xfrm> inside <wps:spPr> / <wpg:grpSpPr>. Returns
+	// {x, y, cx, cy, rot} — all EMU — or undefined when the element is
+	// missing. Callers defaulting missing fields is cheaper than
+	// duplicating that here.
+	private parseXfrm(
+		xfrm: Element | null | undefined,
+	): { x: number; y: number; cx: number; cy: number; rot?: number } | undefined {
+		if (!xfrm) return undefined;
+		const result: { x: number; y: number; cx: number; cy: number; rot?: number } =
+			{ x: 0, y: 0, cx: 0, cy: 0 };
+		const rotRaw = xml.intAttr(xfrm, "rot", 0);
+		if (rotRaw) result.rot = rotRaw / 60000;
+		for (const n of xml.elements(xfrm)) {
+			switch (n.localName) {
+				case "off":
+					result.x = xml.floatAttr(n, "x", 0) || 0;
+					result.y = xml.floatAttr(n, "y", 0) || 0;
+					break;
+				case "ext":
+					result.cx = xml.floatAttr(n, "cx", 0) || 0;
+					result.cy = xml.floatAttr(n, "cy", 0) || 0;
+					break;
+			}
+		}
+		return result;
+	}
+
+	// Parses <a:solidFill>/<a:gradFill>/<a:blipFill>/<a:noFill> into
+	// the shape-fill model. We collapse gradient/pattern fills onto
+	// the first colour stop encountered — theme resolution is out of
+	// scope for v1. All colour strings are sanitised before they reach
+	// the DrawingShape.
+	private parseShapeFill(spPr: Element): DrawingShape["fill"] | undefined {
+		if (!spPr) return undefined;
+		for (const n of xml.elements(spPr)) {
+			switch (n.localName) {
+				case "noFill":
+					return { type: "none" };
+				case "solidFill": {
+					const srgb = xml.element(n, "srgbClr");
+					const color = srgb ? xml.attr(srgb, "val") : null;
+					const sanitized = sanitizeCssColor(color);
+					return sanitized ? { type: "solid", color: sanitized } : undefined;
+				}
+				case "gradFill": {
+					// Gradient → first stop's colour as a solid fill.
+					// Theme colour resolution out of scope.
+					const gsLst = xml.element(n, "gsLst");
+					if (!gsLst) continue;
+					for (const gs of xml.elements(gsLst)) {
+						const srgb = xml.element(gs, "srgbClr");
+						const color = srgb ? xml.attr(srgb, "val") : null;
+						const sanitized = sanitizeCssColor(color);
+						if (sanitized) return { type: "solid", color: sanitized };
+					}
+					return undefined;
+				}
+				case "blipFill":
+				case "pattFill":
+					// Image-/pattern-filled shape — out of scope for v1.
+					// TODO: render as <image> inside the SVG.
+					return undefined;
+			}
+		}
+		return undefined;
+	}
+
+	// Parses <a:ln w="…"> → stroke width (EMU) + optional <a:solidFill>
+	// colour.
+	private parseShapeStroke(spPr: Element): DrawingShape["stroke"] | undefined {
+		if (!spPr) return undefined;
+		const ln = xml.element(spPr, "ln");
+		if (!ln) return undefined;
+		const result: DrawingShape["stroke"] = {};
+		const w = xml.intAttr(ln, "w", 0);
+		if (w > 0) result.width = w;
+		const solid = xml.element(ln, "solidFill");
+		const srgb = solid ? xml.element(solid, "srgbClr") : null;
+		const color = srgb ? xml.attr(srgb, "val") : null;
+		const sanitized = sanitizeCssColor(color);
+		if (sanitized) result.color = sanitized;
+		return result;
+	}
+
+	// Parses <wps:bodyPr> — text-frame insets. All four sides default
+	// to the DrawingML defaults (91440/45720 EMU) at render time.
+	private parseBodyPr(elem: Element): DrawingShape["bodyPr"] | undefined {
+		if (!elem) return undefined;
+		const result: DrawingShape["bodyPr"] = {};
+		const lIns = xml.intAttr(elem, "lIns");
+		const tIns = xml.intAttr(elem, "tIns");
+		const rIns = xml.intAttr(elem, "rIns");
+		const bIns = xml.intAttr(elem, "bIns");
+		if (lIns != null) result.lIns = lIns;
+		if (tIns != null) result.tIns = tIns;
+		if (rIns != null) result.rIns = rIns;
+		if (bIns != null) result.bIns = bIns;
+		return result;
+	}
+
+	parseDrawingShape(elem: Element): DrawingShape {
+		const result: DrawingShape = {
+			type: DomType.DrawingShape,
+			children: [],
+		};
+
+		const spPr = xml.element(elem, "spPr");
+		if (spPr) {
+			const xfrm = xml.element(spPr, "xfrm");
+			result.xfrm = this.parseXfrm(xfrm) ?? { x: 0, y: 0, cx: 0, cy: 0 };
+
+			const prstGeom = xml.element(spPr, "prstGeom");
+			if (prstGeom) {
+				const prst = xml.attr(prstGeom, "prst");
+				// Validate against the allowlist — never interpolate an
+				// attacker-controlled string into SVG/CSS.
+				result.presetGeometry = this.PRESET_GEOMETRY_ALLOWLIST.has(prst) ? prst : "rect";
+			} else if (xml.element(spPr, "custGeom")) {
+				// TODO: custGeom path rendering (a:pathLst / a:moveTo /
+				// a:lnTo / a:cubicBezTo / a:close). Out of scope for
+				// this PR — fall back to a plain rectangle.
+				result.presetGeometry = "rect";
+				result.hasCustomGeometry = true;
+			} else {
+				result.presetGeometry = "rect";
+			}
+
+			result.fill = this.parseShapeFill(spPr);
+			result.stroke = this.parseShapeStroke(spPr);
+		} else {
+			result.presetGeometry = "rect";
+			result.xfrm = { x: 0, y: 0, cx: 0, cy: 0 };
+		}
+
+		// <wps:bodyPr> sits as a sibling of <wps:spPr> inside <wps:wsp>.
+		const bodyPr = xml.element(elem, "bodyPr");
+		if (bodyPr) {
+			result.bodyPr = this.parseBodyPr(bodyPr);
+		}
+
+		// <wps:txbx>/<w:txbxContent> — shape-carried text. Parsed via
+		// the normal body-element pipeline so its paragraphs inherit
+		// body-paragraph sanitisation.
+		const txbx = xml.element(elem, "txbx");
+		const txbxContent = txbx ? xml.element(txbx, "txbxContent") : null;
+		if (txbxContent) {
+			result.txbxParagraphs = this.parseBodyElements(txbxContent);
+		}
+
+		// TODO: <wps:style> theme-ref resolution and <a:effectLst>
+		// shadow/glow/reflection. Intentionally ignored for v1.
+		return result;
+	}
+
+	parseDrawingShapeGroup(elem: Element): DrawingGroup {
+		const result: DrawingGroup = {
+			type: DomType.DrawingGroup,
+			children: [],
+		};
+
+		const grpSpPr = xml.element(elem, "grpSpPr");
+		if (grpSpPr) {
+			const xfrm = xml.element(grpSpPr, "xfrm");
+			if (xfrm) {
+				result.xfrm = this.parseXfrm(xfrm) ?? { x: 0, y: 0, cx: 0, cy: 0 };
+				// <a:chOff> / <a:chExt> are siblings of <a:off>/<a:ext>
+				// inside a group's xfrm. They define the child
+				// coordinate space.
+				const chOff = xml.element(xfrm, "chOff");
+				const chExt = xml.element(xfrm, "chExt");
+				result.childOffset = {
+					x: chOff ? (xml.floatAttr(chOff, "x", 0) || 0) : 0,
+					y: chOff ? (xml.floatAttr(chOff, "y", 0) || 0) : 0,
+					cx: chExt ? (xml.floatAttr(chExt, "cx", 0) || 0) : (result.xfrm?.cx ?? 0),
+					cy: chExt ? (xml.floatAttr(chExt, "cy", 0) || 0) : (result.xfrm?.cy ?? 0),
+				};
+			}
+		}
+
+		// Children: <wps:wsp>, nested <wpg:wgp>, <pic:pic>.
+		for (const n of xml.elements(elem)) {
+			switch (n.localName) {
+				case "wsp":
+					result.children.push(this.parseDrawingShape(n));
+					break;
+				case "wgp":
+					result.children.push(this.parseDrawingShapeGroup(n));
+					break;
+				case "pic":
+					result.children.push(this.parsePicture(n));
+					break;
+			}
+		}
+
+		return result;
 	}
 
 	parsePicture(elem: Element): IDomImage {

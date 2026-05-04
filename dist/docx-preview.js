@@ -812,6 +812,8 @@
         DomType["SmartTag"] = "smartTag";
         DomType["Drawing"] = "drawing";
         DomType["Image"] = "image";
+        DomType["DrawingShape"] = "drawingShape";
+        DomType["DrawingGroup"] = "drawingGroup";
         DomType["Text"] = "text";
         DomType["Tab"] = "tab";
         DomType["Symbol"] = "symbol";
@@ -853,6 +855,11 @@
         DomType["MmlBox"] = "mmlBox";
         DomType["MmlBar"] = "mmlBar";
         DomType["MmlGroupChar"] = "mmlGroupChar";
+        DomType["MmlAccent"] = "mmlAccent";
+        DomType["MmlBorderBox"] = "mmlBorderBox";
+        DomType["MmlSubSuperscript"] = "mmlSubSuperscript";
+        DomType["MmlPhantom"] = "mmlPhantom";
+        DomType["MmlGroup"] = "mmlGroup";
         DomType["VmlElement"] = "vmlElement";
         DomType["Inserted"] = "inserted";
         DomType["Deleted"] = "deleted";
@@ -1909,10 +1916,22 @@
         "mr": DomType.MmlMatrixRow,
         "box": DomType.MmlBox,
         "bar": DomType.MmlBar,
-        "groupChr": DomType.MmlGroupChar
+        "groupChr": DomType.MmlGroupChar,
+        "acc": DomType.MmlAccent,
+        "borderBox": DomType.MmlBorderBox,
+        "sSubSup": DomType.MmlSubSuperscript,
+        "phant": DomType.MmlPhantom,
+        "sGroup": DomType.MmlGroup
     };
     class DocumentParser {
         constructor(options) {
+            this.PRESET_GEOMETRY_ALLOWLIST = new Set([
+                "rect", "roundRect", "ellipse", "triangle", "rtTriangle", "diamond",
+                "parallelogram", "trapezoid", "pentagon", "hexagon", "octagon", "line",
+                "rightArrow", "leftArrow", "upArrow", "downArrow", "leftRightArrow",
+                "wedgeRectCallout", "wedgeRoundRectCallout", "wedgeEllipseCallout",
+                "star5", "star6", "star8", "cloudCallout",
+            ]);
             this.options = {
                 ignoreWidth: false,
                 debug: false,
@@ -2694,6 +2713,9 @@
                     case "endChr":
                         result.endChar = globalXmlParser.attr(el, "val");
                         break;
+                    case "limLoc":
+                        result.limLoc = globalXmlParser.attr(el, "val");
+                        break;
                 }
             }
             return result;
@@ -2957,9 +2979,177 @@
                 switch (n.localName) {
                     case "pic":
                         return this.parsePicture(n);
+                    case "wsp":
+                        return this.parseDrawingShape(n);
+                    case "wgp":
+                        return this.parseDrawingShapeGroup(n);
                 }
             }
             return null;
+        }
+        parseXfrm(xfrm) {
+            if (!xfrm)
+                return undefined;
+            const result = { x: 0, y: 0, cx: 0, cy: 0 };
+            const rotRaw = globalXmlParser.intAttr(xfrm, "rot", 0);
+            if (rotRaw)
+                result.rot = rotRaw / 60000;
+            for (const n of globalXmlParser.elements(xfrm)) {
+                switch (n.localName) {
+                    case "off":
+                        result.x = globalXmlParser.floatAttr(n, "x", 0) || 0;
+                        result.y = globalXmlParser.floatAttr(n, "y", 0) || 0;
+                        break;
+                    case "ext":
+                        result.cx = globalXmlParser.floatAttr(n, "cx", 0) || 0;
+                        result.cy = globalXmlParser.floatAttr(n, "cy", 0) || 0;
+                        break;
+                }
+            }
+            return result;
+        }
+        parseShapeFill(spPr) {
+            if (!spPr)
+                return undefined;
+            for (const n of globalXmlParser.elements(spPr)) {
+                switch (n.localName) {
+                    case "noFill":
+                        return { type: "none" };
+                    case "solidFill": {
+                        const srgb = globalXmlParser.element(n, "srgbClr");
+                        const color = srgb ? globalXmlParser.attr(srgb, "val") : null;
+                        const sanitized = sanitizeCssColor(color);
+                        return sanitized ? { type: "solid", color: sanitized } : undefined;
+                    }
+                    case "gradFill": {
+                        const gsLst = globalXmlParser.element(n, "gsLst");
+                        if (!gsLst)
+                            continue;
+                        for (const gs of globalXmlParser.elements(gsLst)) {
+                            const srgb = globalXmlParser.element(gs, "srgbClr");
+                            const color = srgb ? globalXmlParser.attr(srgb, "val") : null;
+                            const sanitized = sanitizeCssColor(color);
+                            if (sanitized)
+                                return { type: "solid", color: sanitized };
+                        }
+                        return undefined;
+                    }
+                    case "blipFill":
+                    case "pattFill":
+                        return undefined;
+                }
+            }
+            return undefined;
+        }
+        parseShapeStroke(spPr) {
+            if (!spPr)
+                return undefined;
+            const ln = globalXmlParser.element(spPr, "ln");
+            if (!ln)
+                return undefined;
+            const result = {};
+            const w = globalXmlParser.intAttr(ln, "w", 0);
+            if (w > 0)
+                result.width = w;
+            const solid = globalXmlParser.element(ln, "solidFill");
+            const srgb = solid ? globalXmlParser.element(solid, "srgbClr") : null;
+            const color = srgb ? globalXmlParser.attr(srgb, "val") : null;
+            const sanitized = sanitizeCssColor(color);
+            if (sanitized)
+                result.color = sanitized;
+            return result;
+        }
+        parseBodyPr(elem) {
+            if (!elem)
+                return undefined;
+            const result = {};
+            const lIns = globalXmlParser.intAttr(elem, "lIns");
+            const tIns = globalXmlParser.intAttr(elem, "tIns");
+            const rIns = globalXmlParser.intAttr(elem, "rIns");
+            const bIns = globalXmlParser.intAttr(elem, "bIns");
+            if (lIns != null)
+                result.lIns = lIns;
+            if (tIns != null)
+                result.tIns = tIns;
+            if (rIns != null)
+                result.rIns = rIns;
+            if (bIns != null)
+                result.bIns = bIns;
+            return result;
+        }
+        parseDrawingShape(elem) {
+            const result = {
+                type: DomType.DrawingShape,
+                children: [],
+            };
+            const spPr = globalXmlParser.element(elem, "spPr");
+            if (spPr) {
+                const xfrm = globalXmlParser.element(spPr, "xfrm");
+                result.xfrm = this.parseXfrm(xfrm) ?? { x: 0, y: 0, cx: 0, cy: 0 };
+                const prstGeom = globalXmlParser.element(spPr, "prstGeom");
+                if (prstGeom) {
+                    const prst = globalXmlParser.attr(prstGeom, "prst");
+                    result.presetGeometry = this.PRESET_GEOMETRY_ALLOWLIST.has(prst) ? prst : "rect";
+                }
+                else if (globalXmlParser.element(spPr, "custGeom")) {
+                    result.presetGeometry = "rect";
+                    result.hasCustomGeometry = true;
+                }
+                else {
+                    result.presetGeometry = "rect";
+                }
+                result.fill = this.parseShapeFill(spPr);
+                result.stroke = this.parseShapeStroke(spPr);
+            }
+            else {
+                result.presetGeometry = "rect";
+                result.xfrm = { x: 0, y: 0, cx: 0, cy: 0 };
+            }
+            const bodyPr = globalXmlParser.element(elem, "bodyPr");
+            if (bodyPr) {
+                result.bodyPr = this.parseBodyPr(bodyPr);
+            }
+            const txbx = globalXmlParser.element(elem, "txbx");
+            const txbxContent = txbx ? globalXmlParser.element(txbx, "txbxContent") : null;
+            if (txbxContent) {
+                result.txbxParagraphs = this.parseBodyElements(txbxContent);
+            }
+            return result;
+        }
+        parseDrawingShapeGroup(elem) {
+            const result = {
+                type: DomType.DrawingGroup,
+                children: [],
+            };
+            const grpSpPr = globalXmlParser.element(elem, "grpSpPr");
+            if (grpSpPr) {
+                const xfrm = globalXmlParser.element(grpSpPr, "xfrm");
+                if (xfrm) {
+                    result.xfrm = this.parseXfrm(xfrm) ?? { x: 0, y: 0, cx: 0, cy: 0 };
+                    const chOff = globalXmlParser.element(xfrm, "chOff");
+                    const chExt = globalXmlParser.element(xfrm, "chExt");
+                    result.childOffset = {
+                        x: chOff ? (globalXmlParser.floatAttr(chOff, "x", 0) || 0) : 0,
+                        y: chOff ? (globalXmlParser.floatAttr(chOff, "y", 0) || 0) : 0,
+                        cx: chExt ? (globalXmlParser.floatAttr(chExt, "cx", 0) || 0) : (result.xfrm?.cx ?? 0),
+                        cy: chExt ? (globalXmlParser.floatAttr(chExt, "cy", 0) || 0) : (result.xfrm?.cy ?? 0),
+                    };
+                }
+            }
+            for (const n of globalXmlParser.elements(elem)) {
+                switch (n.localName) {
+                    case "wsp":
+                        result.children.push(this.parseDrawingShape(n));
+                        break;
+                    case "wgp":
+                        result.children.push(this.parseDrawingShapeGroup(n));
+                        break;
+                    case "pic":
+                        result.children.push(this.parsePicture(n));
+                        break;
+                }
+            }
+            return result;
         }
         parsePicture(elem) {
             var result = { type: DomType.Image, src: "", cssStyle: {} };
@@ -3888,7 +4078,7 @@
             if (isString(style)) {
                 result.setAttribute("style", style);
             }
-            else {
+            else if (result.style) {
                 Object.assign(result.style, style);
             }
         }
@@ -3903,6 +4093,319 @@
     }
     function cx(...classNames) {
         return classNames.filter(Boolean).join(" ");
+    }
+
+    const DEFAULT_INSET_LR_EMU = 91440;
+    const DEFAULT_INSET_TB_EMU = 45720;
+    function presetGeometryToSvgPath(prst, w, h) {
+        if (!prst || w <= 0 || h <= 0)
+            return null;
+        const cx = w / 2;
+        const cy = h / 2;
+        switch (prst) {
+            case 'rect':
+                return `M0,0 L${w},0 L${w},${h} L0,${h} Z`;
+            case 'roundRect': {
+                const r = Math.min(w, h) * 0.1;
+                return (`M${r},0 L${w - r},0 Q${w},0 ${w},${r} ` +
+                    `L${w},${h - r} Q${w},${h} ${w - r},${h} ` +
+                    `L${r},${h} Q0,${h} 0,${h - r} ` +
+                    `L0,${r} Q0,0 ${r},0 Z`);
+            }
+            case 'ellipse':
+                return (`M0,${cy} A${cx},${cy} 0 1,0 ${w},${cy} ` +
+                    `A${cx},${cy} 0 1,0 0,${cy} Z`);
+            case 'triangle':
+                return `M${cx},0 L${w},${h} L0,${h} Z`;
+            case 'rtTriangle':
+                return `M0,0 L0,${h} L${w},${h} Z`;
+            case 'diamond':
+                return `M${cx},0 L${w},${cy} L${cx},${h} L0,${cy} Z`;
+            case 'parallelogram': {
+                const skew = w * 0.25;
+                return `M${skew},0 L${w},0 L${w - skew},${h} L0,${h} Z`;
+            }
+            case 'trapezoid': {
+                const skew = w * 0.25;
+                return `M${skew},0 L${w - skew},0 L${w},${h} L0,${h} Z`;
+            }
+            case 'pentagon': {
+                const points = regularPolygon(5, cx, cy, w, h, -Math.PI / 2);
+                return polygonToPath(points);
+            }
+            case 'hexagon': {
+                const dx = w * 0.25;
+                return (`M${dx},0 L${w - dx},0 L${w},${cy} ` +
+                    `L${w - dx},${h} L${dx},${h} L0,${cy} Z`);
+            }
+            case 'octagon': {
+                const d = w * 0.2929;
+                const e = h * 0.2929;
+                return (`M${d},0 L${w - d},0 L${w},${e} L${w},${h - e} ` +
+                    `L${w - d},${h} L${d},${h} L0,${h - e} L0,${e} Z`);
+            }
+            case 'line':
+                return `M0,0 L${w},${h}`;
+            case 'rightArrow': {
+                const head = w * 0.6;
+                const shaftTop = h * 0.25;
+                const shaftBot = h * 0.75;
+                return (`M0,${shaftTop} L${head},${shaftTop} L${head},0 ` +
+                    `L${w},${cy} L${head},${h} L${head},${shaftBot} ` +
+                    `L0,${shaftBot} Z`);
+            }
+            case 'leftArrow': {
+                const head = w * 0.4;
+                const shaftTop = h * 0.25;
+                const shaftBot = h * 0.75;
+                return (`M${w},${shaftTop} L${head},${shaftTop} L${head},0 ` +
+                    `L0,${cy} L${head},${h} L${head},${shaftBot} ` +
+                    `L${w},${shaftBot} Z`);
+            }
+            case 'upArrow': {
+                const head = h * 0.4;
+                const shaftL = w * 0.25;
+                const shaftR = w * 0.75;
+                return (`M${shaftL},${h} L${shaftL},${head} L0,${head} ` +
+                    `L${cx},0 L${w},${head} L${shaftR},${head} ` +
+                    `L${shaftR},${h} Z`);
+            }
+            case 'downArrow': {
+                const head = h * 0.6;
+                const shaftL = w * 0.25;
+                const shaftR = w * 0.75;
+                return (`M${shaftL},0 L${shaftL},${head} L0,${head} ` +
+                    `L${cx},${h} L${w},${head} L${shaftR},${head} ` +
+                    `L${shaftR},0 Z`);
+            }
+            case 'leftRightArrow': {
+                const headL = w * 0.2;
+                const headR = w * 0.8;
+                const shaftTop = h * 0.25;
+                const shaftBot = h * 0.75;
+                return (`M0,${cy} L${headL},0 L${headL},${shaftTop} ` +
+                    `L${headR},${shaftTop} L${headR},0 L${w},${cy} ` +
+                    `L${headR},${h} L${headR},${shaftBot} ` +
+                    `L${headL},${shaftBot} L${headL},${h} Z`);
+            }
+            case 'wedgeRectCallout': {
+                const tailX = w * -0.2;
+                const tailY = h * 1.125;
+                return (`M0,0 L${w},0 L${w},${h} ` +
+                    `L${w * 0.5},${h} L${tailX},${tailY} L${w * 0.2},${h} ` +
+                    `L0,${h} Z`);
+            }
+            case 'wedgeRoundRectCallout': {
+                const r = Math.min(w, h) * 0.1;
+                const tailX = w * -0.2;
+                const tailY = h * 1.125;
+                return (`M${r},0 L${w - r},0 Q${w},0 ${w},${r} ` +
+                    `L${w},${h - r} Q${w},${h} ${w - r},${h} ` +
+                    `L${w * 0.5},${h} L${tailX},${tailY} L${w * 0.2},${h} ` +
+                    `L${r},${h} Q0,${h} 0,${h - r} ` +
+                    `L0,${r} Q0,0 ${r},0 Z`);
+            }
+            case 'wedgeEllipseCallout': {
+                const ang = (Math.PI * 5) / 4;
+                const ex = cx + Math.cos(ang) * cx;
+                const ey = cy + Math.sin(ang) * cy;
+                const tailX = w * -0.2;
+                const tailY = h * 1.125;
+                return (`M${ex},${ey} L${tailX},${tailY} L${cx * 0.6},${h * 0.95} ` +
+                    `A${cx},${cy} 0 1,1 ${ex},${ey} Z`);
+            }
+            case 'star5': {
+                const points = star(5, cx, cy, w, h, 0.4, -Math.PI / 2);
+                return polygonToPath(points);
+            }
+            case 'star6': {
+                const points = star(6, cx, cy, w, h, 0.5, -Math.PI / 2);
+                return polygonToPath(points);
+            }
+            case 'star8': {
+                const points = star(8, cx, cy, w, h, 0.55, -Math.PI / 2);
+                return polygonToPath(points);
+            }
+            case 'cloudCallout': {
+                const tail1X = w * 0.1;
+                const tail1Y = h * 1.05;
+                const tail2X = w * -0.05;
+                const tail2Y = h * 1.2;
+                const tail1R = Math.min(w, h) * 0.05;
+                const tail2R = Math.min(w, h) * 0.03;
+                return (`M0,${cy} A${cx},${cy} 0 1,0 ${w},${cy} ` +
+                    `A${cx},${cy} 0 1,0 0,${cy} Z ` +
+                    `M${tail1X - tail1R},${tail1Y} ` +
+                    `A${tail1R},${tail1R} 0 1,0 ${tail1X + tail1R},${tail1Y} ` +
+                    `A${tail1R},${tail1R} 0 1,0 ${tail1X - tail1R},${tail1Y} Z ` +
+                    `M${tail2X - tail2R},${tail2Y} ` +
+                    `A${tail2R},${tail2R} 0 1,0 ${tail2X + tail2R},${tail2Y} ` +
+                    `A${tail2R},${tail2R} 0 1,0 ${tail2X - tail2R},${tail2Y} Z`);
+            }
+            default:
+                return null;
+        }
+    }
+    function regularPolygon(n, cx, cy, w, h, startAng) {
+        const rx = w / 2;
+        const ry = h / 2;
+        const pts = [];
+        for (let i = 0; i < n; i++) {
+            const ang = startAng + (i * 2 * Math.PI) / n;
+            pts.push([cx + Math.cos(ang) * rx, cy + Math.sin(ang) * ry]);
+        }
+        return pts;
+    }
+    function star(points, cx, cy, w, h, innerRatio, startAng) {
+        const rx = w / 2;
+        const ry = h / 2;
+        const irx = rx * innerRatio;
+        const iry = ry * innerRatio;
+        const total = points * 2;
+        const pts = [];
+        for (let i = 0; i < total; i++) {
+            const outer = i % 2 === 0;
+            const ang = startAng + (i * Math.PI) / points;
+            const tx = outer ? rx : irx;
+            const ty = outer ? ry : iry;
+            pts.push([cx + Math.cos(ang) * tx, cy + Math.sin(ang) * ty]);
+        }
+        return pts;
+    }
+    function polygonToPath(points) {
+        if (points.length === 0)
+            return '';
+        const [fx, fy] = points[0];
+        let d = `M${fx},${fy}`;
+        for (let i = 1; i < points.length; i++) {
+            d += ` L${points[i][0]},${points[i][1]}`;
+        }
+        return d + ' Z';
+    }
+    function renderShape(shape, emuToPx, renderText) {
+        const widthPx = emuToPx(shape.xfrm?.cx ?? 0);
+        const heightPx = emuToPx(shape.xfrm?.cy ?? 0);
+        const leftPx = emuToPx(shape.xfrm?.x ?? 0);
+        const topPx = emuToPx(shape.xfrm?.y ?? 0);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'docx-shape';
+        wrapper.style.position = 'absolute';
+        wrapper.style.left = `${leftPx.toFixed(2)}px`;
+        wrapper.style.top = `${topPx.toFixed(2)}px`;
+        wrapper.style.width = `${widthPx.toFixed(2)}px`;
+        wrapper.style.height = `${heightPx.toFixed(2)}px`;
+        const rot = shape.xfrm?.rot;
+        if (rot && !Number.isNaN(rot)) {
+            wrapper.style.transform = `rotate(${rot}deg)`;
+        }
+        const svg = document.createElementNS(ns.svg, 'svg');
+        svg.setAttribute('xmlns', ns.svg);
+        svg.setAttribute('viewBox', `0 0 ${widthPx} ${heightPx}`);
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '100%');
+        svg.style.position = 'absolute';
+        svg.style.inset = '0';
+        svg.style.overflow = 'visible';
+        const d = presetGeometryToSvgPath(shape.presetGeometry || 'rect', widthPx, heightPx)
+            ?? presetGeometryToSvgPath('rect', widthPx, heightPx);
+        const path = document.createElementNS(ns.svg, 'path');
+        path.setAttribute('d', d);
+        if (shape.fill && shape.fill.type === 'solid') {
+            const c = sanitizeCssColor(shape.fill.color);
+            path.setAttribute('fill', c ?? 'none');
+        }
+        else if (shape.fill && shape.fill.type === 'none') {
+            path.setAttribute('fill', 'none');
+        }
+        else {
+            path.setAttribute('fill', '#4472C4');
+        }
+        if (shape.stroke) {
+            const stroke = sanitizeCssColor(shape.stroke.color);
+            if (stroke)
+                path.setAttribute('stroke', stroke);
+            if (shape.stroke.width != null && Number.isFinite(shape.stroke.width)) {
+                const wPx = emuToPx(shape.stroke.width);
+                path.setAttribute('stroke-width', `${wPx.toFixed(2)}`);
+            }
+        }
+        else {
+            path.setAttribute('stroke', '#2F5496');
+            path.setAttribute('stroke-width', '1');
+        }
+        if (shape.presetGeometry === 'line') {
+            path.setAttribute('fill', 'none');
+        }
+        svg.appendChild(path);
+        wrapper.appendChild(svg);
+        if (shape.txbxParagraphs && shape.txbxParagraphs.length > 0 && renderText) {
+            const text = document.createElement('div');
+            text.className = 'docx-shape-text';
+            text.style.position = 'absolute';
+            text.style.inset = '0';
+            text.style.boxSizing = 'border-box';
+            const lIns = shape.bodyPr?.lIns ?? DEFAULT_INSET_LR_EMU;
+            const tIns = shape.bodyPr?.tIns ?? DEFAULT_INSET_TB_EMU;
+            const rIns = shape.bodyPr?.rIns ?? DEFAULT_INSET_LR_EMU;
+            const bIns = shape.bodyPr?.bIns ?? DEFAULT_INSET_TB_EMU;
+            text.style.paddingLeft = `${emuToPx(lIns).toFixed(2)}px`;
+            text.style.paddingTop = `${emuToPx(tIns).toFixed(2)}px`;
+            text.style.paddingRight = `${emuToPx(rIns).toFixed(2)}px`;
+            text.style.paddingBottom = `${emuToPx(bIns).toFixed(2)}px`;
+            text.style.overflow = 'hidden';
+            const rendered = renderText(shape.txbxParagraphs);
+            for (const n of rendered) {
+                if (n)
+                    text.appendChild(n);
+            }
+            wrapper.appendChild(text);
+        }
+        return wrapper;
+    }
+    function renderShapeGroup(group, emuToPx, renderChild) {
+        const widthPx = emuToPx(group.xfrm?.cx ?? 0);
+        const heightPx = emuToPx(group.xfrm?.cy ?? 0);
+        const leftPx = emuToPx(group.xfrm?.x ?? 0);
+        const topPx = emuToPx(group.xfrm?.y ?? 0);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'docx-shape-group';
+        wrapper.style.position = 'absolute';
+        wrapper.style.left = `${leftPx.toFixed(2)}px`;
+        wrapper.style.top = `${topPx.toFixed(2)}px`;
+        wrapper.style.width = `${widthPx.toFixed(2)}px`;
+        wrapper.style.height = `${heightPx.toFixed(2)}px`;
+        const chOff = group.childOffset ?? { x: 0, y: 0, cx: group.xfrm?.cx ?? 0, cy: group.xfrm?.cy ?? 0 };
+        const svg = document.createElementNS(ns.svg, 'svg');
+        svg.setAttribute('xmlns', ns.svg);
+        svg.setAttribute('viewBox', `${chOff.x} ${chOff.y} ${chOff.cx} ${chOff.cy}`);
+        svg.setAttribute('width', '100%');
+        svg.setAttribute('height', '100%');
+        svg.style.overflow = 'visible';
+        for (const child of group.children ?? []) {
+            const node = renderChild(child);
+            if (!node)
+                continue;
+            const x = child.xfrm?.x ?? 0;
+            const y = child.xfrm?.y ?? 0;
+            const cx = child.xfrm?.cx ?? chOff.cx;
+            const cy = child.xfrm?.cy ?? chOff.cy;
+            const fo = document.createElementNS(ns.svg, 'foreignObject');
+            fo.setAttribute('x', String(x));
+            fo.setAttribute('y', String(y));
+            fo.setAttribute('width', String(cx));
+            fo.setAttribute('height', String(cy));
+            if (node instanceof HTMLElement) {
+                node.style.position = 'relative';
+                node.style.left = '0';
+                node.style.top = '0';
+                node.style.width = '100%';
+                node.style.height = '100%';
+            }
+            fo.appendChild(node);
+            svg.appendChild(fo);
+        }
+        wrapper.appendChild(svg);
+        return wrapper;
     }
 
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
@@ -3951,6 +4454,25 @@
             }
         }
         return out;
+    }
+    function resolveNaryLimitTag(limLoc, opChar) {
+        if (limLoc === "subSup")
+            return "msubsup";
+        if (limLoc === "undOvr")
+            return "munderover";
+        const BIG_OP = new Set(['∑', '∏', '⋃', '⋂', '⨁', '⨂', '⨀']);
+        return BIG_OP.has(opChar) ? "munderover" : "msubsup";
+    }
+    function resolveGroupTag(pos, vertJc) {
+        const hasTop = pos === "top" || vertJc === "top";
+        const hasBot = pos === "bot" || pos === "bottom" || vertJc === "bot" || vertJc === "bottom";
+        if (hasTop && hasBot)
+            return "munderover";
+        if (hasTop)
+            return "mover";
+        if (hasBot)
+            return "munder";
+        return "munderover";
     }
     const BCP47_RE = /^[A-Za-z]{1,8}(-[A-Za-z0-9]{1,8})*$/;
     function isValidBcp47LanguageTag(value) {
@@ -4936,6 +5458,10 @@ section.${c}>ol>li::before {
                     return this.renderDrawing(elem);
                 case DomType.Image:
                     return this.renderImage(elem);
+                case DomType.DrawingShape:
+                    return this.renderDrawingShape(elem);
+                case DomType.DrawingGroup:
+                    return this.renderDrawingShapeGroup(elem);
                 case DomType.Text:
                     return this.renderText(elem);
                 case DomType.Text:
@@ -5011,6 +5537,16 @@ section.${c}>ol>li::before {
                     return this.renderMmlBar(elem);
                 case DomType.MmlEquationArray:
                     return this.renderMllList(elem);
+                case DomType.MmlAccent:
+                    return this.renderMmlAccent(elem);
+                case DomType.MmlBorderBox:
+                    return this.renderMmlBorderBox(elem);
+                case DomType.MmlSubSuperscript:
+                    return this.renderMmlSubSuperscript(elem);
+                case DomType.MmlPhantom:
+                    return this.renderContainerNS(elem, ns.mathML, "mphantom");
+                case DomType.MmlGroup:
+                    return this.renderMmlGroup(elem);
                 case DomType.Inserted:
                     return this.renderInserted(elem);
                 case DomType.Deleted:
@@ -5365,6 +5901,23 @@ section.${c}>ol>li::before {
                 result.style.position = "relative";
             result.style.textIndent = "0px";
             return result;
+        }
+        emuToPx(emu) {
+            return (emu ?? 0) / 9525;
+        }
+        renderDrawingShape(elem) {
+            const result = renderShape(elem, (emu) => this.emuToPx(emu), (paragraphs) => this.renderElements(paragraphs));
+            return result;
+        }
+        renderDrawingShapeGroup(elem) {
+            return renderShapeGroup(elem, (emu) => this.emuToPx(emu), (child) => {
+                const rendered = this.renderElement(child);
+                if (!rendered)
+                    return null;
+                if (Array.isArray(rendered))
+                    return rendered[0] ?? null;
+                return rendered;
+            });
         }
         renderImage(elem) {
             let result = this.toHTML(elem, ns.html, "img", []);
@@ -5873,21 +6426,60 @@ section.${c}>ol>li::before {
             const sub = grouped[DomType.MmlSubArgument];
             const supElem = sup ? this.createMathMLElement("mo", null, asArray(this.renderElement(sup))) : null;
             const subElem = sub ? this.createMathMLElement("mo", null, asArray(this.renderElement(sub))) : null;
-            const charElem = this.createMathMLElement("mo", null, [elem.props?.char ?? '\u222B']);
+            const opChar = elem.props?.char ?? '\u222B';
+            const charElem = this.createMathMLElement("mo", null, [opChar]);
             if (supElem || subElem) {
-                children.push(this.createMathMLElement("munderover", null, [charElem, subElem, supElem]));
-            }
-            else if (supElem) {
-                children.push(this.createMathMLElement("mover", null, [charElem, supElem]));
-            }
-            else if (subElem) {
-                children.push(this.createMathMLElement("munder", null, [charElem, subElem]));
+                if (supElem && subElem) {
+                    const tag = resolveNaryLimitTag(elem.props?.limLoc, opChar);
+                    children.push(this.createMathMLElement(tag, null, [charElem, subElem, supElem]));
+                }
+                else if (supElem) {
+                    const tag = resolveNaryLimitTag(elem.props?.limLoc, opChar) === "munderover" ? "mover" : "msup";
+                    children.push(this.createMathMLElement(tag, null, [charElem, supElem]));
+                }
+                else {
+                    const tag = resolveNaryLimitTag(elem.props?.limLoc, opChar) === "munderover" ? "munder" : "msub";
+                    children.push(this.createMathMLElement(tag, null, [charElem, subElem]));
+                }
             }
             else {
                 children.push(charElem);
             }
             children.push(...this.renderElements(grouped[DomType.MmlBase].children));
             return this.createMathMLElement("mrow", null, children);
+        }
+        renderMmlAccent(elem) {
+            const base = elem.children.find(el => el.type == DomType.MmlBase);
+            const baseNodes = base ? asArray(this.renderElement(base)) : [];
+            const baseElem = this.createMathMLElement("mrow", null, baseNodes);
+            const accentChar = elem.props?.char ?? '\u00AF';
+            const accentElem = this.createMathMLElement("mo", null, [accentChar]);
+            return this.createMathMLElement("mover", null, [baseElem, accentElem]);
+        }
+        renderMmlBorderBox(elem) {
+            const result = this.createMathMLElement("menclose", null, this.renderElements(elem.children));
+            result.setAttribute("notation", "box");
+            return result;
+        }
+        renderMmlSubSuperscript(elem) {
+            const grouped = keyBy(elem.children, x => x.type);
+            const base = grouped[DomType.MmlBase];
+            const sub = grouped[DomType.MmlSubArgument];
+            const sup = grouped[DomType.MmlSuperArgument];
+            const baseElem = base
+                ? this.createMathMLElement("mrow", null, asArray(this.renderElement(base)))
+                : this.createMathMLElement("mrow", null, []);
+            const subElem = sub
+                ? this.createMathMLElement("mrow", null, asArray(this.renderElement(sub)))
+                : this.createMathMLElement("mrow", null, []);
+            const supElem = sup
+                ? this.createMathMLElement("mrow", null, asArray(this.renderElement(sup)))
+                : this.createMathMLElement("mrow", null, []);
+            return this.createMathMLElement("msubsup", null, [baseElem, subElem, supElem]);
+        }
+        renderMmlGroup(elem) {
+            const tagName = resolveGroupTag(elem.props?.position, elem.props?.verticalJustification);
+            return this.renderContainerNS(elem, ns.mathML, tagName);
         }
         renderMmlPreSubSuper(elem) {
             const children = [];
