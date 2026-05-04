@@ -62,7 +62,17 @@ export enum DomType {
 	CommentReference = "commentReference",
 	CommentRangeStart = "commentRangeStart",
 	CommentRangeEnd = "commentRangeEnd",
-    AltChunk = "altChunk"
+    AltChunk = "altChunk",
+    Sdt = "sdt"
+}
+
+// Structured Document Tag (content control). Parsed from w:sdt when
+// w:sdtPr contains a w:alias or w:tag — otherwise parseSdt unwraps
+// directly to sdtContent children. See parseSdt in document-parser.ts
+// and the DomType.Sdt branch of renderElement in html-renderer.ts.
+export interface WmlSdt extends OpenXmlElement {
+    sdtAlias?: string;
+    sdtTag?: string;
 }
 
 export interface Revision {
@@ -174,6 +184,9 @@ export interface IDomImage extends OpenXmlElement {
     src: string;
     srcRect: number[];
     rotation: number;
+    // wp:docPr/@descr, pic:cNvPr/@descr, or a:blip/@descr. Accessibility
+    // alt text for screen readers. Empty string when absent/decorative.
+    altText?: string;
 }
 
 export interface WmlTableColumn {
