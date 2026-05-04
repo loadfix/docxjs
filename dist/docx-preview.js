@@ -1811,26 +1811,30 @@
         }
         const title = chart ? extractTitle(chart) : "";
         if ((kind === "sunburst" || kind === "treemap") && firstSeries) {
-            const dataModel = tryParseDataModel(root, firstSeries, key, title, kind);
+            const dataModel = tryParseTreeModel(root, firstSeries, key, title, kind);
+            if (dataModel)
+                return dataModel;
+        }
+        else if (kind === "waterfall" && firstSeries) {
+            const dataModel = tryParseWaterfallModel(root, firstSeries, key, title);
+            if (dataModel)
+                return dataModel;
+        }
+        else if (kind === "funnel" && firstSeries) {
+            const dataModel = tryParseFunnelModel(root, firstSeries, key, title);
+            if (dataModel)
+                return dataModel;
+        }
+        else if (kind === "histogram" && firstSeries) {
+            const dataModel = tryParseHistogramModel(root, firstSeries, key, title);
             if (dataModel)
                 return dataModel;
         }
         const placeholder = { shape: "placeholder", key, title, kind };
         return placeholder;
     }
-    function tryParseDataModel(root, seriesEl, key, title, kind) {
-        const dataIdEl = globalXmlParser.element(seriesEl, "dataId");
-        const dataId = dataIdEl ? globalXmlParser.attr(dataIdEl, "val") : null;
-        const chartData = globalXmlParser.element(root, "chartData");
-        if (!chartData)
-            return null;
-        let dataEl = null;
-        for (const d of globalXmlParser.elements(chartData, "data")) {
-            if (dataId == null || globalXmlParser.attr(d, "id") === dataId) {
-                dataEl = d;
-                break;
-            }
-        }
+    function tryParseTreeModel(root, seriesEl, key, title, kind) {
+        const dataEl = findDataBlock(root, seriesEl);
         if (!dataEl)
             return null;
         const catDim = findDimension(dataEl, "strDim", "cat")
@@ -1848,6 +1852,151 @@
             return null;
         const maxDepth = computeMaxDepth(root0);
         return { shape: "data", key, title, kind, root: root0, maxDepth };
+    }
+    function findDataBlock(root, seriesEl) {
+        const dataIdEl = globalXmlParser.element(seriesEl, "dataId");
+        const dataId = dataIdEl ? globalXmlParser.attr(dataIdEl, "val") : null;
+        const chartData = globalXmlParser.element(root, "chartData");
+        if (!chartData)
+            return null;
+        for (const d of globalXmlParser.elements(chartData, "data")) {
+            if (dataId == null || globalXmlParser.attr(d, "id") === dataId) {
+                return d;
+            }
+        }
+        return null;
+    }
+    function parseFlatDimensions(dataEl) {
+        const catDim = findDimension(dataEl, "strDim", "cat");
+        const valDim = findDimension(dataEl, "numDim", "val");
+        if (!valDim)
+            return null;
+        const values = parseNumericLevel(valDim);
+        if (values.length === 0)
+            return null;
+        let labels;
+        if (catDim) {
+            const levels = parseStringLevels(catDim);
+            labels = levels.length > 0 ? levels[0].points : [];
+        }
+        else {
+            labels = [];
+        }
+        while (labels.length < values.length)
+            labels.push("");
+        if (labels.length > values.length)
+            labels.length = values.length;
+        return { labels, values };
+    }
+    function tryParseWaterfallModel(root, seriesEl, key, title) {
+        const dataEl = findDataBlock(root, seriesEl);
+        if (!dataEl)
+            return null;
+        const flat = parseFlatDimensions(dataEl);
+        if (!flat)
+            return null;
+        const subtotalSet = new Set();
+        const layoutPr = globalXmlParser.element(seriesEl, "layoutPr");
+        if (layoutPr) {
+            const subtotals = globalXmlParser.element(layoutPr, "subtotals");
+            if (subtotals) {
+                for (const st of globalXmlParser.elements(subtotals, "subtotal")) {
+                    const rawIdx = globalXmlParser.attr(st, "idx");
+                    const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+                    if (Number.isFinite(idx) && idx >= 0 && idx < MAX_POINTS) {
+                        subtotalSet.add(idx);
+                    }
+                }
+            }
+        }
+        const overrides = parseDataPointOverrides(seriesEl);
+        const points = flat.values.map((v, i) => {
+            const value = Number.isFinite(v) ? v : 0;
+            let type = "normal";
+            if (subtotalSet.has(i)) {
+                type = i === flat.values.length - 1 ? "total" : "subtotal";
+            }
+            return {
+                label: flat.labels[i] ?? "",
+                value,
+                type,
+                color: overrides.get(i) ?? null,
+            };
+        });
+        if (points.length === 0)
+            return null;
+        return { shape: "data", key, title, kind: "waterfall", points };
+    }
+    function tryParseFunnelModel(root, seriesEl, key, title) {
+        const dataEl = findDataBlock(root, seriesEl);
+        if (!dataEl)
+            return null;
+        const flat = parseFlatDimensions(dataEl);
+        if (!flat)
+            return null;
+        const overrides = parseDataPointOverrides(seriesEl);
+        const points = flat.values.map((v, i) => ({
+            label: flat.labels[i] ?? "",
+            value: Number.isFinite(v) && v >= 0 ? v : 0,
+            color: overrides.get(i) ?? null,
+        }));
+        if (points.length === 0)
+            return null;
+        return { shape: "data", key, title, kind: "funnel", points };
+    }
+    function tryParseHistogramModel(root, seriesEl, key, title) {
+        const dataEl = findDataBlock(root, seriesEl);
+        if (!dataEl)
+            return null;
+        const valDim = findDimension(dataEl, "numDim", "val");
+        if (!valDim)
+            return null;
+        const rawValues = parseNumericLevel(valDim);
+        const values = rawValues.filter((v) => Number.isFinite(v));
+        if (values.length === 0)
+            return null;
+        const binning = parseBinning(seriesEl);
+        const seriesSpPr = globalXmlParser.element(seriesEl, "spPr");
+        const seriesColor = seriesSpPr ? parseSolidFillColor(seriesSpPr) : null;
+        const dataPointOverrides = parseDataPointOverrides(seriesEl);
+        return {
+            shape: "data",
+            key,
+            title,
+            kind: "histogram",
+            values,
+            binning,
+            seriesColor,
+            dataPointOverrides,
+        };
+    }
+    function parseBinning(seriesEl) {
+        const layoutPr = globalXmlParser.element(seriesEl, "layoutPr");
+        const out = {
+            binSize: null, binCount: null, underflow: null, overflow: null,
+        };
+        if (!layoutPr)
+            return out;
+        const binning = globalXmlParser.element(layoutPr, "binning");
+        if (!binning)
+            return out;
+        const parseFiniteAttr = (name) => {
+            const raw = globalXmlParser.attr(binning, name);
+            if (raw == null)
+                return null;
+            const n = parseFloat(raw);
+            return Number.isFinite(n) ? n : null;
+        };
+        out.binSize = parseFiniteAttr("binSize");
+        const binCountRaw = parseFiniteAttr("binCount");
+        out.binCount = binCountRaw != null && binCountRaw >= 1 && binCountRaw <= MAX_POINTS
+            ? Math.floor(binCountRaw)
+            : null;
+        if (out.binSize != null && !(out.binSize > 0))
+            out.binSize = null;
+        out.underflow = parseFiniteAttr("underflow");
+        out.overflow = parseFiniteAttr("overflow");
+        return out;
     }
     function findDimension(dataEl, localName, type) {
         for (const d of globalXmlParser.elements(dataEl, localName)) {
@@ -4516,6 +4665,10 @@
                         const endA = globalXmlParser.intAttr(n, "endA");
                         const dist = globalXmlParser.intAttr(n, "dist");
                         const dirRaw = globalXmlParser.intAttr(n, "dir");
+                        const fadeDirRaw = globalXmlParser.intAttr(n, "fadeDir");
+                        const stPos = globalXmlParser.intAttr(n, "stPos");
+                        const endPos = globalXmlParser.intAttr(n, "endPos");
+                        const rotWithShape = globalXmlParser.boolAttr(n, "rotWithShape");
                         const entry = {};
                         if (stA != null && Number.isFinite(stA))
                             entry.stA = stA;
@@ -4525,6 +4678,14 @@
                             entry.dist = dist;
                         if (dirRaw != null && Number.isFinite(dirRaw))
                             entry.dir = (dirRaw / 60000) % 360;
+                        if (fadeDirRaw != null && Number.isFinite(fadeDirRaw))
+                            entry.fadeDir = (fadeDirRaw / 60000) % 360;
+                        if (stPos != null && Number.isFinite(stPos))
+                            entry.stPos = stPos;
+                        if (endPos != null && Number.isFinite(endPos))
+                            entry.endPos = endPos;
+                        if (rotWithShape != null)
+                            entry.rotWithShape = rotWithShape;
                         result.reflection = entry;
                         any = true;
                         break;
@@ -6413,18 +6574,35 @@
             const endA = typeof ref.endA === 'number' && Number.isFinite(ref.endA) ? ref.endA : 300;
             const startOpacity = Math.max(0, Math.min(1, stA / 100000)) * 0.5;
             const endOpacity = Math.max(0, Math.min(1, endA / 100000)) * 0.5;
+            const dirDeg = typeof ref.dir === 'number' && Number.isFinite(ref.dir) ? ref.dir : 90;
+            const dirRad = (dirDeg * Math.PI) / 180;
+            const offsetX = distPx * Math.cos(dirRad);
+            const offsetY = distPx * Math.sin(dirRad);
+            const fadeDirDeg = typeof ref.fadeDir === 'number' && Number.isFinite(ref.fadeDir) ? ref.fadeDir : 90;
+            const cssFadeDeg = ((fadeDirDeg + 90) % 360 + 360) % 360;
+            const stPosRaw = typeof ref.stPos === 'number' && Number.isFinite(ref.stPos) ? ref.stPos : 0;
+            const endPosRaw = typeof ref.endPos === 'number' && Number.isFinite(ref.endPos) ? ref.endPos : 100000;
+            const stPosPct = Math.max(0, Math.min(100000, stPosRaw)) / 1000;
+            const endPosPct = Math.max(0, Math.min(100000, endPosRaw)) / 1000;
             const reflectionSvg = svg.cloneNode(true);
             reflectionSvg.style.position = 'absolute';
             reflectionSvg.style.left = '0';
-            reflectionSvg.style.top = `${(heightPx + distPx).toFixed(2)}px`;
+            reflectionSvg.style.top = '0';
             reflectionSvg.style.width = '100%';
             reflectionSvg.style.height = `${heightPx.toFixed(2)}px`;
-            reflectionSvg.style.transform = 'scaleY(-1)';
+            const shapeRotDeg = typeof rot === 'number' && Number.isFinite(rot) ? rot : 0;
+            const rotWithShape = ref.rotWithShape !== false;
+            const counterRot = (!rotWithShape && shapeRotDeg !== 0)
+                ? `rotate(${(-shapeRotDeg).toFixed(3)}deg) `
+                : '';
+            reflectionSvg.style.transform =
+                `${counterRot}scaleY(-1) ` +
+                    `translate(${offsetX.toFixed(3)}px, ${(-heightPx - offsetY).toFixed(3)}px)`;
             reflectionSvg.style.transformOrigin = 'top left';
             reflectionSvg.style.pointerEvents = 'none';
-            const maskGradient = `linear-gradient(to bottom, ` +
-                `rgba(0,0,0,${startOpacity.toFixed(3)}) 0%, ` +
-                `rgba(0,0,0,${endOpacity.toFixed(3)}) 100%)`;
+            const maskGradient = `linear-gradient(${cssFadeDeg.toFixed(3)}deg, ` +
+                `rgba(0,0,0,${startOpacity.toFixed(3)}) ${stPosPct.toFixed(3)}%, ` +
+                `rgba(0,0,0,${endOpacity.toFixed(3)}) ${endPosPct.toFixed(3)}%)`;
             reflectionSvg.style.webkitMaskImage = maskGradient;
             reflectionSvg.style.maskImage = maskGradient;
             wrapper.appendChild(reflectionSvg);
@@ -7247,11 +7425,11 @@
             }));
             return svg;
         }
-        layoutSliceAndDice(model.root, plot.x, plot.y, plot.w, plot.h, 0);
+        layoutSquarifiedTree(model.root, plot.x, plot.y, plot.w, plot.h);
         renderTreemapNodes(svg, doc, model.root, 0);
         return svg;
     }
-    function layoutSliceAndDice(node, x, y, w, h, depth) {
+    function layoutSquarifiedTree(node, x, y, w, h) {
         const ln = node;
         ln._x = x;
         ln._y = y;
@@ -7259,25 +7437,149 @@
         ln._h = h;
         if (node.children.length === 0)
             return;
-        const total = node.value > 0 ? node.value : sumChildValue(node);
-        if (total <= 0)
+        if (w <= 0 || h <= 0) {
+            for (const c of node.children)
+                layoutSquarifiedTree(c, x, y, 0, 0);
             return;
-        const horizontal = depth % 2 === 0;
-        let cursor = horizontal ? x : y;
-        for (const child of node.children) {
-            const childVal = Math.max(0, child.value);
-            const share = childVal / total;
-            if (horizontal) {
-                const cw = w * share;
-                layoutSliceAndDice(child, cursor, y, cw, h, depth + 1);
-                cursor += cw;
+        }
+        const layout = squarifiedLayout(node.children, { x, y, width: w, height: h });
+        for (const r of layout) {
+            layoutSquarifiedTree(r.node, r.x, r.y, r.width, r.height);
+        }
+    }
+    function squarifiedLayout(children, rect) {
+        const out = [];
+        if (children.length === 0)
+            return out;
+        if (!(rect.width > 0) || !(rect.height > 0))
+            return out;
+        if (children.length === 1) {
+            out.push({
+                node: children[0],
+                x: rect.x, y: rect.y,
+                width: rect.width, height: rect.height,
+            });
+            return out;
+        }
+        const items = children
+            .map((node) => {
+            const raw = parseFloat(node.value);
+            const v = Number.isFinite(raw) && raw > 0 ? raw : 0;
+            return { node, value: v };
+        })
+            .sort((a, b) => b.value - a.value);
+        const total = items.reduce((s, i) => s + i.value, 0);
+        if (total <= 0) {
+            for (const it of items) {
+                out.push({
+                    node: it.node,
+                    x: rect.x, y: rect.y,
+                    width: 0, height: 0,
+                });
+            }
+            return out;
+        }
+        const area = rect.width * rect.height;
+        const scale = area / total;
+        const scaled = items.map((i) => ({ node: i.node, area: i.value * scale }));
+        squarifyInto(scaled, [], { ...rect }, out);
+        return out;
+    }
+    function squarifyInto(remaining, row, rect, out) {
+        while (true) {
+            if (remaining.length === 0) {
+                if (row.length > 0)
+                    layoutRow(row, rect, out);
+                return;
+            }
+            const w = Math.min(rect.width, rect.height);
+            if (w <= 0) {
+                for (const it of [...row, ...remaining]) {
+                    out.push({ node: it.node, x: rect.x, y: rect.y, width: 0, height: 0 });
+                }
+                return;
+            }
+            const head = remaining[0];
+            const extended = row.length === 0
+                ? [head]
+                : [...row, head];
+            if (row.length === 0 || worstRatio(extended, w) <= worstRatio(row, w)) {
+                row = extended;
+                remaining = remaining.slice(1);
             }
             else {
-                const ch = h * share;
-                layoutSliceAndDice(child, x, cursor, w, ch, depth + 1);
-                cursor += ch;
+                rect = layoutRow(row, rect, out);
+                row = [];
             }
         }
+    }
+    function worstRatio(row, w) {
+        let s = 0;
+        let rmax = -Infinity;
+        let rmin = Infinity;
+        for (const r of row) {
+            s += r.area;
+            if (r.area > rmax)
+                rmax = r.area;
+            if (r.area < rmin)
+                rmin = r.area;
+        }
+        if (s <= 0)
+            return Infinity;
+        const w2 = w * w;
+        const s2 = s * s;
+        const a = (w2 * rmax) / s2;
+        const b = rmin > 0 ? s2 / (w2 * rmin) : Infinity;
+        return Math.max(a, b);
+    }
+    function layoutRow(row, rect, out) {
+        let sum = 0;
+        for (const r of row)
+            sum += r.area;
+        if (sum <= 0) {
+            for (const r of row) {
+                out.push({ node: r.node, x: rect.x, y: rect.y, width: 0, height: 0 });
+            }
+            return rect;
+        }
+        const horizontal = rect.width >= rect.height;
+        if (horizontal) {
+            const stripW = sum / rect.height;
+            let cy = rect.y;
+            for (const r of row) {
+                const hh = rect.height * (r.area / sum);
+                out.push({
+                    node: r.node,
+                    x: rect.x, y: cy,
+                    width: stripW, height: hh,
+                });
+                cy += hh;
+            }
+            return {
+                x: rect.x + stripW, y: rect.y,
+                width: Math.max(0, rect.width - stripW), height: rect.height,
+            };
+        }
+        else {
+            const stripH = sum / rect.width;
+            let cx = rect.x;
+            for (const r of row) {
+                const ww = rect.width * (r.area / sum);
+                out.push({
+                    node: r.node,
+                    x: cx, y: rect.y,
+                    width: ww, height: stripH,
+                });
+                cx += ww;
+            }
+            return {
+                x: rect.x, y: rect.y + stripH,
+                width: rect.width, height: Math.max(0, rect.height - stripH),
+            };
+        }
+    }
+    function layoutTreemap(nodes, rect) {
+        return squarifiedLayout(nodes, rect);
     }
     function renderTreemapNodes(svg, doc, node, paletteIdx) {
         for (let i = 0; i < node.children.length; i++) {
@@ -7302,10 +7604,10 @@
         const color = sanitizeCssColor(node.color)
             ?? DEFAULT_PALETTE[paletteIdx % DEFAULT_PALETTE.length];
         const rect = doc.createElementNS(SVG_NS, "rect");
-        rect.setAttribute("x", fmt(x));
-        rect.setAttribute("y", fmt(y));
-        rect.setAttribute("width", fmt(w));
-        rect.setAttribute("height", fmt(h));
+        rect.setAttribute("x", fmt6(x));
+        rect.setAttribute("y", fmt6(y));
+        rect.setAttribute("width", fmt6(w));
+        rect.setAttribute("height", fmt6(h));
         rect.setAttribute("fill", color);
         rect.setAttribute("stroke", "#fff");
         rect.setAttribute("stroke-width", "1");
@@ -7318,6 +7620,302 @@
             });
             svg.appendChild(label);
         }
+    }
+    function fmt6(n) {
+        if (!Number.isFinite(n))
+            return "0";
+        return Number(n.toFixed(6)).toString();
+    }
+    const WATERFALL_POSITIVE = "#548235";
+    const WATERFALL_NEGATIVE = "#C00000";
+    const WATERFALL_TOTAL = "#4472C4";
+    const HISTOGRAM_DEFAULT_BIN_COUNT = 10;
+    const HISTOGRAM_MAX_BINS = 200;
+    function chartExShell(title, emptyLabel) {
+        const doc = document;
+        const svg = doc.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        svg.style.maxWidth = "100%";
+        svg.style.height = "auto";
+        svg.style.display = "block";
+        const clean = (title ?? "").trim();
+        const titleBottom = clean ? PADDING + TITLE_HEIGHT : PADDING;
+        if (clean) {
+            svg.appendChild(mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, clean, {
+                fontSize: 14, fontWeight: "600", anchor: "middle",
+            }));
+        }
+        const plotTop = titleBottom + 4;
+        const plotBottom = VIEW_H - PADDING;
+        const plot = {
+            x: PADDING + AXIS_LABEL_WIDTH,
+            y: plotTop,
+            w: VIEW_W - 2 * PADDING - AXIS_LABEL_WIDTH,
+            h: plotBottom - plotTop - AXIS_LABEL_HEIGHT,
+        };
+        return {
+            svg, doc, plot,
+            emptyIf(cond) {
+                if (!cond)
+                    return null;
+                svg.appendChild(mkText(doc, VIEW_W / 2, VIEW_H / 2, clean || emptyLabel, {
+                    fontSize: 12, anchor: "middle", fill: "#888",
+                }));
+                return svg;
+            },
+        };
+    }
+    function renderWaterfall(model) {
+        const shell = chartExShell(model.title, "[waterfall]");
+        const empty = shell.emptyIf(model.points.length === 0 || shell.plot.w <= 0 || shell.plot.h <= 0);
+        if (empty)
+            return empty;
+        const { svg, doc, plot } = shell;
+        const spans = [];
+        let running = 0;
+        for (const p of model.points) {
+            let before;
+            let after;
+            if (p.type === "normal") {
+                before = running;
+                after = running + p.value;
+                running = after;
+            }
+            else if (p.type === "subtotal") {
+                before = 0;
+                after = running + p.value;
+                running = after;
+            }
+            else {
+                before = 0;
+                after = running + p.value;
+            }
+            spans.push({ before, after });
+        }
+        let valMin = 0;
+        let valMax = 0;
+        for (const s of spans) {
+            if (s.before < valMin)
+                valMin = s.before;
+            if (s.after < valMin)
+                valMin = s.after;
+            if (s.before > valMax)
+                valMax = s.before;
+            if (s.after > valMax)
+                valMax = s.after;
+        }
+        if (valMax === valMin)
+            valMax = valMin + 1;
+        const { min: yMin, max: yMax, ticks } = niceScale(valMin, valMax, 5);
+        svg.appendChild(mkLine(doc, plot.x, plot.y, plot.x, plot.y + plot.h, DEFAULT_AXIS_LINE));
+        svg.appendChild(mkLine(doc, plot.x, plot.y + plot.h, plot.x + plot.w, plot.y + plot.h, DEFAULT_AXIS_LINE));
+        for (const t of ticks) {
+            const y = plot.y + plot.h - ((t - yMin) / (yMax - yMin)) * plot.h;
+            svg.appendChild(mkLine(doc, plot.x - 4, y, plot.x, y, DEFAULT_AXIS_LINE));
+            svg.appendChild(mkText(doc, plot.x - 6, y + 4, formatTick(t), {
+                fontSize: FONT_SIZE, anchor: "end", fill: DEFAULT_TICK_LABEL,
+            }));
+        }
+        const n = model.points.length;
+        const slotW = plot.w / n;
+        const barPad = Math.min(slotW * 0.15, 8);
+        const barW = Math.max(1, slotW - 2 * barPad);
+        for (let i = 0; i < n; i++) {
+            const p = model.points[i];
+            const span = spans[i];
+            const xMid = plot.x + slotW * (i + 0.5);
+            svg.appendChild(mkText(doc, xMid, plot.y + plot.h + 16, p.label, {
+                fontSize: FONT_SIZE, anchor: "middle", fill: DEFAULT_TICK_LABEL,
+            }));
+            const scaled = (v) => plot.y + plot.h
+                - ((v - yMin) / (yMax - yMin)) * plot.h;
+            const y0 = scaled(Math.max(span.before, span.after));
+            const y1 = scaled(Math.min(span.before, span.after));
+            const barH = Math.max(0, y1 - y0);
+            const typeColor = p.type === "normal"
+                ? (p.value >= 0 ? WATERFALL_POSITIVE : WATERFALL_NEGATIVE)
+                : WATERFALL_TOTAL;
+            const color = sanitizeCssColor(p.color) ?? typeColor;
+            const rect = doc.createElementNS(SVG_NS, "rect");
+            rect.setAttribute("x", fmt(xMid - barW / 2));
+            rect.setAttribute("y", fmt(y0));
+            rect.setAttribute("width", fmt(barW));
+            rect.setAttribute("height", fmt(barH));
+            rect.setAttribute("fill", color);
+            svg.appendChild(rect);
+        }
+        return svg;
+    }
+    function renderFunnel(model) {
+        const shell = chartExShell(model.title, "[funnel]");
+        const n = model.points.length;
+        let maxVal = 0;
+        for (const p of model.points) {
+            if (p.value > maxVal)
+                maxVal = p.value;
+        }
+        const empty = shell.emptyIf(n === 0 || maxVal <= 0 || shell.plot.w <= 0 || shell.plot.h <= 0);
+        if (empty)
+            return empty;
+        const { svg, doc, plot } = shell;
+        const labelReserve = Math.min(160, plot.w * 0.33);
+        const funnelW = Math.max(1, plot.w - labelReserve);
+        const cx = plot.x + funnelW / 2;
+        const bandH = plot.h / n;
+        const vertPad = Math.min(bandH * 0.1, 6);
+        const inner = bandH - 2 * vertPad;
+        for (let i = 0; i < n; i++) {
+            const p = model.points[i];
+            const nextVal = i + 1 < n ? model.points[i + 1].value : p.value;
+            const topHalf = (p.value / maxVal) * funnelW / 2;
+            const botHalf = (Math.min(nextVal, p.value) / maxVal) * funnelW / 2;
+            const y0 = plot.y + bandH * i + vertPad;
+            const y1 = y0 + inner;
+            const x0t = cx - topHalf;
+            const x1t = cx + topHalf;
+            const x0b = cx - botHalf;
+            const x1b = cx + botHalf;
+            const color = sanitizeCssColor(p.color)
+                ?? DEFAULT_PALETTE[i % DEFAULT_PALETTE.length];
+            const poly = doc.createElementNS(SVG_NS, "polygon");
+            const points = [
+                `${fmt(x0t)},${fmt(y0)}`,
+                `${fmt(x1t)},${fmt(y0)}`,
+                `${fmt(x1b)},${fmt(y1)}`,
+                `${fmt(x0b)},${fmt(y1)}`,
+            ].join(" ");
+            poly.setAttribute("points", points);
+            poly.setAttribute("fill", color);
+            poly.setAttribute("stroke", "#fff");
+            poly.setAttribute("stroke-width", "1");
+            svg.appendChild(poly);
+            const labelX = plot.x + funnelW + 8;
+            const labelY = (y0 + y1) / 2 + 4;
+            const labelText = p.label
+                ? `${p.label}: ${formatTick(p.value)}`
+                : formatTick(p.value);
+            svg.appendChild(mkText(doc, labelX, labelY, labelText, {
+                fontSize: FONT_SIZE, anchor: "start", fill: "#333",
+            }));
+        }
+        return svg;
+    }
+    function renderHistogram(model) {
+        const shell = chartExShell(model.title, "[histogram]");
+        const values = model.values;
+        const n = values.length;
+        let minV = Infinity;
+        let maxV = -Infinity;
+        for (const v of values) {
+            if (v < minV)
+                minV = v;
+            if (v > maxV)
+                maxV = v;
+        }
+        const haveRange = n > 0 && Number.isFinite(minV) && Number.isFinite(maxV);
+        const empty = shell.emptyIf(!haveRange || shell.plot.w <= 0 || shell.plot.h <= 0);
+        if (empty)
+            return empty;
+        const { svg, doc, plot } = shell;
+        const { underflow, overflow } = model.binning;
+        const useUnderflow = underflow != null && underflow > minV;
+        const useOverflow = overflow != null && overflow < maxV;
+        const rangeLo = useUnderflow ? underflow : minV;
+        let rangeHi = useOverflow ? overflow : maxV;
+        if (rangeHi <= rangeLo)
+            rangeHi = rangeLo + 1;
+        let binSize = model.binning.binSize;
+        let binCount = model.binning.binCount;
+        if (binSize == null) {
+            const count = binCount != null
+                ? binCount
+                : Math.max(1, Math.min(HISTOGRAM_MAX_BINS, HISTOGRAM_DEFAULT_BIN_COUNT));
+            binSize = (rangeHi - rangeLo) / count;
+        }
+        if (!(binSize > 0))
+            binSize = rangeHi - rangeLo;
+        binCount = Math.max(1, Math.min(HISTOGRAM_MAX_BINS, Math.ceil((rangeHi - rangeLo) / binSize)));
+        rangeHi = rangeLo + binSize * binCount;
+        const bins = [];
+        if (useUnderflow) {
+            bins.push({
+                lo: -Infinity, hi: rangeLo, count: 0,
+                label: `<= ${formatTick(rangeLo)}`,
+            });
+        }
+        for (let i = 0; i < binCount; i++) {
+            const lo = rangeLo + binSize * i;
+            const hi = lo + binSize;
+            bins.push({
+                lo, hi, count: 0,
+                label: `${formatTick(lo)}-${formatTick(hi)}`,
+            });
+        }
+        if (useOverflow) {
+            bins.push({
+                lo: rangeHi, hi: Infinity, count: 0,
+                label: `> ${formatTick(rangeHi)}`,
+            });
+        }
+        for (const v of values) {
+            if (useUnderflow && v < rangeLo) {
+                bins[0].count++;
+                continue;
+            }
+            if (useOverflow && v > rangeHi) {
+                bins[bins.length - 1].count++;
+                continue;
+            }
+            let idx = Math.floor((v - rangeLo) / binSize);
+            if (idx < 0)
+                idx = 0;
+            if (idx >= binCount)
+                idx = binCount - 1;
+            const offset = useUnderflow ? 1 : 0;
+            bins[idx + offset].count++;
+        }
+        let maxCount = 0;
+        for (const b of bins) {
+            if (b.count > maxCount)
+                maxCount = b.count;
+        }
+        if (maxCount === 0)
+            maxCount = 1;
+        const { min: yMin, max: yMax, ticks } = niceScale(0, maxCount, 5);
+        svg.appendChild(mkLine(doc, plot.x, plot.y, plot.x, plot.y + plot.h, DEFAULT_AXIS_LINE));
+        svg.appendChild(mkLine(doc, plot.x, plot.y + plot.h, plot.x + plot.w, plot.y + plot.h, DEFAULT_AXIS_LINE));
+        for (const t of ticks) {
+            const y = plot.y + plot.h - ((t - yMin) / (yMax - yMin)) * plot.h;
+            svg.appendChild(mkLine(doc, plot.x - 4, y, plot.x, y, DEFAULT_AXIS_LINE));
+            svg.appendChild(mkText(doc, plot.x - 6, y + 4, formatTick(t), {
+                fontSize: FONT_SIZE, anchor: "end", fill: DEFAULT_TICK_LABEL,
+            }));
+        }
+        const slotW = plot.w / bins.length;
+        const barPad = Math.min(slotW * 0.1, 4);
+        const barW = Math.max(1, slotW - 2 * barPad);
+        const baseColor = sanitizeCssColor(model.seriesColor) ?? DEFAULT_PALETTE[0];
+        for (let i = 0; i < bins.length; i++) {
+            const b = bins[i];
+            const xLeft = plot.x + slotW * i + barPad;
+            const y0 = plot.y + plot.h - ((b.count - yMin) / (yMax - yMin)) * plot.h;
+            const y1 = plot.y + plot.h;
+            const override = model.dataPointOverrides.get(i);
+            const color = (override ? sanitizeCssColor(override) : null) ?? baseColor;
+            const rect = doc.createElementNS(SVG_NS, "rect");
+            rect.setAttribute("x", fmt(xLeft));
+            rect.setAttribute("y", fmt(y0));
+            rect.setAttribute("width", fmt(barW));
+            rect.setAttribute("height", fmt(Math.max(0, y1 - y0)));
+            rect.setAttribute("fill", color);
+            svg.appendChild(rect);
+            svg.appendChild(mkText(doc, xLeft + barW / 2, plot.y + plot.h + 16, b.label, {
+                fontSize: FONT_SIZE, anchor: "middle", fill: DEFAULT_TICK_LABEL,
+            }));
+        }
+        return svg;
     }
 
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
@@ -9093,7 +9691,7 @@ section.${c}>ol>li::before {
             const chart = part.chart;
             if (chart.shape === "data") {
                 try {
-                    let svg;
+                    let svg = null;
                     switch (chart.kind) {
                         case "sunburst":
                             svg = renderSunburst(chart);
@@ -9101,13 +9699,24 @@ section.${c}>ol>li::before {
                         case "treemap":
                             svg = renderTreemap(chart);
                             break;
+                        case "waterfall":
+                            svg = renderWaterfall(chart);
+                            break;
+                        case "funnel":
+                            svg = renderFunnel(chart);
+                            break;
+                        case "histogram":
+                            svg = renderHistogram(chart);
+                            break;
                     }
-                    const wrapper = this.createElement("span");
-                    wrapper.className = `${this.className}-chart`;
-                    wrapper.style.display = "inline-block";
-                    wrapper.setAttribute("data-chart-kind", chart.kind);
-                    wrapper.appendChild(svg);
-                    return wrapper;
+                    if (svg) {
+                        const wrapper = this.createElement("span");
+                        wrapper.className = `${this.className}-chart`;
+                        wrapper.style.display = "inline-block";
+                        wrapper.setAttribute("data-chart-kind", chart.kind);
+                        wrapper.appendChild(svg);
+                        return wrapper;
+                    }
                 }
                 catch {
                 }
@@ -10584,6 +11193,7 @@ section.${c}>ol>li::before {
     exports.isSafeCssIdent = isSafeCssIdent;
     exports.isSafeHyperlinkHref = isSafeHyperlinkHref;
     exports.keyBy = keyBy;
+    exports.layoutTreemap = layoutTreemap;
     exports.mergeDeep = mergeDeep;
     exports.parseAsync = parseAsync;
     exports.parseFieldInstruction = parseFieldInstruction;

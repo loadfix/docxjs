@@ -1020,10 +1020,11 @@ export function renderShape(
 
     // Emit a reflection twin *before* the main SVG so DOM order puts
     // the reflection behind the shape. We position it absolutely at
-    // `top: 100% + dist` via the wrapper-relative coord space, flip
-    // it vertically via CSS, and fade it with a mask-image gradient
-    // derived from stA / endA. Non-vertical `dir` values are treated
-    // as vertical in v1 (spec'd below).
+    // `top: 0`, apply a transform that both flips vertically and
+    // translates by `dir`-derived offsets, and fade it with a
+    // mask-image gradient whose angle comes from `fadeDir`. When
+    // `rotWithShape=false` and the parent shape is rotated, we
+    // counter-rotate the reflection so it stays level.
     if (shape.effects?.reflection) {
         const ref = shape.effects.reflection;
         const distPx = emuToShadowPx(ref.dist);
@@ -1035,6 +1036,30 @@ export function renderShape(
         // to 52% reflectance).
         const startOpacity = Math.max(0, Math.min(1, stA / 100000)) * 0.5;
         const endOpacity = Math.max(0, Math.min(1, endA / 100000)) * 0.5;
+        // `dir` defaults to 90° (straight down) if missing / invalid.
+        // In OOXML, 0° points right and angles increase clockwise, so
+        // 90° → down: offsetX = dist·cos(90°) = 0, offsetY = dist·sin(90°)
+        // = dist. The legacy behaviour (translateY(-h - dist)) falls
+        // out of this formula as expected.
+        const dirDeg = typeof ref.dir === 'number' && Number.isFinite(ref.dir) ? ref.dir : 90;
+        const dirRad = (dirDeg * Math.PI) / 180;
+        const offsetX = distPx * Math.cos(dirRad);
+        const offsetY = distPx * Math.sin(dirRad);
+        // `fadeDir` defaults to 90° (straight down in CSS gradient
+        // space too, since `linear-gradient(90deg,…)` in OOXML maps
+        // directly onto `linear-gradient(<deg>deg,…)` here — OOXML 0°
+        // = right, CSS 0° = up — but "to bottom" ≡ 180deg in CSS. So
+        // we emit CSS angle = (fadeDirDeg + 90) mod 360 to align
+        // OOXML-right (0°) with CSS-right (90deg).
+        const fadeDirDeg = typeof ref.fadeDir === 'number' && Number.isFinite(ref.fadeDir) ? ref.fadeDir : 90;
+        const cssFadeDeg = ((fadeDirDeg + 90) % 360 + 360) % 360;
+        // `stPos` / `endPos` are 1/1000ths of a percent. Defaults: 0
+        // and 100000 (= 0% and 100%). Clamp to [0..100000] and convert
+        // to percent.
+        const stPosRaw = typeof ref.stPos === 'number' && Number.isFinite(ref.stPos) ? ref.stPos : 0;
+        const endPosRaw = typeof ref.endPos === 'number' && Number.isFinite(ref.endPos) ? ref.endPos : 100000;
+        const stPosPct = Math.max(0, Math.min(100000, stPosRaw)) / 1000;
+        const endPosPct = Math.max(0, Math.min(100000, endPosRaw)) / 1000;
         // Clone the SVG so the reflection carries the same paths,
         // fills, strokes, and filter references. cloneNode(true) is
         // safe — it only duplicates the DOM tree we built above, and
@@ -1042,20 +1067,36 @@ export function renderShape(
         const reflectionSvg = svg.cloneNode(true) as SVGSVGElement;
         reflectionSvg.style.position = 'absolute';
         reflectionSvg.style.left = '0';
-        reflectionSvg.style.top = `${(heightPx + distPx).toFixed(2)}px`;
+        reflectionSvg.style.top = '0';
         reflectionSvg.style.width = '100%';
         reflectionSvg.style.height = `${heightPx.toFixed(2)}px`;
-        reflectionSvg.style.transform = 'scaleY(-1)';
+        // `rotWithShape` defaults to true. When false and the shape is
+        // rotated, counter-rotate the reflection by -rot so it stays
+        // level. The wrapper rotation is applied at the wrapper level
+        // via `transform: rotate(<rot>deg)` (see earlier in renderShape),
+        // so a counter-rotation on the reflection cancels it out. The
+        // counter-rotation must come BEFORE the scaleY/translate so the
+        // reflection is un-rotated relative to the wrapper first, then
+        // mirrored into position.
+        const shapeRotDeg = typeof rot === 'number' && Number.isFinite(rot) ? rot : 0;
+        const rotWithShape = ref.rotWithShape !== false; // default true
+        const counterRot = (!rotWithShape && shapeRotDeg !== 0)
+            ? `rotate(${(-shapeRotDeg).toFixed(3)}deg) `
+            : '';
+        reflectionSvg.style.transform =
+            `${counterRot}scaleY(-1) ` +
+            `translate(${offsetX.toFixed(3)}px, ${(-heightPx - offsetY).toFixed(3)}px)`;
         reflectionSvg.style.transformOrigin = 'top left';
         reflectionSvg.style.pointerEvents = 'none';
-        // Linear mask fading from startOpacity at the top (closest to
-        // the original shape once flipped) to endOpacity at the
-        // bottom. Both values are clamped and already derived from
-        // DOCX numerics that went through Number.isFinite.
+        // Linear mask fading from startOpacity at `stPos` to endOpacity
+        // at `endPos` along the CSS angle derived from `fadeDir`. All
+        // numeric inputs are clamped and came from DOCX values that
+        // went through Number.isFinite, so the template-literal
+        // interpolation below never sees an arbitrary string.
         const maskGradient =
-            `linear-gradient(to bottom, ` +
-            `rgba(0,0,0,${startOpacity.toFixed(3)}) 0%, ` +
-            `rgba(0,0,0,${endOpacity.toFixed(3)}) 100%)`;
+            `linear-gradient(${cssFadeDeg.toFixed(3)}deg, ` +
+            `rgba(0,0,0,${startOpacity.toFixed(3)}) ${stPosPct.toFixed(3)}%, ` +
+            `rgba(0,0,0,${endOpacity.toFixed(3)}) ${endPosPct.toFixed(3)}%)`;
         reflectionSvg.style.webkitMaskImage = maskGradient;
         (reflectionSvg.style as any).maskImage = maskGradient;
         wrapper.appendChild(reflectionSvg);

@@ -1524,6 +1524,60 @@ async function renderFixture(path, options) {
     note(`45·: text fixture has 0 chartEx artefacts post-renderer extension`);
 }
 
+// ── 46. Squarified treemap layout (Wave 8.1) ────────────────────────────
+// layoutTreemap is re-exported from docx-preview.ts. Smoke-test it
+// against the classic Bruls et al. 2000 paper example.
+{
+    const { layoutTreemap } = globalThis.docx;
+    assert(
+        typeof layoutTreemap === 'function',
+        `46a: layoutTreemap should be exported from docx-preview`,
+    );
+    const rects = layoutTreemap(
+        [
+            { value: 6 }, { value: 6 }, { value: 4 },
+            { value: 3 }, { value: 2 }, { value: 2 }, { value: 1 },
+        ],
+        { x: 0, y: 0, width: 6, height: 4 },
+    );
+    assert(rects.length === 7, `46b: expected 7 rectangles (got ${rects.length})`);
+    // Total covered area must equal parent area (24).
+    const totalArea = rects.reduce((a, r) => a + r.width * r.height, 0);
+    assert(
+        Math.abs(totalArea - 24) < 1e-6,
+        `46c: squarified layout should tile the parent exactly (got area ${totalArea})`,
+    );
+    note(`46·: squarified treemap tiles parent exactly (${rects.length} rects, area ${totalArea})`);
+}
+
+// ── 47. ChartEx waterfall/funnel/histogram regression guard (Wave 8.2) ──
+// No fixture exercises these — assert that the parser path still
+// produces paragraphs for a non-chartEx document after the model
+// union was reshaped.
+{
+    const { container } = await renderFixture('text');
+    const paragraphs = container.querySelectorAll('p');
+    assert(
+        paragraphs.length > 0,
+        `47a: text fixture should still render paragraphs after chartEx model reshape`,
+    );
+    note(`47·: text fixture renders ${paragraphs.length} paragraph(s) post-chartEx-union`);
+}
+
+// ── 48. Reflection field parsing (Wave 8.3) ─────────────────────────────
+// parseEffectList grew four new fields for <a:reflection>. The text
+// fixture doesn't exercise them; this is a regression guard that
+// non-reflection parsing still produces the expected run content.
+{
+    const { container } = await renderFixture('text');
+    const runs = container.querySelectorAll('span');
+    assert(
+        runs.length > 0,
+        `48a: text fixture still emits run spans after reflection parser extension`,
+    );
+    note(`48·: text fixture emits ${runs.length} run span(s) post-reflection-polish`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1532,5 +1586,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${45} scenarios passed`);
+    console.log(`\n✓ all ${48} scenarios passed`);
 }
