@@ -11,6 +11,8 @@ export enum DomType {
     SmartTag = "smartTag",
     Drawing = "drawing",
     Image = "image",
+    DrawingShape = "drawingShape",
+    DrawingGroup = "drawingGroup",
     Text = "text",
     Tab = "tab",
     Symbol = "symbol",
