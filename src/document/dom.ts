@@ -70,7 +70,8 @@ export enum DomType {
 	CommentRangeStart = "commentRangeStart",
 	CommentRangeEnd = "commentRangeEnd",
     AltChunk = "altChunk",
-    Sdt = "sdt"
+    Sdt = "sdt",
+    Chart = "chart"
 }
 
 // Structured Document Tag (content control). Parsed from w:sdt when

@@ -4,7 +4,7 @@ import {
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlAltChunk, Revision, FormattingRevision, WmlSdt
 } from './document/dom';
-import { DrawingShape, DrawingGroup } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
 import { sanitizeCssColor } from './utils';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -1426,10 +1426,29 @@ export class DocumentParser {
 					// parseDrawingShapeGroup recurses back through
 					// parseGraphicDataChild for every entry.
 					return this.parseDrawingShapeGroup(n);
+				case "chart":
+					// DrawingML chart reference. Actual SVG rendering
+					// happens in html-renderer.ts after looking up the
+					// ChartPart via the enclosing part's rel map. See
+					// src/charts/render.ts and SECURITY above.
+					return this.parseChartReference(n);
 			}
 		}
 
 		return null;
+	}
+
+	// <c:chart r:id="rIdX"/> inside <a:graphicData
+	// uri="…/drawingml/2006/chart">. We record the rel id only; the
+	// renderer resolves it against the document's relationship map.
+	// Attacker-controlled string never reaches a CSS selector or class
+	// name — only read via findPartByRelId's Map/Object lookup.
+	parseChartReference(elem: Element): DrawingChart {
+		const relId = xml.attr(elem, "id");
+		return {
+			type: DomType.Chart,
+			relId: relId ?? "",
+		};
 	}
 
 	// Hard-coded allowlist of DrawingML preset-geometry names that

@@ -67,3 +67,16 @@ export interface DrawingGroup extends OpenXmlElement {
     // Children may be DrawingShape, DrawingGroup, or IDomImage.
     children: OpenXmlElement[];
 }
+
+// Chart reference inside an <a:graphic>/<a:graphicData uri="…/chart">.
+// The relationship id resolves to a ChartPart via the enclosing part's
+// relationship map; the renderer looks that part up and turns it into
+// SVG. Parsed by parseChartReference in document-parser.ts; rendered
+// by the DomType.Chart branch of html-renderer.
+export interface DrawingChart extends OpenXmlElement {
+    type: DomType.Chart;
+    // r:id of the chart part inside the document's relationships.
+    // Attacker-controlled — validated against the rel map on lookup,
+    // never interpolated into a CSS class or selector.
+    relId: string;
+}
