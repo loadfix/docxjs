@@ -2,7 +2,7 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
-	WmlAltChunk, Revision, FormattingRevision
+	WmlAltChunk, Revision, FormattingRevision, WmlSdt
 } from './document/dom';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
@@ -540,7 +540,29 @@ export class DocumentParser {
 
 	parseSdt(node: Element, parser: Function): OpenXmlElement[] {
 		const sdtContent = xml.element(node, "sdtContent");
-		return sdtContent ? parser(sdtContent) : [];
+		if (!sdtContent) return [];
+
+		const children: OpenXmlElement[] = parser(sdtContent) ?? [];
+
+		// w:sdtPr holds the content-control metadata. w:alias is the visible
+		// label ("Publication Date", etc.); w:tag is the programmatic id.
+		// When either is present we wrap the content so the renderer can emit
+		// a role="group" with an aria-label — otherwise we unwrap as before.
+		const sdtPr = xml.element(node, "sdtPr");
+		if (sdtPr) {
+			const aliasEl = xml.element(sdtPr, "alias");
+			const tagEl = xml.element(sdtPr, "tag");
+			const alias = aliasEl ? xml.attr(aliasEl, "val") : null;
+			const tag = tagEl ? xml.attr(tagEl, "val") : null;
+			if (alias || tag) {
+				const wrapper: WmlSdt = { type: DomType.Sdt, children };
+				if (alias) wrapper.sdtAlias = alias;
+				if (tag) wrapper.sdtTag = tag;
+				return [wrapper];
+			}
+		}
+
+		return children;
 	}
 
 	parseInserted(node: Element, parentParser: Function): OpenXmlElement {
@@ -988,8 +1010,16 @@ export class DocumentParser {
 		let posX = { relative: "page", align: "left", offset: "0" };
 		let posY = { relative: "page", align: "top", offset: "0" };
 
+		// wp:docPr/@descr — the preferred alt-text source. See parsePicture
+		// for the pic:cNvPr/@descr and a:blip/@descr fallbacks.
+		let docPrDescr: string | null = null;
+
 		for (var n of xml.elements(node)) {
 			switch (n.localName) {
+				case "docPr":
+					docPrDescr = xml.attr(n, "descr");
+					break;
+
 				case "simplePos":
 					if (simplePos) {
 						posX.offset = xml.lengthAttr(n, "x", LengthUsage.Emu);
@@ -1059,7 +1089,28 @@ export class DocumentParser {
 			result.cssStyle["float"] = posX.align;
 		}
 
+		// Propagate wp:docPr/@descr down to the contained IDomImage so
+		// renderImage can emit it as alt="". parsePicture may have already
+		// set altText from pic:cNvPr/a:blip; docPr wins since it's authored
+		// at the Word "Alt Text…" UI level.
+		if (docPrDescr != null) {
+			this.setImageAltText(result, docPrDescr);
+		}
+
 		return result;
+	}
+
+	// Recursively finds the single IDomImage child (if any) under a drawing
+	// wrapper and assigns altText. The tree shape is:
+	//   Drawing → (graphic?) → Image. One picture per drawing in practice.
+	private setImageAltText(elem: OpenXmlElement, descr: string) {
+		if (elem.type === DomType.Image) {
+			(elem as IDomImage).altText = descr;
+			return;
+		}
+		if (elem.children) {
+			for (const c of elem.children) this.setImageAltText(c, descr);
+		}
 	}
 
 	parseGraphic(elem: Element): OpenXmlElement {
@@ -1082,6 +1133,16 @@ export class DocumentParser {
 		var srcRect = xml.element(blipFill, "srcRect");
 
 		result.src = xml.attr(blip, "embed");
+
+		// Alt text: pic:nvPicPr/pic:cNvPr/@descr is the in-picture source;
+		// a:blip/@descr appears in some newer files. parseDrawingWrapper may
+		// overwrite this with wp:docPr/@descr — the authoring-level value.
+		const nvPicPr = xml.element(elem, "nvPicPr");
+		const cNvPr = nvPicPr ? xml.element(nvPicPr, "cNvPr") : null;
+		const picDescr = cNvPr ? xml.attr(cNvPr, "descr") : null;
+		const blipDescr = blip ? xml.attr(blip, "descr") : null;
+		if (picDescr != null) result.altText = picDescr;
+		else if (blipDescr != null) result.altText = blipDescr;
 
 		if (srcRect) {
 			result.srcRect = [

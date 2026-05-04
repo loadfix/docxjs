@@ -3,7 +3,8 @@ import {
 	DomType, WmlTable, IDomNumbering,
 	WmlHyperlink, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlSmartTag,
-	WmlTableRow
+	WmlTableRow,
+	WmlSdt
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
@@ -98,6 +99,9 @@ export class HtmlRenderer {
 	currentVerticalMerge: CellVerticalMergeType = null;
 	tableCellPositions: CellPos[] = [];
 	currentCellPosition: CellPos = null;
+	// Set while rendering a WmlTableRow whose isHeader is true so
+	// renderTableCell can emit <th scope="col"> instead of <td>.
+	private currentRowIsHeader: boolean = false;
 
 	footnoteMap: Record<string, WmlFootnote> = {};
 	endnoteMap: Record<string, WmlFootnote> = {};
@@ -1390,6 +1394,9 @@ section.${c}>ol>li::before {
 				// parser still produces a node so consumers can detect them.
 				// See SECURITY_REVIEW.md #1.
 				return null;
+
+			case DomType.Sdt:
+				return this.renderSdt(elem as WmlSdt);
 		}
 
 		return null;
@@ -1534,6 +1541,26 @@ section.${c}>ol>li::before {
 	renderSmartTag(elem: WmlSmartTag) {
 		return this.renderContainer(elem, "span");
 	}
+
+	// Structured Document Tag (content control). parseSdt only emits a
+	// DomType.Sdt wrapper when w:alias or w:tag is set on w:sdtPr — that's
+	// the only case where wrapping the content adds accessibility value.
+	// Otherwise the parser unwraps directly and this method isn't reached.
+	renderSdt(elem: WmlSdt) {
+		const children = this.renderElements(elem.children);
+		const span = this.h({ tagName: "span", children }) as HTMLSpanElement;
+		// DOCX-derived strings — setAttribute, never innerHTML / className.
+		span.setAttribute("role", "group");
+		if (elem.sdtAlias) {
+			span.setAttribute("aria-label", elem.sdtAlias);
+		}
+		if (elem.sdtTag) {
+			// Surface the programmatic tag as a data-attr; the browser
+			// HTML-encodes attribute values so this is safe for DOCX strings.
+			span.dataset.sdtTag = elem.sdtTag;
+		}
+		return span;
+	}
 	
 	renderCommentRangeStart(commentStart: WmlCommentRangeStart) {
 		if (!this.options.renderComments)
@@ -1643,6 +1670,9 @@ section.${c}>ol>li::before {
 
 	renderImage(elem: IDomImage) {
 		let result = this.toHTML(elem, ns.html, "img", []);
+		// Accessibility: always set alt (empty string = decorative). Using
+		// the IDL setter — DOCX-derived text must not hit innerHTML.
+		(result as HTMLImageElement).alt = elem.altText ?? "";
 		let transform = elem.cssStyle?.transform;
 
 		if (elem.srcRect && elem.srcRect.some(x => x != 0)) {
@@ -1979,7 +2009,10 @@ section.${c}>ol>li::before {
 			cellChildren.push(child);
 		}
 
+		const prevHeader = this.currentRowIsHeader;
+		this.currentRowIsHeader = elem.isHeader === true;
 		const renderedCells = this.renderElements(cellChildren);
+		this.currentRowIsHeader = prevHeader;
 		children.push(...renderedCells);
 
 		if (elem.gridAfter)
@@ -2068,7 +2101,13 @@ section.${c}>ol>li::before {
 	}
 
 	renderTableCell(elem: WmlTableCell) {
-		let result = this.toHTML(elem, ns.html, "td");
+		// Header rows (w:tblHeader on w:trPr) emit <th scope="col"> so screen
+		// readers can associate data cells with their column header.
+		const tagName = this.currentRowIsHeader ? "th" : "td";
+		let result = this.toHTML(elem, ns.html, tagName);
+		if (this.currentRowIsHeader) {
+			(result as HTMLTableCellElement).setAttribute("scope", "col");
+		}
 
 		const key = this.currentCellPosition.col;
 
