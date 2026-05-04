@@ -1636,21 +1636,21 @@
         const color = parseSeriesColor(serEl);
         const categories = parseCategoryLabels(globalXmlParser.element(serEl, "cat"));
         const values = parseNumericValues(globalXmlParser.element(serEl, "val"));
-        const dataPointOverrides = parseDataPointOverrides(serEl);
+        const dataPointOverrides = parseDataPointOverrides$1(serEl);
         return { title, color, categories, values, dataPointOverrides };
     }
-    function parseDataPointOverrides(serEl) {
+    function parseDataPointOverrides$1(serEl) {
         const out = new Map();
         for (const dPt of globalXmlParser.elements(serEl, "dPt")) {
             const idxEl = globalXmlParser.element(dPt, "idx");
             const rawIdx = idxEl ? globalXmlParser.attr(idxEl, "val") : null;
             const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
-            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS)
+            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS$1)
                 continue;
             const spPr = globalXmlParser.element(dPt, "spPr");
             if (!spPr)
                 continue;
-            const color = parseSolidFillColor(spPr);
+            const color = parseSolidFillColor$1(spPr);
             if (color == null)
                 continue;
             out.set(idx, { color });
@@ -1688,9 +1688,9 @@
         const spPr = globalXmlParser.element(serEl, "spPr");
         if (!spPr)
             return null;
-        return parseSolidFillColor(spPr);
+        return parseSolidFillColor$1(spPr);
     }
-    function parseSolidFillColor(spPr) {
+    function parseSolidFillColor$1(spPr) {
         const solidFill = globalXmlParser.element(spPr, "solidFill");
         if (!solidFill)
             return null;
@@ -1742,14 +1742,14 @@
         }
         return null;
     }
-    const MAX_POINTS = 4096;
+    const MAX_POINTS$1 = 4096;
     function extractPoints(cache, mapValue) {
         const pts = globalXmlParser.elements(cache, "pt");
         const pairs = [];
         for (const pt of pts) {
             const rawIdx = globalXmlParser.attr(pt, "idx");
             const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
-            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS)
+            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS$1)
                 continue;
             const v = globalXmlParser.element(pt, "v");
             const text = v ? (v.textContent ?? "") : "";
@@ -1776,6 +1776,7 @@
         clusteredColumn: "unknown",
         regionMap: "unknown",
     };
+    const MAX_POINTS = 4096;
     class ChartExPart extends Part {
         constructor(pkg, path) {
             super(pkg, path);
@@ -1789,16 +1790,16 @@
         const chart = globalXmlParser.element(root, "chart");
         const plotArea = chart ? globalXmlParser.element(chart, "plotArea") : null;
         const plotSurface = plotArea ? globalXmlParser.element(plotArea, "plotSurface") : null;
+        const plotAreaRegion = plotArea ? globalXmlParser.element(plotArea, "plotAreaRegion") : null;
         let kind = "unknown";
-        if (plotArea) {
-            const plotAreaRegion = globalXmlParser.element(plotArea, "plotAreaRegion");
-            if (plotAreaRegion) {
-                for (const seriesEl of globalXmlParser.elements(plotAreaRegion, "series")) {
-                    const layoutId = globalXmlParser.attr(seriesEl, "layoutId");
-                    if (layoutId && CHARTEX_KINDS[layoutId]) {
-                        kind = CHARTEX_KINDS[layoutId];
-                        break;
-                    }
+        let firstSeries = null;
+        if (plotAreaRegion) {
+            for (const seriesEl of globalXmlParser.elements(plotAreaRegion, "series")) {
+                const layoutId = globalXmlParser.attr(seriesEl, "layoutId");
+                if (layoutId && CHARTEX_KINDS[layoutId]) {
+                    kind = CHARTEX_KINDS[layoutId];
+                    firstSeries = seriesEl;
+                    break;
                 }
             }
         }
@@ -1809,7 +1810,237 @@
             }
         }
         const title = chart ? extractTitle(chart) : "";
-        return { key, title, kind };
+        if ((kind === "sunburst" || kind === "treemap") && firstSeries) {
+            const dataModel = tryParseDataModel(root, firstSeries, key, title, kind);
+            if (dataModel)
+                return dataModel;
+        }
+        const placeholder = { shape: "placeholder", key, title, kind };
+        return placeholder;
+    }
+    function tryParseDataModel(root, seriesEl, key, title, kind) {
+        const dataIdEl = globalXmlParser.element(seriesEl, "dataId");
+        const dataId = dataIdEl ? globalXmlParser.attr(dataIdEl, "val") : null;
+        const chartData = globalXmlParser.element(root, "chartData");
+        if (!chartData)
+            return null;
+        let dataEl = null;
+        for (const d of globalXmlParser.elements(chartData, "data")) {
+            if (dataId == null || globalXmlParser.attr(d, "id") === dataId) {
+                dataEl = d;
+                break;
+            }
+        }
+        if (!dataEl)
+            return null;
+        const catDim = findDimension(dataEl, "strDim", "cat")
+            ?? findDimension(dataEl, "numDim", "cat");
+        const valDim = findDimension(dataEl, "numDim", "val");
+        if (!catDim || !valDim)
+            return null;
+        const catLevels = parseStringLevels(catDim);
+        const values = parseNumericLevel(valDim);
+        if (catLevels.length === 0 || values.length === 0)
+            return null;
+        const dataPointColors = parseDataPointOverrides(seriesEl);
+        const root0 = buildCategoryTree(catLevels, values, dataPointColors);
+        if (!root0 || root0.children.length === 0)
+            return null;
+        const maxDepth = computeMaxDepth(root0);
+        return { shape: "data", key, title, kind, root: root0, maxDepth };
+    }
+    function findDimension(dataEl, localName, type) {
+        for (const d of globalXmlParser.elements(dataEl, localName)) {
+            if (globalXmlParser.attr(d, "type") === type)
+                return d;
+        }
+        return null;
+    }
+    function parseStringLevels(dim) {
+        const out = [];
+        for (const lvl of globalXmlParser.elements(dim, "lvl")) {
+            const level = parseStringLevel(lvl);
+            if (level)
+                out.push(level);
+        }
+        return out;
+    }
+    function parseStringLevel(lvl) {
+        const ptCountAttr = globalXmlParser.attr(lvl, "ptCount");
+        const ptCount = ptCountAttr != null ? parseInt(ptCountAttr, 10) : NaN;
+        const declared = Number.isFinite(ptCount) && ptCount >= 0 && ptCount < MAX_POINTS
+            ? ptCount : 0;
+        const points = new Array(declared).fill("");
+        const parents = new Array(declared).fill(-1);
+        let maxIdx = declared - 1;
+        for (const pt of globalXmlParser.elements(lvl, "pt")) {
+            const rawIdx = globalXmlParser.attr(pt, "idx");
+            const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS)
+                continue;
+            if (idx > maxIdx) {
+                while (points.length <= idx)
+                    points.push("");
+                while (parents.length <= idx)
+                    parents.push(-1);
+                maxIdx = idx;
+            }
+            points[idx] = pt.textContent ?? "";
+            const parentAttr = globalXmlParser.attr(pt, "parent") ?? globalXmlParser.attr(pt, "parentIdx");
+            if (parentAttr != null) {
+                const p = parseInt(parentAttr, 10);
+                if (Number.isFinite(p) && p >= 0 && p < MAX_POINTS)
+                    parents[idx] = p;
+            }
+        }
+        if (points.length === 0)
+            return null;
+        return { points, parents };
+    }
+    function parseNumericLevel(dim) {
+        const lvl = globalXmlParser.element(dim, "lvl");
+        if (!lvl)
+            return [];
+        const ptCountAttr = globalXmlParser.attr(lvl, "ptCount");
+        const ptCount = ptCountAttr != null ? parseInt(ptCountAttr, 10) : NaN;
+        const declared = Number.isFinite(ptCount) && ptCount >= 0 && ptCount < MAX_POINTS
+            ? ptCount : 0;
+        const values = new Array(declared).fill(NaN);
+        let maxIdx = declared - 1;
+        for (const pt of globalXmlParser.elements(lvl, "pt")) {
+            const rawIdx = globalXmlParser.attr(pt, "idx");
+            const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS)
+                continue;
+            if (idx > maxIdx) {
+                while (values.length <= idx)
+                    values.push(NaN);
+                maxIdx = idx;
+            }
+            const raw = pt.textContent ?? "";
+            const n = parseFloat(raw);
+            values[idx] = Number.isFinite(n) ? n : NaN;
+        }
+        return values;
+    }
+    function parseDataPointOverrides(seriesEl) {
+        const out = new Map();
+        for (const dPt of globalXmlParser.elements(seriesEl, "dataPt")) {
+            const rawIdx = globalXmlParser.attr(dPt, "idx");
+            const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS)
+                continue;
+            const spPr = globalXmlParser.element(dPt, "spPr");
+            if (!spPr)
+                continue;
+            const color = parseSolidFillColor(spPr);
+            if (color)
+                out.set(idx, color);
+        }
+        return out;
+    }
+    function parseSolidFillColor(spPr) {
+        const solidFill = globalXmlParser.element(spPr, "solidFill");
+        if (!solidFill)
+            return null;
+        const srgb = globalXmlParser.element(solidFill, "srgbClr");
+        if (srgb) {
+            const raw = globalXmlParser.attr(srgb, "val");
+            return sanitizeCssColor(raw);
+        }
+        const scheme = globalXmlParser.element(solidFill, "schemeClr");
+        if (scheme) {
+            const raw = globalXmlParser.attr(scheme, "val");
+            const resolved = resolveSchemeColor(raw);
+            return resolved ? sanitizeCssColor(resolved) : null;
+        }
+        return null;
+    }
+    function buildCategoryTree(levels, values, colors) {
+        const root = {
+            label: "", value: 0, color: null, children: [], level: -1, leafIndex: -1,
+        };
+        if (levels.length === 0)
+            return root;
+        const perLevel = [];
+        const lvl0 = levels[0];
+        const level0Nodes = lvl0.points.map((label, idx) => {
+            const isLeaf = levels.length === 1;
+            const leafIndex = isLeaf ? idx : -1;
+            const raw = isLeaf ? values[idx] : NaN;
+            const value = Number.isFinite(raw) && raw > 0 ? raw : 0;
+            const color = isLeaf ? (colors.get(idx) ?? null) : null;
+            return { label, value, color, children: [], level: 0, leafIndex };
+        });
+        for (const node of level0Nodes)
+            root.children.push(node);
+        perLevel.push(level0Nodes);
+        for (let d = 1; d < levels.length; d++) {
+            const lvl = levels[d];
+            const isDeepest = d === levels.length - 1;
+            const parentLevel = perLevel[d - 1];
+            const levelNodes = [];
+            for (let idx = 0; idx < lvl.points.length; idx++) {
+                const label = lvl.points[idx];
+                const parentIdx = lvl.parents[idx];
+                const leafIndex = isDeepest ? idx : -1;
+                let color = null;
+                if (isDeepest) {
+                    color = colors.get(idx) ?? null;
+                }
+                const raw = isDeepest ? values[idx] : NaN;
+                const value = Number.isFinite(raw) && raw > 0 ? raw : 0;
+                const node = {
+                    label, value, color, children: [], level: d, leafIndex,
+                };
+                const parent = parentIdx >= 0 && parentIdx < parentLevel.length
+                    ? parentLevel[parentIdx]
+                    : null;
+                if (parent) {
+                    parent.children.push(node);
+                }
+                else {
+                    root.children.push(node);
+                }
+                levelNodes.push(node);
+            }
+            perLevel.push(levelNodes);
+        }
+        sumValues(root);
+        propagateColors(root, null);
+        return root;
+    }
+    function sumValues(node) {
+        if (node.children.length === 0) {
+            return node.value;
+        }
+        let total = 0;
+        for (const child of node.children) {
+            total += sumValues(child);
+        }
+        if (total > node.value)
+            node.value = total;
+        return node.value;
+    }
+    function propagateColors(node, inherited) {
+        const effective = node.color ?? inherited;
+        if (node.color == null && inherited != null) {
+            node.color = inherited;
+        }
+        for (const child of node.children)
+            propagateColors(child, effective);
+    }
+    function computeMaxDepth(root) {
+        let max = 0;
+        function visit(n, d) {
+            if (d > max)
+                max = d;
+            for (const c of n.children)
+                visit(c, d + 1);
+        }
+        for (const c of root.children)
+            visit(c, 1);
+        return max;
     }
     function deriveKey(path) {
         const segs = path.split("/");
@@ -1827,7 +2058,7 @@
     }
     function walkTextRuns(node, out) {
         for (const c of globalXmlParser.elements(node)) {
-            if (c.localName === "t") {
+            if (c.localName === "t" || c.localName === "v") {
                 out.push(c.textContent ?? "");
             }
             else {
@@ -1883,6 +2114,85 @@
                 return d;
         }
         return null;
+    }
+
+    const PLACEHOLDER_WIDTH = 200;
+    const PLACEHOLDER_HEIGHT = 100;
+    const DECODE_WIDTH = 1000;
+    const DECODE_HEIGHT = 800;
+    async function convertVectorImage(blob, format) {
+        const decoder = resolveDecoder(format);
+        if (decoder) {
+            try {
+                const svg = await decodeToSvg(blob, decoder);
+                if (svg)
+                    return toObjectURL(svg);
+            }
+            catch {
+            }
+        }
+        return toObjectURL(placeholderSvg());
+    }
+    function resolveDecoder(format) {
+        const g = globalThis;
+        if (format === 'wmf' && g.WMFJS?.Renderer)
+            return g.WMFJS;
+        if (format === 'emf' && g.EMFJS?.Renderer)
+            return g.EMFJS;
+        return null;
+    }
+    async function decodeToSvg(blob, decoder) {
+        const buffer = await blob.arrayBuffer();
+        const renderer = new decoder.Renderer(new Uint8Array(buffer));
+        const result = renderer.render({
+            width: `${DECODE_WIDTH}px`,
+            height: `${DECODE_HEIGHT}px`,
+            xExt: DECODE_WIDTH,
+            yExt: DECODE_HEIGHT,
+            mapMode: 8,
+        });
+        const svgEl = result?.tagName?.toLowerCase() === 'svg'
+            ? result
+            : (result?.firstChild ?? null);
+        if (!svgEl || svgEl.tagName?.toLowerCase() !== 'svg') {
+            return null;
+        }
+        svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        svgEl.removeAttribute('width');
+        svgEl.removeAttribute('height');
+        return svgEl.outerHTML ?? null;
+    }
+    function placeholderSvg() {
+        return [
+            '<svg xmlns="http://www.w3.org/2000/svg"',
+            ` viewBox="0 0 ${PLACEHOLDER_WIDTH} ${PLACEHOLDER_HEIGHT}"`,
+            ` width="${PLACEHOLDER_WIDTH}" height="${PLACEHOLDER_HEIGHT}">`,
+            `<rect x="0" y="0" width="${PLACEHOLDER_WIDTH}" height="${PLACEHOLDER_HEIGHT}"`,
+            ' fill="#f0f0f0" stroke="#ccc"/>',
+            `<text x="${PLACEHOLDER_WIDTH / 2}" y="${PLACEHOLDER_HEIGHT / 2}"`,
+            ' text-anchor="middle" dominant-baseline="middle"',
+            ' font-family="sans-serif" font-size="12" fill="#666">',
+            'WMF/EMF image',
+            '</text>',
+            `<text x="${PLACEHOLDER_WIDTH / 2}" y="${PLACEHOLDER_HEIGHT / 2 + 20}"`,
+            ' text-anchor="middle" dominant-baseline="middle"',
+            ' font-family="sans-serif" font-size="9" fill="#999">',
+            '(decoder not loaded)',
+            '</text>',
+            '</svg>',
+        ].join('');
+    }
+    function toObjectURL(svg) {
+        const prelude = '<?xml version="1.0" encoding="UTF-8"?>';
+        const blob = new Blob([prelude, svg], { type: 'image/svg+xml' });
+        return URL.createObjectURL(blob);
+    }
+    function detectVectorFormat(path) {
+        if (!path)
+            return null;
+        const m = path.toLowerCase().match(/\.([a-z0-9]+)$/);
+        const ext = m?.[1];
+        return ext === 'wmf' || ext === 'emf' ? ext : null;
     }
 
     const topLevelRels = [
@@ -2004,11 +2314,27 @@
         }
         async loadDocumentImage(id, part) {
             const path = this.getPathById(part ?? this.documentPart, id);
-            return path ? this.blobToURL(await this._package.load(path, "blob"), path) : null;
+            if (!path)
+                return null;
+            const blob = await this._package.load(path, "blob");
+            return this.blobToImageURL(blob, path);
         }
         async loadNumberingImage(id) {
             const path = this.getPathById(this.numberingPart, id);
-            return path ? this.blobToURL(await this._package.load(path, "blob"), path) : null;
+            if (!path)
+                return null;
+            const blob = await this._package.load(path, "blob");
+            return this.blobToImageURL(blob, path);
+        }
+        async blobToImageURL(blob, path) {
+            if (!blob)
+                return null;
+            const vector = detectVectorFormat(path);
+            if (vector) {
+                return convertVectorImage(blob, vector);
+            }
+            const url = this.blobToURL(blob, path);
+            return typeof url === 'string' ? url : await url;
         }
         async loadFont(id, key) {
             const path = this.getPathById(this.fontTablePart, id);
@@ -6798,6 +7124,201 @@
             }
         }
     }
+    const SUNBURST_LABEL_THRESHOLD = 0.12;
+    const TREEMAP_LABEL_MIN_W = 32;
+    const TREEMAP_LABEL_MIN_H = 14;
+    function renderSunburst(model) {
+        const doc = document;
+        const svg = doc.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        svg.style.maxWidth = "100%";
+        svg.style.height = "auto";
+        svg.style.display = "block";
+        const title = (model.title ?? "").trim();
+        const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
+        if (title) {
+            svg.appendChild(mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, title, {
+                fontSize: 14, fontWeight: "600", anchor: "middle",
+            }));
+        }
+        const plotTop = titleBottom + 4;
+        const plotBottom = VIEW_H - PADDING;
+        const cx = VIEW_W / 2;
+        const cy = (plotTop + plotBottom) / 2;
+        const outerR = Math.max(0, Math.min(VIEW_W - 2 * PADDING, plotBottom - plotTop) / 2 - 4);
+        if (outerR <= 0 || model.root.value <= 0 || model.maxDepth === 0) {
+            svg.appendChild(mkText(doc, VIEW_W / 2, VIEW_H / 2, title || "[sunburst]", {
+                fontSize: 12, anchor: "middle", fill: "#888",
+            }));
+            return svg;
+        }
+        const innerR = Math.min(outerR * 0.15, 24);
+        const ringThickness = (outerR - innerR) / model.maxDepth;
+        renderSunburstNode(svg, doc, model.root, cx, cy, innerR, ringThickness, -Math.PI / 2, 2 * Math.PI, 0);
+        return svg;
+    }
+    function renderSunburstNode(svg, doc, node, cx, cy, innerR, ringThickness, startAngle, sweep, paletteIdx) {
+        const total = node.value > 0 ? node.value : sumChildValue(node);
+        if (total <= 0 || node.children.length === 0)
+            return;
+        let angle = startAngle;
+        for (let i = 0; i < node.children.length; i++) {
+            const child = node.children[i];
+            if (child.value <= 0)
+                continue;
+            const share = child.value / total;
+            const slice = sweep * share;
+            const r0 = innerR + ringThickness * child.level;
+            const r1 = r0 + ringThickness;
+            const basePaletteIdx = child.level === 0 ? i : paletteIdx;
+            const color = sanitizeCssColor(child.color)
+                ?? DEFAULT_PALETTE[basePaletteIdx % DEFAULT_PALETTE.length];
+            const path = doc.createElementNS(SVG_NS, "path");
+            path.setAttribute("d", sunburstArcPath(cx, cy, r0, r1, angle, angle + slice));
+            path.setAttribute("fill", color);
+            path.setAttribute("stroke", "#fff");
+            path.setAttribute("stroke-width", "1");
+            svg.appendChild(path);
+            if (slice >= SUNBURST_LABEL_THRESHOLD && child.label) {
+                const midAngle = angle + slice / 2;
+                const midR = (r0 + r1) / 2;
+                const tx = cx + midR * Math.cos(midAngle);
+                const ty = cy + midR * Math.sin(midAngle);
+                const text = mkText(doc, tx, ty + 4, child.label, {
+                    fontSize: Math.min(FONT_SIZE, Math.max(8, ringThickness * 0.45)),
+                    anchor: "middle",
+                    fill: "#fff",
+                });
+                svg.appendChild(text);
+            }
+            renderSunburstNode(svg, doc, child, cx, cy, innerR, ringThickness, angle, slice, basePaletteIdx);
+            angle += slice;
+        }
+    }
+    function sumChildValue(node) {
+        let total = 0;
+        for (const c of node.children)
+            total += c.value;
+        return total;
+    }
+    function sunburstArcPath(cx, cy, r0, r1, a0, a1) {
+        const large = a1 - a0 > Math.PI ? 1 : 0;
+        const x0o = cx + r1 * Math.cos(a0);
+        const y0o = cy + r1 * Math.sin(a0);
+        const x1o = cx + r1 * Math.cos(a1);
+        const y1o = cy + r1 * Math.sin(a1);
+        const x0i = cx + r0 * Math.cos(a1);
+        const y0i = cy + r0 * Math.sin(a1);
+        const x1i = cx + r0 * Math.cos(a0);
+        const y1i = cy + r0 * Math.sin(a0);
+        return `M ${fmt(x0o)} ${fmt(y0o)}`
+            + ` A ${fmt(r1)} ${fmt(r1)} 0 ${large} 1 ${fmt(x1o)} ${fmt(y1o)}`
+            + ` L ${fmt(x0i)} ${fmt(y0i)}`
+            + ` A ${fmt(r0)} ${fmt(r0)} 0 ${large} 0 ${fmt(x1i)} ${fmt(y1i)}`
+            + ` Z`;
+    }
+    function renderTreemap(model) {
+        const doc = document;
+        const svg = doc.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        svg.style.maxWidth = "100%";
+        svg.style.height = "auto";
+        svg.style.display = "block";
+        const title = (model.title ?? "").trim();
+        const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
+        if (title) {
+            svg.appendChild(mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, title, {
+                fontSize: 14, fontWeight: "600", anchor: "middle",
+            }));
+        }
+        const plotTop = titleBottom + 4;
+        const plotBottom = VIEW_H - PADDING;
+        const plot = {
+            x: PADDING, y: plotTop,
+            w: VIEW_W - 2 * PADDING, h: plotBottom - plotTop,
+        };
+        if (plot.h <= 0 || model.root.value <= 0) {
+            svg.appendChild(mkText(doc, VIEW_W / 2, VIEW_H / 2, title || "[treemap]", {
+                fontSize: 12, anchor: "middle", fill: "#888",
+            }));
+            return svg;
+        }
+        layoutSliceAndDice(model.root, plot.x, plot.y, plot.w, plot.h, 0);
+        renderTreemapNodes(svg, doc, model.root, 0);
+        return svg;
+    }
+    function layoutSliceAndDice(node, x, y, w, h, depth) {
+        const ln = node;
+        ln._x = x;
+        ln._y = y;
+        ln._w = w;
+        ln._h = h;
+        if (node.children.length === 0)
+            return;
+        const total = node.value > 0 ? node.value : sumChildValue(node);
+        if (total <= 0)
+            return;
+        const horizontal = depth % 2 === 0;
+        let cursor = horizontal ? x : y;
+        for (const child of node.children) {
+            const childVal = Math.max(0, child.value);
+            const share = childVal / total;
+            if (horizontal) {
+                const cw = w * share;
+                layoutSliceAndDice(child, cursor, y, cw, h, depth + 1);
+                cursor += cw;
+            }
+            else {
+                const ch = h * share;
+                layoutSliceAndDice(child, x, cursor, w, ch, depth + 1);
+                cursor += ch;
+            }
+        }
+    }
+    function renderTreemapNodes(svg, doc, node, paletteIdx) {
+        for (let i = 0; i < node.children.length; i++) {
+            const child = node.children[i];
+            const seedIdx = child.level === 0 ? i : paletteIdx;
+            if (child.children.length === 0) {
+                renderTreemapLeaf(svg, doc, child, seedIdx);
+            }
+            else {
+                renderTreemapNodes(svg, doc, child, seedIdx);
+            }
+        }
+    }
+    function renderTreemapLeaf(svg, doc, node, paletteIdx) {
+        const ln = node;
+        const x = ln._x ?? 0;
+        const y = ln._y ?? 0;
+        const w = ln._w ?? 0;
+        const h = ln._h ?? 0;
+        if (w <= 0 || h <= 0)
+            return;
+        const color = sanitizeCssColor(node.color)
+            ?? DEFAULT_PALETTE[paletteIdx % DEFAULT_PALETTE.length];
+        const rect = doc.createElementNS(SVG_NS, "rect");
+        rect.setAttribute("x", fmt(x));
+        rect.setAttribute("y", fmt(y));
+        rect.setAttribute("width", fmt(w));
+        rect.setAttribute("height", fmt(h));
+        rect.setAttribute("fill", color);
+        rect.setAttribute("stroke", "#fff");
+        rect.setAttribute("stroke-width", "1");
+        svg.appendChild(rect);
+        if (node.label && w >= TREEMAP_LABEL_MIN_W && h >= TREEMAP_LABEL_MIN_H) {
+            const label = mkText(doc, x + 4, y + 14, node.label, {
+                fontSize: Math.min(FONT_SIZE, Math.max(9, Math.floor(h / 3))),
+                anchor: "start",
+                fill: "#fff",
+            });
+            svg.appendChild(label);
+        }
+    }
 
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
     function isSafeHyperlinkHref(raw) {
@@ -8569,12 +9090,34 @@ section.${c}>ol>li::before {
             const part = this.document.findPartByRelId(elem.relId, this.currentPart ?? this.document.documentPart);
             if (!part || !(part instanceof ChartExPart) || !part.chart)
                 return fallback;
+            const chart = part.chart;
+            if (chart.shape === "data") {
+                try {
+                    let svg;
+                    switch (chart.kind) {
+                        case "sunburst":
+                            svg = renderSunburst(chart);
+                            break;
+                        case "treemap":
+                            svg = renderTreemap(chart);
+                            break;
+                    }
+                    const wrapper = this.createElement("span");
+                    wrapper.className = `${this.className}-chart`;
+                    wrapper.style.display = "inline-block";
+                    wrapper.setAttribute("data-chart-kind", chart.kind);
+                    wrapper.appendChild(svg);
+                    return wrapper;
+                }
+                catch {
+                }
+            }
             const wrapper = this.createElement("div");
             wrapper.className = `docx-chartex-placeholder`;
-            wrapper.setAttribute("data-chart-kind", part.chart.kind);
+            wrapper.setAttribute("data-chart-kind", chart.kind);
             const titleDiv = this.createElement("div");
             titleDiv.className = "docx-chartex-placeholder__title";
-            titleDiv.textContent = part.chart.title || "";
+            titleDiv.textContent = chart.title || "";
             wrapper.appendChild(titleDiv);
             const noteDiv = this.createElement("div");
             noteDiv.className = "docx-chartex-placeholder__note";
