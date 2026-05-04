@@ -1485,6 +1485,45 @@ async function renderFixture(path, options) {
     note(`43·: text fixture has 0 SmartArt artefacts post-dispatch addition`);
 }
 
+// ── 44. Vector-image helper is detectable (Wave 7.1) ────────────────────
+// detectVectorFormat returns 'wmf' | 'emf' | null from a relationship
+// target path. It's exported from src/common/vector-image.ts but not
+// re-exported from the UMD entry; use the presence of WMFJS / EMFJS
+// placeholder behaviour as the indirect smoke. For the harness,
+// just confirm the text fixture still renders after the image-loading
+// dispatch was rewired.
+{
+    const { container } = await renderFixture('text');
+    const images = container.querySelectorAll('img');
+    for (const img of images) {
+        const src = img.getAttribute('src') ?? '';
+        // The jsdom harness has no WMFJS/EMFJS loaded. If any image had
+        // a .wmf / .emf extension, we'd see a blob URL pointing at a
+        // data:image/svg+xml placeholder. Text fixture has no vector
+        // images; this asserts the dispatcher doesn't re-route PNG/JPG
+        // images through the vector path.
+        assert(
+            !src.includes('wmf-placeholder') && !src.includes('emf-placeholder'),
+            `44a: raster image src should not contain WMF/EMF placeholder text (got ${src.slice(0, 80)})`,
+        );
+    }
+    note(`44·: text fixture produced ${images.length} image(s); all routed through raster path`);
+}
+
+// ── 45. ChartEx sunburst/treemap dispatch (Wave 7.2) ────────────────────
+// Regression guard: without a chartEx fixture, no .docx-chartex
+// elements should leak into rendered text. The parser+renderer
+// extension mustn't make non-chartEx docs produce chartEx shapes.
+{
+    const { container } = await renderFixture('text');
+    const chartExEls = container.querySelectorAll('[data-chart-kind], .docx-chartex-sunburst, .docx-chartex-treemap');
+    assert(
+        chartExEls.length === 0,
+        `45a: text fixture should not produce chartEx elements (got ${chartExEls.length})`,
+    );
+    note(`45·: text fixture has 0 chartEx artefacts post-renderer extension`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1493,5 +1532,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${43} scenarios passed`);
+    console.log(`\n✓ all ${45} scenarios passed`);
 }

@@ -35,7 +35,7 @@ import { renderShape, renderShapeGroup, ShapeRenderContext } from './drawing/sha
 import { ChartPart } from './charts/chart-part';
 import { ChartExPart } from './charts/chartex-part';
 import { DiagramLayoutPart } from './smartart/smartart-parts';
-import { renderChart as renderChartSvg, scheduleLegendOverflowAdjust } from './charts/render';
+import { renderChart as renderChartSvg, renderSunburst as renderSunburstSvg, renderTreemap as renderTreemapSvg, scheduleLegendOverflowAdjust } from './charts/render';
 import { parseThemeColorReference, resolveColour } from './drawing/theme';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
@@ -2744,11 +2744,12 @@ section.${c}>ol>li::before {
 		}
 	}
 
-	// ChartEx passthrough: renders a labelled `<div>` placeholder for
-	// modern chart types (sunburst, waterfall, funnel, treemap, ...).
-	// We do not attempt a real SVG rendering in v1; the placeholder
-	// at least signals that a chart was there and carries the
-	// chart title for accessibility.
+	// ChartEx dispatch. For the two chartEx kinds we actually render as
+	// SVG (sunburst, treemap) we hand off to the chart renderer. For
+	// every other kind (waterfall / funnel / histogram / pareto /
+	// box_whisker / unknown) we still emit a labelled `<div>` placeholder
+	// that carries the chart title — this is the extension point for
+	// future chartEx support.
 	//
 	// Security: `kind` is allowlisted by chartex-part.ts before it
 	// reaches the `data-chart-kind` attribute; title text reaches the
@@ -2766,16 +2767,47 @@ section.${c}>ol>li::before {
 		);
 		if (!part || !(part instanceof ChartExPart) || !part.chart) return fallback;
 
+		const chart = part.chart;
+
+		// Extension point: dispatch real SVG renderers for the
+		// chartEx kinds we support, and fall through to the
+		// placeholder div for everything else. When adding support
+		// for waterfall / funnel / histogram / pareto / box_whisker,
+		// extend the switch here and the matching parser branch in
+		// chartex-part.ts.
+		if (chart.shape === "data") {
+			try {
+				let svg: SVGElement;
+				switch (chart.kind) {
+					case "sunburst":
+						svg = renderSunburstSvg(chart);
+						break;
+					case "treemap":
+						svg = renderTreemapSvg(chart);
+						break;
+				}
+				const wrapper = this.createElement("span");
+				wrapper.className = `${this.className}-chart`;
+				wrapper.style.display = "inline-block";
+				wrapper.setAttribute("data-chart-kind", chart.kind);
+				wrapper.appendChild(svg);
+				return wrapper;
+			} catch {
+				// Fall through to the placeholder below on any render
+				// error — never let a malformed chartEx abort the page.
+			}
+		}
+
 		const wrapper = this.createElement("div");
 		wrapper.className = `docx-chartex-placeholder`;
 		// Kind is already allowlisted at parse time — writing as a
 		// data-* attribute is safe even if it weren't, but we keep the
 		// parse-time allowlist for defence-in-depth.
-		wrapper.setAttribute("data-chart-kind", part.chart.kind);
+		wrapper.setAttribute("data-chart-kind", chart.kind);
 
 		const titleDiv = this.createElement("div");
 		titleDiv.className = "docx-chartex-placeholder__title";
-		titleDiv.textContent = part.chart.title || "";
+		titleDiv.textContent = chart.title || "";
 		wrapper.appendChild(titleDiv);
 
 		const noteDiv = this.createElement("div");
