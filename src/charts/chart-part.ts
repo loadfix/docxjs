@@ -2,7 +2,8 @@ import { Part } from "../common/part";
 import { OpenXmlPackage } from "../common/open-xml-package";
 import xml from "../parser/xml-parser";
 import { sanitizeCssColor } from "../utils";
-import { ChartKind, ChartModel, ChartSeries } from "./model";
+import { ChartDataPointOverride, ChartKind, ChartModel, ChartSeries } from "./model";
+import { resolveSchemeColor } from "../drawing/theme";
 
 // Parses a `/word/charts/chart*.xml` part into a `ChartModel`. The
 // renderer (`src/charts/render.ts`) owns layout; this file only knows
@@ -147,8 +148,30 @@ function parseSeries(serEl: Element): ChartSeries {
     const color = parseSeriesColor(serEl);
     const categories = parseCategoryLabels(xml.element(serEl, "cat"));
     const values = parseNumericValues(xml.element(serEl, "val"));
+    const dataPointOverrides = parseDataPointOverrides(serEl);
 
-    return { title, color, categories, values };
+    return { title, color, categories, values, dataPointOverrides };
+}
+
+// Walks <c:ser> for <c:dPt> children and extracts per-point colour
+// overrides. <c:idx val="N"/> is the 0-based point index, <c:spPr>
+// carries the fill. Indices are bounded identically to extractPoints
+// so a pathological file can't allocate an unbounded Map.
+function parseDataPointOverrides(serEl: Element): Map<number, ChartDataPointOverride> {
+    const out = new Map<number, ChartDataPointOverride>();
+    for (const dPt of xml.elements(serEl, "dPt")) {
+        const idxEl = xml.element(dPt, "idx");
+        const rawIdx = idxEl ? xml.attr(idxEl, "val") : null;
+        const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+        if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS) continue;
+
+        const spPr = xml.element(dPt, "spPr");
+        if (!spPr) continue;
+        const color = parseSolidFillColor(spPr);
+        if (color == null) continue;
+        out.set(idx, { color });
+    }
+    return out;
 }
 
 function parseSeriesTitle(serEl: Element): string {
@@ -182,16 +205,38 @@ function parseSeriesTitle(serEl: Element): string {
 function parseSeriesColor(serEl: Element): string | null {
     const spPr = xml.element(serEl, "spPr");
     if (!spPr) return null;
+    return parseSolidFillColor(spPr);
+}
+
+// Extracts a single solid-fill colour from a <c:spPr> or similar
+// shape-properties element. Handles both <a:srgbClr val="RRGGBB"/>
+// and <a:schemeClr val="accent1"/>. Returns a sanitised `#hex` /
+// `rgb(...)` string, or null when the element carries no usable
+// fill (gradient, pattern, missing).
+//
+// Security: the `val` attribute is attacker-controlled.
+// sanitizeCssColor rejects anything that isn't a bare hex triplet
+// or a recognised CSS colour; resolveSchemeColor matches `val`
+// against a hard-coded allowlist of scheme keys and returns null
+// otherwise. Both paths converge on a string that's safe to emit
+// as an SVG attribute.
+function parseSolidFillColor(spPr: Element): string | null {
     const solidFill = xml.element(spPr, "solidFill");
     if (!solidFill) return null;
     const srgb = xml.element(solidFill, "srgbClr");
     if (srgb) {
         const raw = xml.attr(srgb, "val");
-        // sanitizeCssColor accepts bare hex (no #) and returns "#hex".
         return sanitizeCssColor(raw);
     }
-    // <a:schemeClr> would require resolving a theme colour — out of
-    // scope for v1; fall back to the palette.
+    const scheme = xml.element(solidFill, "schemeClr");
+    if (scheme) {
+        const raw = xml.attr(scheme, "val");
+        const resolved = resolveSchemeColor(raw);
+        // The resolved palette entry is already `#RRGGBB`, but we
+        // still round-trip through sanitizeCssColor to keep the
+        // security invariant stated in the module header.
+        return resolved ? sanitizeCssColor(resolved) : null;
+    }
     return null;
 }
 

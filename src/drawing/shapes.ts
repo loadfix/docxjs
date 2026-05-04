@@ -16,7 +16,11 @@
 
 import { sanitizeCssColor } from '../utils';
 import { ns } from '../html';
-import { DrawingShape, DrawingGroup } from '../document/drawing';
+import {
+    DrawingShape, DrawingGroup,
+    GradientFill, PatternFill, ShapeEffects,
+} from '../document/drawing';
+import { resolveColour } from './theme';
 
 // Parsed <a:custGeom>. `paths` holds one entry per <a:path> inside
 // <a:pathLst>; the `d` string is already in path-local coordinates
@@ -139,6 +143,7 @@ export function presetGeometryToSvgPath(
     prst: string,
     w: number,
     h: number,
+    adjustments?: Record<string, number> | null,
 ): string | null {
     if (!prst || w <= 0 || h <= 0) return null;
 
@@ -146,15 +151,28 @@ export function presetGeometryToSvgPath(
     const cx = w / 2;
     const cy = h / 2;
 
+    // Read a numeric adjustment `name` as a fraction of the shape's
+    // `base` dimension. DOCX stores adj values in 100,000ths. Returns
+    // `dflt` (also a fraction) when the adjustment is missing or
+    // non-finite. Caller is responsible for clamping / using the
+    // result.
+    const adj = (name: string, dflt: number): number => {
+        if (!adjustments) return dflt;
+        const raw = adjustments[name];
+        if (typeof raw !== 'number' || !Number.isFinite(raw)) return dflt;
+        return raw / 100000;
+    };
+
     switch (prst) {
         case 'rect':
             return `M0,0 L${w},0 L${w},${h} L0,${h} Z`;
 
         case 'roundRect': {
-            // DrawingML roundRect uses adj1 for corner radius (0-50000
-            // of min(w,h)/2). Without the adjustment value we pick 10%
-            // of the shorter side — Word's default visual.
-            const r = Math.min(w, h) * 0.1;
+            // <a:avLst><a:gd name="adj" fmla="val N"/> overrides the
+            // corner radius. N is in 100,000ths of min(w,h); the
+            // default (no avLst) is 10%.
+            const frac = Math.max(0, Math.min(0.5, adj('adj', 0.1)));
+            const r = Math.min(w, h) * frac;
             return (
                 `M${r},0 L${w - r},0 Q${w},0 ${w},${r} ` +
                 `L${w},${h - r} Q${w},${h} ${w - r},${h} ` +
@@ -278,10 +296,12 @@ export function presetGeometryToSvgPath(
         }
 
         case 'wedgeRectCallout': {
-            // Tail pointing to a default position bottom-left outside
-            // the body rect (adj1=-20000, adj2=62500 default).
-            const tailX = w * -0.2;
-            const tailY = h * 1.125;
+            // adj1 / adj2 — tail x/y as signed fractions of w/h,
+            // measured from the shape centre. A value of 100000
+            // = 100% of (w or h) from centre. Defaults place the tail
+            // down-left of the rect (Word's out-of-the-box look).
+            const tailX = cx + w * adj('adj1', -0.2);
+            const tailY = cy + h * adj('adj2', 0.625);
             return (
                 `M0,0 L${w},0 L${w},${h} ` +
                 `L${w * 0.5},${h} L${tailX},${tailY} L${w * 0.2},${h} ` +
@@ -290,9 +310,11 @@ export function presetGeometryToSvgPath(
         }
 
         case 'wedgeRoundRectCallout': {
-            const r = Math.min(w, h) * 0.1;
-            const tailX = w * -0.2;
-            const tailY = h * 1.125;
+            // adj1 / adj2 — tail position (see wedgeRectCallout).
+            // adj3 — corner-radius fraction (min(w,h) × adj3/100000).
+            const r = Math.min(w, h) * Math.max(0, Math.min(0.5, adj('adj3', 0.1)));
+            const tailX = cx + w * adj('adj1', -0.2);
+            const tailY = cy + h * adj('adj2', 0.625);
             return (
                 `M${r},0 L${w - r},0 Q${w},0 ${w},${r} ` +
                 `L${w},${h - r} Q${w},${h} ${w - r},${h} ` +
@@ -303,15 +325,13 @@ export function presetGeometryToSvgPath(
         }
 
         case 'wedgeEllipseCallout': {
-            // Body ellipse with a triangular tail pointing bottom-left.
-            // Approximated as an ellipse path stitched to two straight
-            // edges for the tail. The tail root sits at the
-            // 225 degrees point on the ellipse.
+            // Body ellipse with a triangular tail. adj1/adj2 position
+            // the tail tip as a signed fraction of w/h from centre.
             const ang = (Math.PI * 5) / 4;
             const ex = cx + Math.cos(ang) * cx;
             const ey = cy + Math.sin(ang) * cy;
-            const tailX = w * -0.2;
-            const tailY = h * 1.125;
+            const tailX = cx + w * adj('adj1', -0.2);
+            const tailY = cy + h * adj('adj2', 0.625);
             return (
                 `M${ex},${ey} L${tailX},${tailY} L${cx * 0.6},${h * 0.95} ` +
                 `A${cx},${cy} 0 1,1 ${ex},${ey} Z`
@@ -319,18 +339,21 @@ export function presetGeometryToSvgPath(
         }
 
         case 'star5': {
-            // 10 vertices alternating outer/inner radius.
-            const points = star(5, cx, cy, w, h, 0.4, -Math.PI / 2);
+            // adj controls inner-outer vertex ratio (default 0.4).
+            const ratio = Math.max(0.1, Math.min(0.9, adj('adj', 0.4)));
+            const points = star(5, cx, cy, w, h, ratio, -Math.PI / 2);
             return polygonToPath(points);
         }
 
         case 'star6': {
-            const points = star(6, cx, cy, w, h, 0.5, -Math.PI / 2);
+            const ratio = Math.max(0.1, Math.min(0.9, adj('adj', 0.5)));
+            const points = star(6, cx, cy, w, h, ratio, -Math.PI / 2);
             return polygonToPath(points);
         }
 
         case 'star8': {
-            const points = star(8, cx, cy, w, h, 0.55, -Math.PI / 2);
+            const ratio = Math.max(0.1, Math.min(0.9, adj('adj', 0.55)));
+            const points = star(8, cx, cy, w, h, ratio, -Math.PI / 2);
             return polygonToPath(points);
         }
 
@@ -419,10 +442,314 @@ function polygonToPath(points: Array<[number, number]>): string {
     return d + ' Z';
 }
 
+// Emit a <linearGradient> / <radialGradient> into `defs` and return
+// its id. Returns null when the gradient has no usable stops.
+//
+// Security: id is counter-generated (never DOCX-sourced); every colour
+// value passes through resolveColour + sanitizeCssColor before being
+// set on an SVG attribute.
+function appendGradient(
+    defs: SVGDefsElement,
+    grad: GradientFill,
+    context: ShapeRenderContext,
+): string | null {
+    if (!grad || !grad.stops || grad.stops.length === 0) return null;
+
+    const tag = grad.kind === 'radial' ? 'radialGradient' : 'linearGradient';
+    const el = document.createElementNS(ns.svg, tag);
+    const id = safeId(context.nextId('docx-grad'));
+    if (!id) return null;
+    el.setAttribute('id', id);
+
+    if (grad.kind === 'linear') {
+        // Convert degrees → unit-square endpoints. 0° = left→right;
+        // clockwise positive (matches SVG conventions).
+        const ang = typeof grad.angle === 'number' && Number.isFinite(grad.angle)
+            ? grad.angle
+            : 0;
+        const rad = (ang * Math.PI) / 180;
+        const cx = 0.5, cy = 0.5;
+        const x1 = cx - Math.cos(rad) * 0.5;
+        const y1 = cy - Math.sin(rad) * 0.5;
+        const x2 = cx + Math.cos(rad) * 0.5;
+        const y2 = cy + Math.sin(rad) * 0.5;
+        el.setAttribute('x1', x1.toFixed(4));
+        el.setAttribute('y1', y1.toFixed(4));
+        el.setAttribute('x2', x2.toFixed(4));
+        el.setAttribute('y2', y2.toFixed(4));
+    } else {
+        // Radial defaults: centre at 50,50 with r=50. Caller's `path`
+        // hint (circle|rect) affects which gradient type we chose at
+        // the tag level — SVG has no rectangular radial gradient so
+        // `rect` falls through to radialGradient too.
+        el.setAttribute('cx', '0.5');
+        el.setAttribute('cy', '0.5');
+        el.setAttribute('r', '0.5');
+    }
+
+    for (const s of grad.stops) {
+        const stop = document.createElementNS(ns.svg, 'stop');
+        const pos = Math.max(0, Math.min(1, typeof s.pos === 'number' ? s.pos : 0));
+        stop.setAttribute('offset', `${(pos * 100).toFixed(2)}%`);
+        const hex = resolveColour(s.colour, context.themePalette);
+        const c = sanitizeCssColor(hex);
+        stop.setAttribute('stop-color', c ?? '#000000');
+        const alpha = s.colour?.mods?.alpha;
+        if (typeof alpha === 'number' && Number.isFinite(alpha)) {
+            const o = Math.max(0, Math.min(1, alpha / 100000));
+            stop.setAttribute('stop-opacity', o.toFixed(3));
+        }
+        el.appendChild(stop);
+    }
+
+    defs.appendChild(el);
+    return id;
+}
+
+// Emit an SVG <pattern> into `defs` for the supplied PatternFill. The
+// resulting pattern uses objectBoundingBox units so the hatch scales
+// with the shape — but we also set a 8×8 user-space tile so the
+// hatching has a consistent visual density. Returns null when the
+// preset isn't in the allowlist (caller then falls back to fg solid).
+function appendPattern(
+    defs: SVGDefsElement,
+    patt: PatternFill,
+    context: ShapeRenderContext,
+): string | null {
+    if (!patt || !patt.preset) return null;
+
+    const fg = sanitizeCssColor(resolveColour(patt.fg, context.themePalette)) ?? '#000000';
+    const bg = sanitizeCssColor(resolveColour(patt.bg, context.themePalette)) ?? '#FFFFFF';
+
+    const id = safeId(context.nextId('docx-patt'));
+    if (!id) return null;
+
+    // 8×8 tile in userSpaceOnUse — keeps the hatch visually consistent
+    // across shape sizes. patternUnits default is objectBoundingBox,
+    // which would make a 1×1 tile invisible at common shape sizes.
+    const size = 8;
+    const pattern = document.createElementNS(ns.svg, 'pattern');
+    pattern.setAttribute('id', id);
+    pattern.setAttribute('width', String(size));
+    pattern.setAttribute('height', String(size));
+    pattern.setAttribute('patternUnits', 'userSpaceOnUse');
+
+    // Background fill.
+    const bgRect = document.createElementNS(ns.svg, 'rect');
+    bgRect.setAttribute('x', '0');
+    bgRect.setAttribute('y', '0');
+    bgRect.setAttribute('width', String(size));
+    bgRect.setAttribute('height', String(size));
+    bgRect.setAttribute('fill', bg);
+    pattern.appendChild(bgRect);
+
+    // Stroke widths: dk* variants are thicker (~1.5px), lt* thinner (~0.5px).
+    const isDk = patt.preset.startsWith('dk');
+    const sw = isDk ? 1.5 : 0.75;
+
+    const addLine = (x1: number, y1: number, x2: number, y2: number) => {
+        const line = document.createElementNS(ns.svg, 'line');
+        line.setAttribute('x1', String(x1));
+        line.setAttribute('y1', String(y1));
+        line.setAttribute('x2', String(x2));
+        line.setAttribute('y2', String(y2));
+        line.setAttribute('stroke', fg);
+        line.setAttribute('stroke-width', String(sw));
+        pattern.appendChild(line);
+    };
+
+    switch (patt.preset) {
+        case 'dkDnDiag':
+        case 'ltDnDiag':
+            // Top-left → bottom-right diagonal. Emit two strokes per
+            // tile so the hatch tiles cleanly across tile boundaries.
+            addLine(-1, 0, size + 1, size + 2);
+            addLine(-1, -size, size + 1, 2);
+            addLine(-1, size, size + 1, size * 2 + 2);
+            break;
+        case 'dkUpDiag':
+        case 'ltUpDiag':
+            // Bottom-left → top-right.
+            addLine(-1, size, size + 1, -2);
+            addLine(-1, size * 2, size + 1, size - 2);
+            addLine(-1, 0, size + 1, -size - 2);
+            break;
+        case 'dkHorz':
+        case 'ltHorz':
+            addLine(0, size / 2, size, size / 2);
+            break;
+        case 'dkVert':
+        case 'ltVert':
+            addLine(size / 2, 0, size / 2, size);
+            break;
+        case 'cross':
+            addLine(0, size / 2, size, size / 2);
+            addLine(size / 2, 0, size / 2, size);
+            break;
+        case 'diagCross':
+            addLine(-1, -1, size + 1, size + 1);
+            addLine(-1, size + 1, size + 1, -1);
+            break;
+        default:
+            return null;
+    }
+
+    defs.appendChild(pattern);
+    return id;
+}
+
+// Emit an <a:effectLst> as an SVG <filter> into `defs` and return the
+// id. `widthPx` / `heightPx` are the shape's render size — used to
+// size the filter region generously so drop-shadows aren't clipped.
+function appendEffects(
+    defs: SVGDefsElement,
+    effects: ShapeEffects,
+    widthPx: number,
+    heightPx: number,
+    context: ShapeRenderContext,
+): string | null {
+    if (!effects) return null;
+    const hasEffect =
+        effects.outerShadow || effects.innerShadow || effects.softEdge;
+    if (!hasEffect) return null;
+
+    const id = safeId(context.nextId('docx-filter'));
+    if (!id) return null;
+
+    const filter = document.createElementNS(ns.svg, 'filter');
+    filter.setAttribute('id', id);
+    // Expand the filter region to accommodate ~50% shadow offset.
+    filter.setAttribute('x', '-50%');
+    filter.setAttribute('y', '-50%');
+    filter.setAttribute('width', '200%');
+    filter.setAttribute('height', '200%');
+    filter.setAttribute('filterUnits', 'objectBoundingBox');
+
+    // Outer shadow → feDropShadow. feDropShadow already samples the
+    // source alpha, so a single primitive covers the common case.
+    if (effects.outerShadow) {
+        const s = effects.outerShadow;
+        const { dx, dy } = shadowOffset(s.dir, s.dist);
+        const blur = emuToShadowPx(s.blurRad) / 2;
+        const colour = sanitizeCssColor(
+            resolveColour(s.colour, context.themePalette),
+        ) ?? '#000000';
+        const alpha = s.colour?.mods?.alpha;
+        const opacity = typeof alpha === 'number' && Number.isFinite(alpha)
+            ? Math.max(0, Math.min(1, alpha / 100000))
+            : 0.5;
+
+        const fe = document.createElementNS(ns.svg, 'feDropShadow');
+        fe.setAttribute('dx', dx.toFixed(2));
+        fe.setAttribute('dy', dy.toFixed(2));
+        fe.setAttribute('stdDeviation', blur.toFixed(2));
+        fe.setAttribute('flood-color', colour);
+        fe.setAttribute('flood-opacity', opacity.toFixed(3));
+        filter.appendChild(fe);
+    }
+
+    // Inner shadow: a common recipe is SourceAlpha → offset → blur →
+    // composite with inverted source. Full emulation is complex; for
+    // v1 we degrade to a feDropShadow that sits on top of the fill —
+    // visually noticeable but not pixel-perfect. TODO: full inner
+    // shadow via feComposite / feFlood.
+    if (effects.innerShadow) {
+        const s = effects.innerShadow;
+        const { dx, dy } = shadowOffset(s.dir, s.dist);
+        const blur = emuToShadowPx(s.blurRad) / 2;
+        const colour = sanitizeCssColor(
+            resolveColour(s.colour, context.themePalette),
+        ) ?? '#000000';
+        const fe = document.createElementNS(ns.svg, 'feDropShadow');
+        fe.setAttribute('dx', dx.toFixed(2));
+        fe.setAttribute('dy', dy.toFixed(2));
+        fe.setAttribute('stdDeviation', blur.toFixed(2));
+        fe.setAttribute('flood-color', colour);
+        fe.setAttribute('flood-opacity', '0.6');
+        filter.appendChild(fe);
+    }
+
+    // Soft edge — blur the alpha channel. feGaussianBlur with
+    // `in="SourceAlpha"` produces the classic fade.
+    if (effects.softEdge) {
+        const rad = emuToShadowPx(effects.softEdge.rad);
+        const blur = document.createElementNS(ns.svg, 'feGaussianBlur');
+        blur.setAttribute('in', 'SourceGraphic');
+        blur.setAttribute('stdDeviation', rad.toFixed(2));
+        filter.appendChild(blur);
+    }
+
+    defs.appendChild(filter);
+    return id;
+}
+
+function shadowOffset(dirDeg: number | undefined, distEmu: number | undefined): { dx: number; dy: number } {
+    const dir = typeof dirDeg === 'number' && Number.isFinite(dirDeg) ? dirDeg : 0;
+    const distPx = emuToShadowPx(distEmu);
+    const rad = (dir * Math.PI) / 180;
+    return {
+        dx: Math.cos(rad) * distPx,
+        dy: Math.sin(rad) * distPx,
+    };
+}
+
+// Standard DOCX EMU → px conversion (1px = 9525 EMU). Defined locally
+// so this file doesn't need to call back into the renderer for a
+// simple constant.
+function emuToShadowPx(emu: number | undefined): number {
+    if (typeof emu !== 'number' || !Number.isFinite(emu)) return 0;
+    return emu / 9525;
+}
+
+// Belt-and-braces: the id returned by `context.nextId` is composed
+// entirely from the prefix we pass and a monotonic integer. This
+// re-validates before it reaches an `id=` attribute so any future
+// regression that lets DOCX data near the prefix is caught here.
+function safeId(id: string | null | undefined): string | null {
+    if (typeof id !== 'string') return null;
+    if (!/^[a-z][a-z0-9-]*$/i.test(id)) return null;
+    return id;
+}
+
 // Callback used by renderShape to render <wps:txbx> paragraphs via
 // the main HtmlRenderer pipeline (inheriting all body-paragraph
 // sanitisation).
 export type TextRenderer = (paragraphs: any[]) => Node[];
+
+// Per-render-pass context threading counter-generated ids and the
+// active theme palette through renderShape / renderShapeGroup. Callers
+// in html-renderer.ts build one of these once per document render.
+export interface ShapeRenderContext {
+    // Monotonic id generator. Returns strings like `docx-grad-1`,
+    // `docx-patt-2`, etc. — never touched by DOCX-sourced data, so the
+    // returned id is always safe to interpolate into a CSS selector or
+    // SVG attribute.
+    nextId(prefix: string): string;
+    // Theme palette lookup. Returns the resolved 6-digit hex for a
+    // scheme slot (`accent1`, `dk1`, …) or undefined when the slot is
+    // not present. The underlying data comes from DOCX; resolveColour
+    // re-validates it before emitting.
+    themePalette?: Record<string, string> | null;
+}
+
+// Default context used when the caller doesn't supply one (harness /
+// standalone tests). The counter is module-local so repeated invocations
+// still get unique ids.
+let defaultIdCounter = 0;
+function defaultContext(): ShapeRenderContext {
+    return {
+        nextId(prefix: string) {
+            defaultIdCounter += 1;
+            return `${prefix}-${defaultIdCounter}`;
+        },
+    };
+}
+
+// Sanitised CSS-identifier prefixes we are willing to prepend to the
+// generated counter. The renderer only ever passes literal strings
+// (`docx-grad`, `docx-patt`, `docx-filter`) so this just guards against
+// future refactors; DOCX strings do not flow here.
+const SAFE_ID_PREFIX_RE = /^[a-z][a-z0-9-]*$/;
 
 /**
  * Render a single DrawingML shape. Returns a positioned <div>
@@ -439,7 +766,9 @@ export function renderShape(
     shape: DrawingShape,
     emuToPx: (emu: number) => number,
     renderText?: TextRenderer,
+    ctx?: ShapeRenderContext,
 ): HTMLElement {
+    const context = ctx ?? defaultContext();
     const widthPx = emuToPx(shape.xfrm?.cx ?? 0);
     const heightPx = emuToPx(shape.xfrm?.cy ?? 0);
     const leftPx = emuToPx(shape.xfrm?.x ?? 0);
@@ -477,19 +806,40 @@ export function renderShape(
             ? customGeometryToSvgPaths(shape.custGeom, widthPx, heightPx)
             : [];
     const presetD = customDs.length === 0
-        ? (presetGeometryToSvgPath(shape.presetGeometry || 'rect', widthPx, heightPx)
+        ? (presetGeometryToSvgPath(
+                shape.presetGeometry || 'rect',
+                widthPx, heightPx,
+                shape.presetAdjustments,
+            )
             ?? presetGeometryToSvgPath('rect', widthPx, heightPx))
         : null;
     const dStrings = customDs.length > 0 ? customDs : (presetD ? [presetD] : []);
 
-    // Resolve fill / stroke once — the same attributes apply to every
-    // path we emit for this shape.
+    // <defs> block accumulates gradients, patterns, and filters. Only
+    // counter-generated ids reach it, so the id attribute can never
+    // carry DOCX-controlled data. `defs` is only appended to the SVG
+    // when it has at least one child.
+    const defs = document.createElementNS(ns.svg, 'defs');
+
+    // --- Fill resolution ---
     let fillAttr = '#4472C4';
     if (shape.fill && shape.fill.type === 'solid') {
         const c = sanitizeCssColor(shape.fill.color);
         fillAttr = c ?? 'none';
     } else if (shape.fill && shape.fill.type === 'none') {
         fillAttr = 'none';
+    } else if (shape.fill && shape.fill.type === 'gradient') {
+        const id = appendGradient(defs, shape.fill.gradient, context);
+        if (id) fillAttr = `url(#${id})`;
+    } else if (shape.fill && shape.fill.type === 'pattern') {
+        const id = appendPattern(defs, shape.fill.pattern, context);
+        if (id) fillAttr = `url(#${id})`;
+        else {
+            // Unknown preset — fall back to the fg colour as a solid.
+            const fg = resolveColour(shape.fill.pattern.fg, context.themePalette);
+            const c = sanitizeCssColor(fg);
+            if (c) fillAttr = c;
+        }
     }
     // Preset `line` is an open path — force fill none regardless of
     // what the author set, otherwise the browser closes the stroke
@@ -511,12 +861,20 @@ export function renderShape(
         }
     }
 
+    // --- Effects (shadow / softEdge) → SVG <filter> ---
+    const filterId = shape.effects
+        ? appendEffects(defs, shape.effects, widthPx, heightPx, context)
+        : null;
+
+    if (defs.childNodes.length > 0) svg.appendChild(defs);
+
     for (const d of dStrings) {
         const path = document.createElementNS(ns.svg, 'path');
         path.setAttribute('d', d);
         path.setAttribute('fill', fillAttr);
         if (strokeAttr) path.setAttribute('stroke', strokeAttr);
         if (strokeWidthAttr) path.setAttribute('stroke-width', strokeWidthAttr);
+        if (filterId) path.setAttribute('filter', `url(#${filterId})`);
         svg.appendChild(path);
     }
     wrapper.appendChild(svg);
@@ -561,6 +919,10 @@ export function renderShapeGroup(
     group: DrawingGroup,
     emuToPx: (emu: number) => number,
     renderChild: (child: any) => Node | null,
+    // Context is threaded through for consistency with renderShape —
+    // unused at the group level today, but exposed so a future
+    // gradient-on-group path doesn't need to change the signature.
+    _ctx?: ShapeRenderContext,
 ): HTMLElement {
     const widthPx = emuToPx(group.xfrm?.cx ?? 0);
     const heightPx = emuToPx(group.xfrm?.cy ?? 0);

@@ -28,7 +28,11 @@ export enum RelationshipTypes {
 	Comments = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments",
     CommentsExtended = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended",
     AltChunk = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk",
-    Chart = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+    Chart = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+    // Modern 2013+ chart parts. Relationship type differs from Chart;
+    // loaded as a `ChartExPart` and rendered as a placeholder. See
+    // src/charts/chartex-part.ts.
+    ChartEx = "http://schemas.microsoft.com/office/2014/relationships/chartEx"
 }
 
 export function parseRelationships(root: Element, xml: XmlParser): Relationship[] {
