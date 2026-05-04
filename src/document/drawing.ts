@@ -156,3 +156,30 @@ export interface DrawingChartEx extends OpenXmlElement {
     // r:id of the chartEx part. Same safety notes as DrawingChart.relId.
     relId: string;
 }
+
+// SmartArt placeholder — emitted by parseSmartArtReference when the
+// SmartArt <a:graphicData uri="…/diagram"> cannot be replaced by its
+// <mc:Fallback> sibling (either none existed or its content was
+// unrecognised). The renderer turns this into a bland labelled div
+// with `data-smartart-layout` carrying an allowlisted URN so a host
+// stylesheet can distinguish SmartArt kinds without granting the
+// attacker any CSS write primitive. Real SmartArt rendering remains
+// unimplemented. See parseSmartArtReference in document-parser.ts.
+export interface DrawingSmartArt extends OpenXmlElement {
+    type: DomType.SmartArt;
+    // Layout URN parsed out of the referenced /word/diagrams/layoutN.xml
+    // part (e.g. "urn:microsoft.com/office/officeart/2005/8/layout/list1").
+    // Empty string when the part could not be resolved or the URN did
+    // not match the allowlist. Validated against SMARTART_LAYOUT_ALLOWLIST
+    // in document-parser.ts before being emitted.
+    layoutId?: string;
+    // The five r:id values from <dgm:relIds>. Captured so a future
+    // layout engine can resolve the diagram parts; currently only
+    // layoutId is used for rendering.
+    relIds?: {
+        dm?: string;
+        lo?: string;
+        qs?: string;
+        cs?: string;
+    };
+}
