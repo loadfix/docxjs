@@ -10,7 +10,7 @@ import {
 	GradientFill, PatternFill, ShapeEffects,
 } from './document/drawing';
 import { sanitizeCssColor } from './utils';
-import { ColourRef, ColourModifiers, isAllowedSchemeSlot, DEFAULT_THEME_PALETTE } from './drawing/theme';
+import { ColourRef, ColourModifiers, isAllowedSchemeSlot, DEFAULT_THEME_PALETTE, buildThemeColorReference } from './drawing/theme';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
 import { parseSectionProperties, SectionProperties } from './document/section';
@@ -2767,9 +2767,15 @@ export class DocumentParser {
 					style["vertical-align"] = values.valueOfTextAlignment(c);
 					break;
 
-				case "color":
+				case "color": {
 					style["color"] = xmlUtil.colorAttr(c, "val", null, autos.color);
+					// Sideband: renderer substitutes the concrete hex (with
+					// any themeTint/themeShade applied) back into `color`.
+					// Literal w:val wins when both are present.
+					const tref = xmlUtil.themeColorReference(c, "themeColor", "val");
+					if (tref) style["$themeColor-color"] = tref;
 					break;
+				}
 
 				case "sz":
 					style["font-size"] = style["min-height"] = xml.lengthAttr(c, "val", LengthUsage.FontSize);
@@ -2779,9 +2785,12 @@ export class DocumentParser {
 					values.applyShd(c, style);
 					break;
 
-				case "highlight":
+				case "highlight": {
 					style["background-color"] = xmlUtil.colorAttr(c, "val", null, autos.highlight);
+					const tref = xmlUtil.themeColorReference(c, "themeColor", "val");
+					if (tref) style["$themeColor-background-color"] = tref;
 					break;
+				}
 
 				case "vertAlign":
 					//TODO
@@ -2856,9 +2865,12 @@ export class DocumentParser {
 					this.parseBorderProperties(c, style);
 					break;
 
-				case "bdr":
+				case "bdr": {
 					style["border"] = values.valueOfBorder(c);
+					const tref = values.themeRefOfBorder(c);
+					if (tref) style["$themeColor-border"] = tref;
 					break;
+				}
 
 				case "tcBorders":
 					this.parseBorderProperties(c, style);
@@ -3194,24 +3206,29 @@ export class DocumentParser {
 	}
 
 	parseBorderProperties(node: Element, output: Record<string, string>) {
+		const setBorder = (prop: string, c: Element) => {
+			output[prop] = values.valueOfBorder(c);
+			const tref = values.themeRefOfBorder(c);
+			if (tref) output[`$themeColor-${prop}`] = tref;
+		};
 		for (const c of xml.elements(node)) {
 			switch (c.localName) {
 				case "start":
 				case "left":
-					output["border-left"] = values.valueOfBorder(c);
+					setBorder("border-left", c);
 					break;
 
 				case "end":
 				case "right":
-					output["border-right"] = values.valueOfBorder(c);
+					setBorder("border-right", c);
 					break;
 
 				case "top":
-					output["border-top"] = values.valueOfBorder(c);
+					setBorder("border-top", c);
 					break;
 
 				case "bottom":
-					output["border-bottom"] = values.valueOfBorder(c);
+					setBorder("border-bottom", c);
 					break;
 
 				// Diagonal borders. These don't map to any CSS border
@@ -3234,7 +3251,7 @@ export class DocumentParser {
 const knownColors = ['black', 'blue', 'cyan', 'darkBlue', 'darkCyan', 'darkGray', 'darkGreen', 'darkMagenta', 'darkRed', 'darkYellow', 'green', 'lightGray', 'magenta', 'none', 'red', 'white', 'yellow'];
 
 class xmlUtil {
-	static colorAttr(node: Element, attrName: string, defValue: string = null, autoColor: string = 'black') {
+	static colorAttr(node: Element, attrName: string, defValue: string = null, autoColor: string = 'black', themeAttrName: string = "themeColor") {
 		var v = xml.attr(node, attrName);
 
 		if (v) {
@@ -3247,9 +3264,27 @@ class xmlUtil {
 			return `#${v}`;
 		}
 
-		var themeColor = xml.attr(node, "themeColor");
+		var themeColor = xml.attr(node, themeAttrName);
 
 		return themeColor ? `var(--docx-${themeColor}-color)` : defValue;
+	}
+
+	// Builds a `$themeColor` sideband placeholder for a `w:color` /
+	// `w:shd` / `w:bdr` element. Returns null when the element carries
+	// no themeColor/themeFill attribute, the slot is not allowlisted,
+	// or a literal `w:val`/`w:fill` hex is present — the literal wins
+	// (matching xmlUtil.colorAttr's fallback order and Word's own
+	// rendering precedence).
+	static themeColorReference(node: Element, themeAttrName: string = "themeColor", literalAttrName?: string): string | null {
+		if (literalAttrName) {
+			const literal = xml.attr(node, literalAttrName);
+			if (literal && literal !== "auto") return null;
+		}
+		const slot = xml.attr(node, themeAttrName);
+		if (!slot) return null;
+		const tint = xml.attr(node, "themeTint");
+		const shade = xml.attr(node, "themeShade");
+		return buildThemeColorReference(slot, tint, shade);
 	}
 }
 
@@ -3289,13 +3324,19 @@ class values {
 	// keyword / var(--docx-theme-…). No attacker DOCX string is ever
 	// interpolated into CSS here. See SECURITY_REVIEW.md #3/#4.
 	static applyShd(c: Element, style: Record<string, string>) {
-		const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd);
-		const color = xmlUtil.colorAttr(c, "color", null, autos.shd);
+		const fill = xmlUtil.colorAttr(c, "fill", null, autos.shd, "themeFill");
+		const color = xmlUtil.colorAttr(c, "color", null, autos.shd, "themeColor");
 		const val = xml.attr(c, "val");
 
 		// Baseline fill; pattern templates may override `background` below.
 		if (fill != null) {
 			style["background-color"] = fill;
+			// Sideband: when the fill came via w:themeFill (optionally
+			// with w:themeTint / w:themeShade), let the renderer swap
+			// the resolved hex in at render time. A literal w:fill wins
+			// over the themeFill reference.
+			const tref = xmlUtil.themeColorReference(c, "themeFill", "fill");
+			if (tref) style["$themeColor-background-color"] = tref;
 		}
 
 		// Nothing to pattern if val is missing / clear / nil.
@@ -3369,6 +3410,20 @@ class values {
 		var size = xml.lengthAttr(c, "sz", LengthUsage.Border);
 
 		return `${size} ${type} ${color == "auto" ? autos.borderColor : color}`;
+	}
+
+	// Companion to `valueOfBorder` for the `$themeColor-<prop>` sideband.
+	// Borders emit a composite "<size> <type> <color>" string, so when
+	// the color portion is theme-bound the renderer needs to know the
+	// concrete colour to splice in. Returns null when the border has no
+	// themeColor (the composite string's literal colour is used as-is).
+	// Matches xmlUtil.colorAttr's fallback order: a literal `color`
+	// value that isn't `auto` wins over any themeColor declaration.
+	static themeRefOfBorder(c: Element): string | null {
+		if (values.parseBorderType(xml.attr(c, "val")) == "none") return null;
+		const literal = xml.attr(c, "color");
+		if (literal && literal !== "auto") return null;
+		return xmlUtil.themeColorReference(c);
 	}
 
 	static parseBorderType(type: string) {

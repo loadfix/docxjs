@@ -2,8 +2,8 @@ import { Part } from "../common/part";
 import { OpenXmlPackage } from "../common/open-xml-package";
 import xml from "../parser/xml-parser";
 import { sanitizeCssColor } from "../utils";
-import { ChartDataPointOverride, ChartKind, ChartModel, ChartSeries } from "./model";
-import { resolveSchemeColor } from "../drawing/theme";
+import { ChartAxisColorRef, ChartAxisStyle, ChartDataPointOverride, ChartKind, ChartModel, ChartSeries } from "./model";
+import { isAllowedSchemeSlot, resolveSchemeColor } from "../drawing/theme";
 
 // Parses a `/word/charts/chart*.xml` part into a `ChartModel`. The
 // renderer (`src/charts/render.ts`) owns layout; this file only knows
@@ -37,10 +37,12 @@ export class ChartPart extends Part {
 function parseChartSpace(chartSpace: Element, path: string): ChartModel {
     const key = deriveKey(path);
     const chart = xml.element(chartSpace, "chart");
+    const emptyAxis: ChartAxisStyle = { line: null, tickLabel: null, gridline: null };
     if (!chart) {
         return {
             key, title: "", showLegend: false, kind: "unknown",
             grouping: "clustered", series: [],
+            catAxis: { ...emptyAxis }, valAxis: { ...emptyAxis },
         };
     }
 
@@ -57,6 +59,8 @@ function parseChartSpace(chartSpace: Element, path: string): ChartModel {
     let kind: ChartKind = "unknown";
     let grouping = "clustered";
     let series: ChartSeries[] = [];
+    let catAxis: ChartAxisStyle = { ...emptyAxis };
+    let valAxis: ChartAxisStyle = { ...emptyAxis };
 
     if (plotArea) {
         for (const child of xml.elements(plotArea)) {
@@ -73,9 +77,87 @@ function parseChartSpace(chartSpace: Element, path: string): ChartModel {
             series = xml.elements(child, "ser").map(parseSeries);
             break;
         }
+        const catAxEl = xml.element(plotArea, "catAx");
+        if (catAxEl) catAxis = parseAxisStyle(catAxEl);
+        const valAxEl = xml.element(plotArea, "valAx");
+        if (valAxEl) valAxis = parseAxisStyle(valAxEl);
     }
 
-    return { key, title, showLegend, kind, grouping, series };
+    return { key, title, showLegend, kind, grouping, series, catAxis, valAxis };
+}
+
+// Extracts axis chrome colour references from a <c:catAx> or <c:valAx>.
+// Each sub-element is treated as optional — missing children yield a
+// null entry and the renderer falls back to its own defaults.
+//
+// Security: literal colours reach sanitizeCssColor before they're
+// stored; schemeClr slot names are validated by isAllowedSchemeSlot
+// via parseSolidFillRef. Nothing from the input XML becomes a
+// selector / class name / innerHTML sink.
+function parseAxisStyle(axEl: Element): ChartAxisStyle {
+    const style: ChartAxisStyle = { line: null, tickLabel: null, gridline: null };
+
+    // Axis line: <c:spPr><a:ln><a:solidFill>. Some files put the
+    // solidFill directly on spPr — parseSolidFillRef handles both.
+    const axSpPr = xml.element(axEl, "spPr");
+    if (axSpPr) {
+        const ln = xml.element(axSpPr, "ln");
+        if (ln) {
+            style.line = parseSolidFillRef(ln);
+        }
+        if (style.line == null) {
+            style.line = parseSolidFillRef(axSpPr);
+        }
+    }
+
+    // Tick label text colour: <c:txPr>/<a:p>/<a:pPr>/<a:defRPr><a:solidFill>.
+    const txPr = xml.element(axEl, "txPr");
+    if (txPr) {
+        const p = xml.element(txPr, "p");
+        const pPr = p ? xml.element(p, "pPr") : null;
+        const defRPr = pPr ? xml.element(pPr, "defRPr") : null;
+        if (defRPr) {
+            style.tickLabel = parseSolidFillRef(defRPr);
+        }
+    }
+
+    // Major gridlines: <c:majorGridlines><c:spPr><a:ln><a:solidFill>.
+    const grid = xml.element(axEl, "majorGridlines");
+    if (grid) {
+        const gSpPr = xml.element(grid, "spPr");
+        if (gSpPr) {
+            const ln = xml.element(gSpPr, "ln");
+            if (ln) {
+                style.gridline = parseSolidFillRef(ln);
+            }
+            if (style.gridline == null) {
+                style.gridline = parseSolidFillRef(gSpPr);
+            }
+        }
+    }
+
+    return style;
+}
+
+// Companion to parseSolidFillColor that preserves scheme-slot references
+// instead of resolving them against the default palette. The chart
+// renderer uses these at render time when the document's theme palette
+// is available (see src/charts/render.ts).
+function parseSolidFillRef(spPr: Element): ChartAxisColorRef {
+    const solidFill = xml.element(spPr, "solidFill");
+    if (!solidFill) return null;
+    const srgb = xml.element(solidFill, "srgbClr");
+    if (srgb) {
+        const raw = xml.attr(srgb, "val");
+        const safe = sanitizeCssColor(raw);
+        return safe ? { kind: "literal", color: safe } : null;
+    }
+    const scheme = xml.element(solidFill, "schemeClr");
+    if (scheme) {
+        const raw = xml.attr(scheme, "val");
+        if (isAllowedSchemeSlot(raw)) return { kind: "scheme", slot: raw };
+    }
+    return null;
 }
 
 function deriveKey(path: string): string {

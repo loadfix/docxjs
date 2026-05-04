@@ -36,6 +36,7 @@ import { ChartPart } from './charts/chart-part';
 import { ChartExPart } from './charts/chartex-part';
 import { DiagramLayoutPart } from './smartart/smartart-parts';
 import { renderChart as renderChartSvg, scheduleLegendOverflowAdjust } from './charts/render';
+import { parseThemeColorReference, resolveColour } from './drawing/theme';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -2723,7 +2724,8 @@ section.${c}>ol>li::before {
 		if (!part || !(part instanceof ChartPart) || !part.chart) return fallback;
 
 		try {
-			const svg = renderChartSvg(part.chart);
+			const themePalette = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+			const svg = renderChartSvg(part.chart, { themePalette });
 			const wrapper = this.createElement("span");
 			wrapper.className = `${this.className}-chart`;
 			wrapper.style.display = "inline-block";
@@ -3612,8 +3614,59 @@ section.${c}>ol>li::before {
 		// safe — but we still drop values that aren't BCP 47-shaped so a
 		// crafted DOCX can't stuff garbage into an assistive-tech hint.
 		const lang = isValidBcp47LanguageTag(rawLang) ? rawLang : undefined;
+		this.applyThemeColorSideband(style);
 		const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
 		return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) } as any;
+	}
+
+	// Resolves every `$themeColor-<cssProp>` sideband key in the style
+	// map against the document's theme palette (with any themeTint /
+	// themeShade modifiers) and writes the concrete hex back into the
+	// sibling CSS property. The sideband keys themselves are dropped so
+	// they never leak to the DOM — styleToString filters `$`-prefixed
+	// keys; html.ts's Object.assign(result.style, …) also ignores them.
+	//
+	// Covers:
+	//   - scalar properties: `color`, `background-color`, `border`.
+	//   - composite border strings ("<size> <type> <color>"): the
+	//     resolved hex replaces the colour token in-place.
+	//
+	// Security: the placeholder passes through parseThemeColorReference
+	// (allowlisted slot names, hex-byte-validated modifiers) and the
+	// resolved colour through sanitizeCssColor before it reaches the
+	// style property. A malformed sideband is dropped, leaving the
+	// original (hex-or-var(--docx-…)) value in place.
+	private applyThemeColorSideband(style: Record<string, string>) {
+		const palette = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+		const keys = Object.keys(style);
+		for (const k of keys) {
+			if (!k.startsWith('$themeColor-')) continue;
+			const targetProp = k.slice('$themeColor-'.length);
+			const placeholder = style[k];
+			delete style[k];
+			const ref = parseThemeColorReference(placeholder);
+			if (!ref) continue;
+			const resolved = sanitizeCssColor(resolveColour(ref, palette));
+			if (!resolved) continue;
+			const existing = style[targetProp];
+			if (existing == null) {
+				style[targetProp] = resolved;
+				continue;
+			}
+			// Composite border strings: "<size> <type> <color>" — tail is
+			// the colour slot (possibly multi-token like "rgb(…)").
+			if (targetProp === 'border' || targetProp.startsWith('border-')) {
+				const parts = existing.split(/\s+/);
+				if (parts.length >= 3) {
+					style[targetProp] = `${parts[0]} ${parts[1]} ${resolved}`;
+				} else {
+					style[targetProp] = resolved;
+				}
+				continue;
+			}
+			// Everything else: plain swap.
+			style[targetProp] = resolved;
+		}
 	}
 
 	toHTML(elem: OpenXmlElement, ns: ns, tagName: string, children: Node[] = null) {
