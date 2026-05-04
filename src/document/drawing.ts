@@ -26,8 +26,8 @@ export interface PatternFill {
     bg?: ColourRef;
 }
 
-// Parsed <a:effectLst>. v1 handles outer/inner shadow and softEdge.
-// Glow / reflection remain TODO.
+// Parsed <a:effectLst>. Handles outer/inner shadow, softEdge, glow,
+// and reflection.
 export interface ShapeEffects {
     outerShadow?: {
         blurRad?: number; // EMU
@@ -43,6 +43,22 @@ export interface ShapeEffects {
     };
     softEdge?: {
         rad: number; // EMU
+    };
+    // <a:glow rad="…"><a:srgbClr|schemeClr/></a:glow>. Rendered as a
+    // coloured halo around the shape via an SVG filter chain.
+    glow?: {
+        rad: number;       // EMU blur radius
+        colour?: ColourRef;
+    };
+    // <a:reflection>. Rendered as a mirrored DOM twin of the shape
+    // positioned below, faded via a CSS mask-image gradient. v1 only
+    // honours vertical (90°) reflections; non-vertical `dir` values
+    // are rendered as vertical.
+    reflection?: {
+        stA?: number;   // start alpha, 1000ths (0..100000)
+        endA?: number;  // end alpha, 1000ths
+        dist?: number;  // distance EMU
+        dir?: number;   // degrees, converted from 60000ths
     };
 }
 

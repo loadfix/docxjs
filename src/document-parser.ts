@@ -1976,8 +1976,8 @@ export class DocumentParser {
 		return any ? out : undefined;
 	}
 
-	// Parses <a:effectLst> → ShapeEffects. Handles outer/inner shadow
-	// and softEdge. Glow / reflection remain TODO (see CLAUDE.md).
+	// Parses <a:effectLst> → ShapeEffects. Handles outer/inner shadow,
+	// softEdge, glow, and reflection.
 	private parseEffectList(el: Element | null | undefined): ShapeEffects | undefined {
 		if (!el) return undefined;
 		const result: ShapeEffects = {};
@@ -2008,8 +2008,41 @@ export class DocumentParser {
 					}
 					break;
 				}
-				// TODO: <a:glow> → feGaussianBlur + colour.
-				// TODO: <a:reflection> → out of scope.
+				case "glow": {
+					// <a:glow rad="…"> with a colour child. rad is EMU
+					// blur radius; omit the entry entirely if rad is
+					// missing or non-positive so the renderer doesn't
+					// emit an empty filter chain.
+					const rad = xml.intAttr(n, "rad");
+					if (rad != null && Number.isFinite(rad) && rad > 0) {
+						const colour = this.parseColor(n);
+						const entry: NonNullable<ShapeEffects["glow"]> = { rad };
+						if (colour) entry.colour = colour;
+						result.glow = entry;
+						any = true;
+					}
+					break;
+				}
+				case "reflection": {
+					// <a:reflection stA=".." endA=".." stPos=".." endPos=".."
+					//   dist=".." dir=".." fadeDir=".." rotWithShape=".."/>
+					// All attributes optional; the renderer picks
+					// sensible defaults. stPos / endPos / fadeDir /
+					// rotWithShape are parsed-but-not-used in v1 — we
+					// only honour vertical reflections.
+					const stA = xml.intAttr(n, "stA");
+					const endA = xml.intAttr(n, "endA");
+					const dist = xml.intAttr(n, "dist");
+					const dirRaw = xml.intAttr(n, "dir");
+					const entry: NonNullable<ShapeEffects["reflection"]> = {};
+					if (stA != null && Number.isFinite(stA)) entry.stA = stA;
+					if (endA != null && Number.isFinite(endA)) entry.endA = endA;
+					if (dist != null && Number.isFinite(dist)) entry.dist = dist;
+					if (dirRaw != null && Number.isFinite(dirRaw)) entry.dir = (dirRaw / 60000) % 360;
+					result.reflection = entry;
+					any = true;
+					break;
+				}
 			}
 		}
 		return any ? result : undefined;
