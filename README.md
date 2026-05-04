@@ -143,3 +143,13 @@ The public surface (`renderAsync`, `parseAsync`, `renderDocument`, `renderThumbn
 Contributing
 ------
 This fork commits `dist/` alongside source changes so consumers can pull from git directly. If you open a PR, rebuild `dist/` (via `npm run build`) before committing so the bundled output stays in sync with `src/`.
+
+## Related projects
+
+Part of a family of document-rendering libraries:
+
+- [pptxjs](https://github.com/loadfix/pptxjs) — browser-side PPTX → HTML renderer (TypeScript)
+- [xlsxjs](https://github.com/loadfix/xlsxjs) — browser-side XLSX → HTML renderer (TypeScript)
+- [python-docx](https://github.com/loadfix/python-docx) — Python DOCX parser/generator
+- [python-pptx](https://github.com/loadfix/python-pptx) — Python PPTX parser/generator
+- [python-xlsx](https://github.com/loadfix/python-xlsx) — Python XLSX parser/generator
