@@ -148,6 +148,14 @@
         }
         return mergeDeep(target, ...sources);
     }
+    function parseCssRules(text) {
+        const result = {};
+        for (const rule of text.split(';')) {
+            const [key, val] = rule.split(':');
+            result[key] = val;
+        }
+        return result;
+    }
     function asArray(val) {
         return Array.isArray(val) ? val : [val];
     }
@@ -163,7 +171,9 @@
         FontSize: { mul: 0.5, unit: "pt" },
         Border: { mul: 0.125, unit: "pt", min: 0.25, max: 12 },
         Point: { mul: 1, unit: "pt" },
-        Percent: { mul: 0.02, unit: "%" }};
+        Percent: { mul: 0.02, unit: "%" },
+        VmlEmu: { mul: 1 / 12700, unit: "" },
+    };
     function convertLength(val, usage = LengthUsage.Dxa) {
         if (val == null || /.+(p[xt]|[%])$/.test(val)) {
             return val;
@@ -827,6 +837,7 @@
         DomType["CommentRangeStart"] = "commentRangeStart";
         DomType["CommentRangeEnd"] = "commentRangeEnd";
         DomType["AltChunk"] = "altChunk";
+        DomType["Sdt"] = "sdt";
     })(DomType || (DomType = {}));
     class OpenXmlElementBase {
         constructor() {
@@ -1360,12 +1371,25 @@
         const stripped = value.replace(/\s*\[\d+\]\s*$/, '');
         return sanitizeCssColor(stripped);
     }
+    const SAFE_VML_PATH = /^[0-9eEmMlLcCxX.,\-\s]*$/;
+    let vmlDefsCounter = 0;
+    function nextVmlId(prefix) {
+        return `${prefix}-${++vmlDefsCounter}`;
+    }
     class VmlElement extends OpenXmlElementBase {
         constructor() {
             super(...arguments);
             this.type = DomType.VmlElement;
             this.attrs = {};
         }
+    }
+    function makeVml(tagName, attrs = {}, children = []) {
+        const v = new VmlElement();
+        v.tagName = tagName;
+        v.attrs = attrs;
+        for (const c of children)
+            v.children.push(c);
+        return v;
     }
     function parseVmlElement(elem, parser) {
         var result = new VmlElement();
@@ -1388,6 +1412,20 @@
                 result.tagName = "foreignObject";
                 Object.assign(result.attrs, { width: '100%', height: '100%' });
                 break;
+            case "group":
+                result.tagName = "svg";
+                applyGroupCoordSystem(elem, result);
+                break;
+            case "path": {
+                result.tagName = "path";
+                const rawPath = globalXmlParser.attr(elem, "v");
+                const safePath = convertVmlPathToSvg(rawPath);
+                if (safePath)
+                    result.attrs.d = safePath;
+                break;
+            }
+            case "extrusion":
+                return null;
             default:
                 return null;
         }
@@ -1412,14 +1450,29 @@
                     break;
             }
         }
+        const defsChildren = [];
         for (const el of globalXmlParser.elements(elem)) {
             switch (el.localName) {
                 case "stroke":
                     Object.assign(result.attrs, parseStroke(el));
                     break;
-                case "fill":
-                    Object.assign(result.attrs, parseFill());
+                case "fill": {
+                    const { attrs, defs } = parseFill(el);
+                    Object.assign(result.attrs, attrs);
+                    if (defs)
+                        defsChildren.push(defs);
                     break;
+                }
+                case "shadow": {
+                    const shadow = parseShadow(el);
+                    if (shadow) {
+                        defsChildren.push(shadow.defs);
+                        if (!result.attrs.filter) {
+                            result.attrs.filter = `url(#${shadow.id})`;
+                        }
+                    }
+                    break;
+                }
                 case "imagedata":
                     result.tagName = "image";
                     Object.assign(result.attrs, { width: '100%', height: '100%' });
@@ -1437,6 +1490,13 @@
                     break;
             }
         }
+        if (elem.localName === "group") {
+            rewriteGroupChildPositions(elem, result);
+        }
+        if (defsChildren.length) {
+            const defs = makeVml("defs", {}, defsChildren);
+            result.children.unshift(defs);
+        }
         return result;
     }
     function parseStroke(el) {
@@ -1449,10 +1509,265 @@
         return result;
     }
     function parseFill(el) {
-        return {};
+        const type = globalXmlParser.attr(el, "type");
+        const attrs = {};
+        if (!type || type === "solid") {
+            const color = sanitizeVmlColor(globalXmlParser.attr(el, "color"));
+            if (color)
+                attrs.fill = color;
+            return { attrs };
+        }
+        if (type === "gradient" || type === "gradientRadial") {
+            return parseGradientFill(el, type);
+        }
+        if (type === "pattern" || type === "tile") {
+            return parsePatternFill(el);
+        }
+        return { attrs };
+    }
+    function parseGradientFill(el, type) {
+        const color1 = sanitizeVmlColor(globalXmlParser.attr(el, "color")) ?? "#000000";
+        const color2 = sanitizeVmlColor(globalXmlParser.attr(el, "color2")) ?? "#FFFFFF";
+        const rawAngle = parseFloat(globalXmlParser.attr(el, "angle"));
+        const angle = Number.isFinite(rawAngle) ? rawAngle : 0;
+        const rawFocus = parseFloat(globalXmlParser.attr(el, "focus"));
+        const focus = Number.isFinite(rawFocus) ? clampNum(rawFocus, -100, 100) : 0;
+        const id = nextVmlId("vml-grad");
+        const rad = (angle - 90) * Math.PI / 180;
+        const cx = 0.5, cy = 0.5;
+        const x1 = cx - Math.cos(rad) * 0.5;
+        const y1 = cy - Math.sin(rad) * 0.5;
+        const x2 = cx + Math.cos(rad) * 0.5;
+        const y2 = cy + Math.sin(rad) * 0.5;
+        const stops = [];
+        if (focus === 0) {
+            stops.push(makeVml("stop", { offset: "0%", "stop-color": color1 }));
+            stops.push(makeVml("stop", { offset: "100%", "stop-color": color2 }));
+        }
+        else {
+            const mid = `${(50 + focus / 2).toFixed(2)}%`;
+            stops.push(makeVml("stop", { offset: "0%", "stop-color": color1 }));
+            stops.push(makeVml("stop", { offset: mid, "stop-color": color2 }));
+            stops.push(makeVml("stop", { offset: "100%", "stop-color": color1 }));
+        }
+        const gradientTag = type === "gradientRadial" ? "radialGradient" : "linearGradient";
+        const gradAttrs = { id };
+        if (gradientTag === "linearGradient") {
+            Object.assign(gradAttrs, {
+                x1: x1.toFixed(4),
+                y1: y1.toFixed(4),
+                x2: x2.toFixed(4),
+                y2: y2.toFixed(4),
+            });
+        }
+        const defs = makeVml(gradientTag, gradAttrs, stops);
+        return {
+            attrs: { fill: `url(#${id})` },
+            defs,
+        };
+    }
+    function parsePatternFill(el) {
+        const color = sanitizeVmlColor(globalXmlParser.attr(el, "color"));
+        const color2 = sanitizeVmlColor(globalXmlParser.attr(el, "color2"));
+        const id = nextVmlId("vml-pat");
+        if (!color && !color2) {
+            return { attrs: {} };
+        }
+        const size = 8;
+        const bg = makeVml("rect", {
+            x: "0", y: "0",
+            width: `${size}`, height: `${size}`,
+            fill: color2 ?? "#FFFFFF",
+        });
+        const stripe = makeVml("path", {
+            d: `M0,${size} L${size},0`,
+            stroke: color ?? "#000000",
+            "stroke-width": "1",
+        });
+        const defs = makeVml("pattern", {
+            id,
+            x: "0", y: "0",
+            width: `${size}`, height: `${size}`,
+            patternUnits: "userSpaceOnUse",
+        }, [bg, stripe]);
+        return {
+            attrs: { fill: `url(#${id})` },
+            defs,
+        };
+    }
+    function parseShadow(el) {
+        const on = globalXmlParser.attr(el, "on");
+        if (on && !/^(t|true|1|on)$/i.test(on))
+            return null;
+        const color = sanitizeVmlColor(globalXmlParser.attr(el, "color")) ?? "#000000";
+        const opacityRaw = globalXmlParser.attr(el, "opacity");
+        const opacity = parseVmlOpacity(opacityRaw);
+        const [dx, dy] = parseVmlOffset(globalXmlParser.attr(el, "offset"));
+        const id = nextVmlId("vml-shadow");
+        const feAttrs = {
+            dx: dx.toFixed(2),
+            dy: dy.toFixed(2),
+            stdDeviation: "0",
+            "flood-color": color,
+            "flood-opacity": opacity.toFixed(3),
+        };
+        const fe = makeVml("feDropShadow", feAttrs);
+        const filter = makeVml("filter", {
+            id,
+            x: "-50%",
+            y: "-50%",
+            width: "200%",
+            height: "200%",
+        }, [fe]);
+        return { id, defs: filter };
+    }
+    function parseVmlOpacity(val) {
+        if (!val)
+            return 1;
+        const s = val.trim();
+        if (/f$/i.test(s)) {
+            const n = parseFloat(s);
+            return Number.isFinite(n) ? clampNum(n / 65536, 0, 1) : 1;
+        }
+        if (s.endsWith('%')) {
+            const n = parseFloat(s);
+            return Number.isFinite(n) ? clampNum(n / 100, 0, 1) : 1;
+        }
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? clampNum(n, 0, 1) : 1;
+    }
+    function parseVmlOffset(val) {
+        if (!val)
+            return [2, 2];
+        const parts = val.split(',').map(p => p.trim());
+        const dx = parseVmlLengthToPt(parts[0]);
+        const dy = parseVmlLengthToPt(parts[1] ?? parts[0]);
+        return [dx, dy];
+    }
+    function parseVmlLengthToPt(s) {
+        if (!s)
+            return 0;
+        const n = parseFloat(s);
+        if (!Number.isFinite(n))
+            return 0;
+        if (/pt$/i.test(s))
+            return n;
+        if (/px$/i.test(s))
+            return n * 0.75;
+        if (/in$/i.test(s))
+            return n * 72;
+        if (/cm$/i.test(s))
+            return n * 28.3464567;
+        if (/mm$/i.test(s))
+            return n * 2.8346457;
+        return n;
     }
     function parsePoint(val) {
         return val.split(",");
+    }
+    function convertVmlPathToSvg(path) {
+        if (!path)
+            return null;
+        if (!SAFE_VML_PATH.test(path))
+            return null;
+        const cmdMap = {
+            m: 'M', M: 'M',
+            l: 'L', L: 'L',
+            c: 'C', C: 'C',
+            x: 'Z', X: 'Z',
+            e: '', E: '',
+        };
+        const out = [];
+        const re = /([mMlLcCxXeE])|(-?\d+(?:\.\d+)?)|([,\s])/g;
+        let match;
+        while ((match = re.exec(path)) !== null) {
+            if (match[1] !== undefined) {
+                const c = cmdMap[match[1]];
+                if (c)
+                    out.push(c);
+            }
+            else if (match[2] !== undefined) {
+                out.push(convertLength(match[2], LengthUsage.VmlEmu));
+            }
+            else if (match[3] !== undefined) {
+                if (out.length && !/[,\s]$/.test(out[out.length - 1])) {
+                    out.push(' ');
+                }
+            }
+        }
+        const joined = out.join('');
+        return joined.replace(/\s+/g, ' ').replace(/\s*,\s*/g, ',').trim() || null;
+    }
+    function applyGroupCoordSystem(elem, result) {
+        const [csx, csy] = parseCoordPair(globalXmlParser.attr(elem, "coordsize")) ?? [1000, 1000];
+        const [cox, coy] = parseCoordPair(globalXmlParser.attr(elem, "coordorigin")) ?? [0, 0];
+        result.attrs.viewBox = `${cox} ${coy} ${csx} ${csy}`;
+        result.attrs.preserveAspectRatio = "none";
+        result.__groupCoord = { csx, csy, cox, coy };
+    }
+    function rewriteGroupChildPositions(_groupElem, group) {
+        for (const child of group.children) {
+            if (!(child instanceof VmlElement))
+                continue;
+            const style = child.cssStyleText;
+            if (!style)
+                continue;
+            const rules = parseCssRules(style);
+            const left = parsePositionValue(rules.left);
+            const top = parsePositionValue(rules.top);
+            const width = parsePositionValue(rules.width);
+            const height = parsePositionValue(rules.height);
+            switch (child.tagName) {
+                case "rect":
+                case "image":
+                case "foreignObject":
+                case "svg":
+                    if (left != null)
+                        child.attrs.x = left.toString();
+                    if (top != null)
+                        child.attrs.y = top.toString();
+                    if (width != null)
+                        child.attrs.width = width.toString();
+                    if (height != null)
+                        child.attrs.height = height.toString();
+                    break;
+                case "ellipse":
+                    if (left != null && width != null) {
+                        child.attrs.cx = (left + width / 2).toString();
+                        child.attrs.rx = (width / 2).toString();
+                    }
+                    if (top != null && height != null) {
+                        child.attrs.cy = (top + height / 2).toString();
+                        child.attrs.ry = (height / 2).toString();
+                    }
+                    break;
+                case "g":
+                    if (left != null || top != null) {
+                        const tx = left ?? 0;
+                        const ty = top ?? 0;
+                        const existing = child.attrs.transform ?? '';
+                        child.attrs.transform = `translate(${tx} ${ty}) ${existing}`.trim();
+                    }
+                    break;
+            }
+        }
+    }
+    function parseCoordPair(val) {
+        if (!val)
+            return null;
+        const parts = val.split(',').map(s => parseFloat(s.trim()));
+        if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1]))
+            return null;
+        return [parts[0], parts[1]];
+    }
+    function parsePositionValue(val) {
+        if (val == null)
+            return null;
+        const n = parseFloat(val);
+        return Number.isFinite(n) ? n : null;
+    }
+    function clampNum(val, min, max) {
+        return val < min ? min : val > max ? max : val;
     }
 
     class WmlComment extends OpenXmlElementBase {
@@ -1833,26 +2148,85 @@
             return result;
         }
         parseNumberingFile(node) {
-            var result = [];
-            var mapping = {};
+            var abstractLevels = {};
             var bullets = [];
+            var numElements = [];
             for (const n of globalXmlParser.elements(node)) {
                 switch (n.localName) {
                     case "abstractNum":
-                        this.parseAbstractNumbering(n, bullets)
-                            .forEach(x => result.push(x));
+                        var absId = globalXmlParser.attr(n, "abstractNumId");
+                        abstractLevels[absId] = this.parseAbstractNumbering(n, bullets);
                         break;
                     case "numPicBullet":
                         bullets.push(this.parseNumberingPicBullet(n));
                         break;
                     case "num":
-                        var numId = globalXmlParser.attr(n, "numId");
-                        var abstractNumId = globalXmlParser.elementAttr(n, "abstractNumId", "val");
-                        mapping[abstractNumId] = numId;
+                        numElements.push(n);
                         break;
                 }
             }
-            result.forEach(x => x.id = mapping[x.id]);
+            var result = [];
+            for (const n of numElements) {
+                var numId = globalXmlParser.attr(n, "numId");
+                var abstractNumId = globalXmlParser.elementAttr(n, "abstractNumId", "val");
+                var baseLevels = abstractLevels[abstractNumId];
+                if (!baseLevels)
+                    continue;
+                var overrides = {};
+                for (const child of globalXmlParser.elements(n, "lvlOverride")) {
+                    var ilvl = globalXmlParser.intAttr(child, "ilvl");
+                    var entry = {};
+                    for (const sub of globalXmlParser.elements(child)) {
+                        if (sub.localName === "startOverride") {
+                            entry.start = globalXmlParser.intAttr(sub, "val");
+                        }
+                        else if (sub.localName === "lvl") {
+                            entry.level = this.parseNumberingLevel(abstractNumId, sub, bullets);
+                        }
+                    }
+                    overrides[ilvl] = entry;
+                }
+                for (const base of baseLevels) {
+                    var clone = {
+                        ...base,
+                        pStyle: { ...base.pStyle },
+                        rStyle: { ...base.rStyle },
+                        id: numId,
+                    };
+                    var ov = overrides[base.level];
+                    if (ov) {
+                        if (ov.level) {
+                            if (ov.level.start !== undefined)
+                                clone.start = ov.level.start;
+                            if (ov.level.levelText !== undefined)
+                                clone.levelText = ov.level.levelText;
+                            if (ov.level.format !== undefined)
+                                clone.format = ov.level.format;
+                            if (ov.level.suff !== undefined)
+                                clone.suff = ov.level.suff;
+                            if (ov.level.restart !== undefined)
+                                clone.restart = ov.level.restart;
+                            if (ov.level.justification !== undefined)
+                                clone.justification = ov.level.justification;
+                            if (ov.level.isLgl !== undefined)
+                                clone.isLgl = ov.level.isLgl;
+                            if (ov.level.bullet !== undefined)
+                                clone.bullet = ov.level.bullet;
+                            if (ov.level.pStyleName !== undefined)
+                                clone.pStyleName = ov.level.pStyleName;
+                            if (ov.level.pStyle && Object.keys(ov.level.pStyle).length) {
+                                clone.pStyle = { ...clone.pStyle, ...ov.level.pStyle };
+                            }
+                            if (ov.level.rStyle && Object.keys(ov.level.rStyle).length) {
+                                clone.rStyle = { ...clone.rStyle, ...ov.level.rStyle };
+                            }
+                        }
+                        if (ov.start !== undefined)
+                            clone.start = ov.start;
+                    }
+                    result.push(clone);
+                }
+            }
             return result;
         }
         parseNumberingPicBullet(elem) {
@@ -1914,13 +2288,42 @@
                     case "suff":
                         result.suff = globalXmlParser.attr(n, "val");
                         break;
+                    case "lvlRestart":
+                        result.restart = globalXmlParser.intAttr(n, "val");
+                        break;
+                    case "lvlJc":
+                        result.justification = globalXmlParser.attr(n, "val");
+                        break;
+                    case "isLgl":
+                        var lglVal = globalXmlParser.attr(n, "val");
+                        result.isLgl = lglVal === undefined || lglVal === "" ||
+                            lglVal === "1" || lglVal === "true" || lglVal === "on";
+                        break;
                 }
             }
             return result;
         }
         parseSdt(node, parser) {
             const sdtContent = globalXmlParser.element(node, "sdtContent");
-            return sdtContent ? parser(sdtContent) : [];
+            if (!sdtContent)
+                return [];
+            const children = parser(sdtContent) ?? [];
+            const sdtPr = globalXmlParser.element(node, "sdtPr");
+            if (sdtPr) {
+                const aliasEl = globalXmlParser.element(sdtPr, "alias");
+                const tagEl = globalXmlParser.element(sdtPr, "tag");
+                const alias = aliasEl ? globalXmlParser.attr(aliasEl, "val") : null;
+                const tag = tagEl ? globalXmlParser.attr(tagEl, "val") : null;
+                if (alias || tag) {
+                    const wrapper = { type: DomType.Sdt, children };
+                    if (alias)
+                        wrapper.sdtAlias = alias;
+                    if (tag)
+                        wrapper.sdtTag = tag;
+                    return [wrapper];
+                }
+            }
+            return children;
         }
         parseInserted(node, parentParser) {
             return {
@@ -2054,6 +2457,12 @@
             var result = { type: DomType.Hyperlink, parent: parent, children: [] };
             result.anchor = globalXmlParser.attr(node, "anchor");
             result.id = globalXmlParser.attr(node, "id");
+            const tooltip = globalXmlParser.attr(node, "tooltip");
+            if (tooltip)
+                result.tooltip = tooltip;
+            const targetFrame = globalXmlParser.attr(node, "tgtFrame");
+            if (targetFrame)
+                result.targetFrame = targetFrame;
             for (const c of globalXmlParser.elements(node)) {
                 switch (c.localName) {
                     case "r":
@@ -2274,20 +2683,47 @@
         parseDrawingWrapper(node) {
             var result = { type: DomType.Drawing, children: [], cssStyle: {} };
             var isAnchor = node.localName == "anchor";
+            const EMU_PER_PX = 9525;
+            const WRAP_TEXT_ALLOWED = new Set(["bothSides", "left", "right", "largest"]);
+            const RELATIVE_FROM_ALLOWED = new Set([
+                "margin", "page", "column", "character", "leftMargin", "rightMargin",
+                "insideMargin", "outsideMargin", "paragraph", "line", "topMargin",
+                "bottomMargin"
+            ]);
+            const distT = globalXmlParser.floatAttr(node, "distT", 0);
+            const distB = globalXmlParser.floatAttr(node, "distB", 0);
+            const distL = globalXmlParser.floatAttr(node, "distL", 0);
+            const distR = globalXmlParser.floatAttr(node, "distR", 0);
+            const marginTopPx = (distT || 0) / EMU_PER_PX;
+            const marginBottomPx = (distB || 0) / EMU_PER_PX;
+            const marginLeftPx = (distL || 0) / EMU_PER_PX;
+            const marginRightPx = (distR || 0) / EMU_PER_PX;
             let wrapType = null;
+            let wrapText = null;
+            let wrapPolygonPoints = null;
             let simplePos = globalXmlParser.boolAttr(node, "simplePos");
             globalXmlParser.boolAttr(node, "behindDoc");
-            let posX = { relative: "page", align: "left", offset: "0" };
-            let posY = { relative: "page", align: "top", offset: "0" };
+            let extentCx = 0;
+            let extentCy = 0;
+            let posX = { relative: "page", align: "left", offset: "0", offsetEmu: 0 };
+            let posY = { relative: "page", align: "top", offset: "0", offsetEmu: 0 };
+            let docPrDescr = null;
             for (var n of globalXmlParser.elements(node)) {
                 switch (n.localName) {
+                    case "docPr":
+                        docPrDescr = globalXmlParser.attr(n, "descr");
+                        break;
                     case "simplePos":
                         if (simplePos) {
+                            posX.offsetEmu = globalXmlParser.floatAttr(n, "x", 0) || 0;
+                            posY.offsetEmu = globalXmlParser.floatAttr(n, "y", 0) || 0;
                             posX.offset = globalXmlParser.lengthAttr(n, "x", LengthUsage.Emu);
                             posY.offset = globalXmlParser.lengthAttr(n, "y", LengthUsage.Emu);
                         }
                         break;
                     case "extent":
+                        extentCx = globalXmlParser.floatAttr(n, "cx", 0) || 0;
+                        extentCy = globalXmlParser.floatAttr(n, "cy", 0) || 0;
                         result.cssStyle["width"] = globalXmlParser.lengthAttr(n, "cx", LengthUsage.Emu);
                         result.cssStyle["height"] = globalXmlParser.lengthAttr(n, "cy", LengthUsage.Emu);
                         break;
@@ -2300,8 +2736,11 @@
                             pos.relative = globalXmlParser.attr(n, "relativeFrom") ?? pos.relative;
                             if (alignNode)
                                 pos.align = alignNode.textContent;
-                            if (offsetNode)
+                            if (offsetNode) {
                                 pos.offset = convertLength(offsetNode.textContent, LengthUsage.Emu);
+                                const parsed = parseFloat(offsetNode.textContent);
+                                pos.offsetEmu = Number.isFinite(parsed) ? parsed : 0;
+                            }
                         }
                         break;
                     case "wrapTopAndBottom":
@@ -2310,6 +2749,31 @@
                     case "wrapNone":
                         wrapType = "wrapNone";
                         break;
+                    case "wrapSquare":
+                        wrapType = "wrapSquare";
+                        wrapText = globalXmlParser.attr(n, "wrapText");
+                        break;
+                    case "wrapTight":
+                    case "wrapThrough":
+                        wrapType = n.localName;
+                        wrapText = globalXmlParser.attr(n, "wrapText");
+                        {
+                            const polyNode = globalXmlParser.element(n, "wrapPolygon");
+                            if (polyNode) {
+                                const pts = [];
+                                for (const child of globalXmlParser.elements(polyNode)) {
+                                    if (child.localName !== "start" && child.localName !== "lineTo")
+                                        continue;
+                                    const x = globalXmlParser.floatAttr(child, "x", NaN);
+                                    const y = globalXmlParser.floatAttr(child, "y", NaN);
+                                    if (Number.isFinite(x) && Number.isFinite(y))
+                                        pts.push([x, y]);
+                                }
+                                if (pts.length >= 3)
+                                    wrapPolygonPoints = pts;
+                            }
+                        }
+                        break;
                     case "graphic":
                         var g = this.parseGraphic(n);
                         if (g)
@@ -2317,6 +2781,44 @@
                         break;
                 }
             }
+            const safeWrapText = wrapText && WRAP_TEXT_ALLOWED.has(wrapText) ? wrapText : null;
+            const safeRelativeH = RELATIVE_FROM_ALLOWED.has(posX.relative) ? posX.relative : "page";
+            const floatFromWrapText = (wt, align) => {
+                if (wt === "left")
+                    return "right";
+                if (wt === "right")
+                    return "left";
+                if (align === "right")
+                    return "right";
+                return "left";
+            };
+            const applyMarginsToStyle = () => {
+                if (distT)
+                    result.cssStyle["margin-top"] = `${marginTopPx.toFixed(2)}px`;
+                if (distB)
+                    result.cssStyle["margin-bottom"] = `${marginBottomPx.toFixed(2)}px`;
+                if (distL)
+                    result.cssStyle["margin-left"] = `${marginLeftPx.toFixed(2)}px`;
+                if (distR)
+                    result.cssStyle["margin-right"] = `${marginRightPx.toFixed(2)}px`;
+            };
+            const applyShapeMargin = () => {
+                const maxDist = Math.max(marginTopPx, marginBottomPx, marginLeftPx, marginRightPx);
+                if (maxDist > 0)
+                    result.cssStyle["shape-margin"] = `${maxDist.toFixed(2)}px`;
+            };
+            const buildPolygonCss = () => {
+                if (!wrapPolygonPoints || wrapPolygonPoints.length < 3)
+                    return null;
+                if (extentCx <= 0 || extentCy <= 0)
+                    return null;
+                const segs = wrapPolygonPoints.map(([x, y]) => {
+                    const px = (x / extentCx) * 100;
+                    const py = (y / extentCy) * 100;
+                    return `${px.toFixed(2)}% ${py.toFixed(2)}%`;
+                });
+                return `polygon(${segs.join(", ")})`;
+            };
             if (wrapType == "wrapTopAndBottom") {
                 result.cssStyle['display'] = 'block';
                 if (posX.align) {
@@ -2334,10 +2836,55 @@
                 if (posY.offset)
                     result.cssStyle["top"] = posY.offset;
             }
+            else if (wrapType == "wrapSquare" || wrapType == "wrapTight" || wrapType == "wrapThrough") {
+                const floatSide = floatFromWrapText(safeWrapText, posX.align);
+                if (safeRelativeH === "paragraph") {
+                    result.cssStyle["position"] = "absolute";
+                    const leftPx = (posX.offsetEmu || 0) / EMU_PER_PX;
+                    result.cssStyle["left"] = `${leftPx.toFixed(2)}px`;
+                    if (posY.offsetEmu) {
+                        const topPx = (posY.offsetEmu || 0) / EMU_PER_PX;
+                        result.cssStyle["top"] = `${topPx.toFixed(2)}px`;
+                    }
+                    applyMarginsToStyle();
+                }
+                else if (safeRelativeH === "column") {
+                    result.cssStyle["display"] = "inline-block";
+                    result.cssStyle["float"] = floatSide;
+                    applyMarginsToStyle();
+                    if (floatSide === "left" && distL)
+                        result.cssStyle["margin-left"] = `${(-marginLeftPx).toFixed(2)}px`;
+                    else if (floatSide === "right" && distR)
+                        result.cssStyle["margin-right"] = `${(-marginRightPx).toFixed(2)}px`;
+                }
+                else {
+                    result.cssStyle["float"] = floatSide;
+                    applyMarginsToStyle();
+                }
+                applyShapeMargin();
+                if (wrapType === "wrapTight" || wrapType === "wrapThrough") {
+                    const polyCss = buildPolygonCss();
+                    if (polyCss)
+                        result.cssStyle["shape-outside"] = polyCss;
+                }
+            }
             else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
                 result.cssStyle["float"] = posX.align;
             }
+            if (docPrDescr != null) {
+                this.setImageAltText(result, docPrDescr);
+            }
             return result;
+        }
+        setImageAltText(elem, descr) {
+            if (elem.type === DomType.Image) {
+                elem.altText = descr;
+                return;
+            }
+            if (elem.children) {
+                for (const c of elem.children)
+                    this.setImageAltText(c, descr);
+            }
         }
         parseGraphic(elem) {
             var graphicData = globalXmlParser.element(elem, "graphicData");
@@ -2355,6 +2902,14 @@
             var blip = globalXmlParser.element(blipFill, "blip");
             var srcRect = globalXmlParser.element(blipFill, "srcRect");
             result.src = globalXmlParser.attr(blip, "embed");
+            const nvPicPr = globalXmlParser.element(elem, "nvPicPr");
+            const cNvPr = nvPicPr ? globalXmlParser.element(nvPicPr, "cNvPr") : null;
+            const picDescr = cNvPr ? globalXmlParser.attr(cNvPr, "descr") : null;
+            const blipDescr = blip ? globalXmlParser.attr(blip, "descr") : null;
+            if (picDescr != null)
+                result.altText = picDescr;
+            else if (blipDescr != null)
+                result.altText = blipDescr;
             if (srcRect) {
                 result.srcRect = [
                     globalXmlParser.intAttr(srcRect, "l", 0) / 100000,
@@ -2468,6 +3023,12 @@
                 switch (c.localName) {
                     case "tc":
                         result.children.push(this.parseTableCell(c));
+                        break;
+                    case "bookmarkStart":
+                        result.children.push(parseBookmarkStart(c, globalXmlParser));
+                        break;
+                    case "bookmarkEnd":
+                        result.children.push(parseBookmarkEnd(c, globalXmlParser));
                         break;
                     case "trPr":
                     case "tblPrEx":
@@ -3065,6 +3626,60 @@
         return parseFloat(length);
     }
 
+    function parseFieldInstruction(raw) {
+        const result = {
+            code: '',
+            switches: [],
+            args: [],
+            raw: raw ?? '',
+        };
+        if (!raw)
+            return result;
+        const tokens = [];
+        let i = 0;
+        const s = raw;
+        while (i < s.length) {
+            const ch = s[i];
+            if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') {
+                i++;
+                continue;
+            }
+            if (ch === '"') {
+                let buf = '';
+                i++;
+                while (i < s.length && s[i] !== '"') {
+                    if (s[i] === '\\' && i + 1 < s.length && s[i + 1] === '"') {
+                        buf += '"';
+                        i += 2;
+                    }
+                    else {
+                        buf += s[i++];
+                    }
+                }
+                if (i < s.length)
+                    i++;
+                tokens.push(buf);
+                continue;
+            }
+            let buf = '';
+            while (i < s.length && !/\s/.test(s[i])) {
+                buf += s[i++];
+            }
+            tokens.push(buf);
+        }
+        if (tokens.length === 0)
+            return result;
+        result.code = tokens[0].toUpperCase();
+        for (let k = 1; k < tokens.length; k++) {
+            const t = tokens[k];
+            if (t.startsWith('\\') && t.length > 1)
+                result.switches.push(t);
+            else
+                result.args.push(t);
+        }
+        return result;
+    }
+
     var ns;
     (function (ns) {
         ns["html"] = "http://www.w3.org/1999/xhtml";
@@ -3124,6 +3739,34 @@
             return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
         }
     }
+    function complexFieldCharType(elem) {
+        if (!elem || elem.type !== DomType.Run)
+            return null;
+        const run = elem;
+        if (!run.fieldRun || !run.children)
+            return null;
+        for (const c of run.children) {
+            if (c.type === DomType.ComplexField)
+                return c.charType;
+        }
+        return null;
+    }
+    function isComplexFieldBeginRun(elem) {
+        return complexFieldCharType(elem) === 'begin';
+    }
+    function collectInstructionText(runs) {
+        let out = '';
+        for (const r of runs) {
+            if (!r || r.type !== DomType.Run || !r.children)
+                continue;
+            for (const c of r.children) {
+                if (c.type === DomType.Instruction) {
+                    out += c.text ?? '';
+                }
+            }
+        }
+        return out;
+    }
     class HtmlRenderer {
         constructor() {
             this.className = "docx";
@@ -3133,6 +3776,7 @@
             this.currentVerticalMerge = null;
             this.tableCellPositions = [];
             this.currentCellPosition = null;
+            this.currentRowIsHeader = false;
             this.footnoteMap = {};
             this.endnoteMap = {};
             this.currentEndnoteIds = [];
@@ -3857,17 +4501,39 @@ section.${c}>ol>li::before {
                 else if (num.levelText) {
                     let counter = this.numberingCounter(num.id, num.level);
                     const counterReset = counter + " " + (num.start - 1);
-                    if (num.level > 0) {
-                        styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
+                    const restart = num.restart;
+                    const restartDefault = restart === undefined || restart === -1;
+                    if (restartDefault) {
+                        if (num.level > 0) {
+                            styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
+                                "counter-set": counterReset
+                            });
+                        }
+                    }
+                    else if (Number.isInteger(restart) && restart > 0 && restart <= num.level) {
+                        styleText += this.styleToString(`p.${this.numberingClass(num.id, restart - 1)}`, {
                             "counter-set": counterReset
                         });
                     }
                     resetCounters.push(counterReset);
-                    styleText += this.styleToString(`${selector}:before`, {
-                        "content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
+                    const levelFormat = this.numFormatToCssValue(num.format);
+                    const beforeStyle = {
+                        "content": this.levelTextToContent(num.levelText, num.suff, num.id, levelFormat, num.isLgl === true),
                         "counter-increment": counter,
                         ...num.rStyle,
-                    });
+                    };
+                    const justifyMap = {
+                        left: "left",
+                        right: "right",
+                        center: "center",
+                        start: "start",
+                        end: "end",
+                    };
+                    const justify = num.justification && justifyMap[num.justification];
+                    if (justify) {
+                        beforeStyle["text-align"] = justify;
+                    }
+                    styleText += this.styleToString(`${selector}:before`, beforeStyle);
                 }
                 else {
                     listStyleType = this.numFormatToCssValue(num.format);
@@ -3958,6 +4624,11 @@ section.${c}>ol>li::before {
                     return this.renderHyperlink(elem);
                 case DomType.SmartTag:
                     return this.renderSmartTag(elem);
+                case DomType.SimpleField:
+                    return this.renderSimpleField(elem);
+                case DomType.ComplexField:
+                case DomType.Instruction:
+                    return null;
                 case DomType.Drawing:
                     return this.renderDrawing(elem);
                 case DomType.Image:
@@ -4053,16 +4724,115 @@ section.${c}>ol>li::before {
                     return this.renderCommentReference(elem);
                 case DomType.AltChunk:
                     return null;
+                case DomType.Sdt:
+                    return this.renderSdt(elem);
             }
             return null;
         }
         renderElements(elems, into) {
             if (elems == null)
                 return null;
-            var result = elems.flatMap(e => this.renderElement(e)).filter(e => e != null);
+            const hasComplexField = elems.some(e => isComplexFieldBeginRun(e));
+            const source = hasComplexField ? this.groupComplexFields(elems) : elems;
+            var result = source.flatMap(e => {
+                if (e instanceof Node)
+                    return [e];
+                return this.renderElement(e);
+            }).filter(e => e != null);
             if (into)
                 result.forEach(c => into.appendChild(isString(c) ? document.createTextNode(c) : c));
             return result;
+        }
+        groupComplexFields(elems) {
+            const out = [];
+            let i = 0;
+            while (i < elems.length) {
+                const el = elems[i];
+                if (!isComplexFieldBeginRun(el)) {
+                    out.push(el);
+                    i++;
+                    continue;
+                }
+                let sep = -1;
+                let end = -1;
+                for (let j = i + 1; j < elems.length; j++) {
+                    const ct = complexFieldCharType(elems[j]);
+                    if (ct === 'separate' && sep === -1)
+                        sep = j;
+                    else if (ct === 'end') {
+                        end = j;
+                        break;
+                    }
+                }
+                if (end === -1) {
+                    i++;
+                    continue;
+                }
+                const instrRuns = elems.slice(i + 1, sep === -1 ? end : sep);
+                const resultRuns = sep === -1 ? [] : elems.slice(sep + 1, end);
+                const instruction = collectInstructionText(instrRuns);
+                const parsed = parseFieldInstruction(instruction);
+                const rendered = [];
+                for (const r of resultRuns) {
+                    let n = null;
+                    if (r && r.type === DomType.Run) {
+                        n = this.renderRun(r, true);
+                    }
+                    else {
+                        n = this.renderElement(r);
+                    }
+                    if (n == null)
+                        continue;
+                    if (Array.isArray(n))
+                        rendered.push(...n);
+                    else
+                        rendered.push(n);
+                }
+                const wrapped = this.wrapFieldResult(rendered, parsed);
+                out.push(...wrapped);
+                i = end + 1;
+            }
+            return out;
+        }
+        renderSimpleField(elem) {
+            const parsed = parseFieldInstruction(elem.instruction);
+            const children = this.renderElements(elem.children) ?? [];
+            return this.wrapFieldResult(children, parsed);
+        }
+        wrapFieldResult(children, parsed) {
+            if (!children || children.length === 0)
+                return children ?? [];
+            const code = parsed.code;
+            if (code === 'HYPERLINK') {
+                const hasLocal = parsed.switches.some(s => s.toLowerCase() === '\\l');
+                if (hasLocal) {
+                    const anchor = parsed.args[0] ?? '';
+                    const a = this.h({ tagName: "a" });
+                    a.setAttribute('href', '#' + anchor);
+                    children.forEach(c => a.appendChild(c));
+                    return [a];
+                }
+                const url = parsed.args[0] ?? '';
+                if (!isSafeHyperlinkHref(url)) {
+                    const span = this.h({ tagName: "span" });
+                    children.forEach(c => span.appendChild(c));
+                    return [span];
+                }
+                const a = this.h({ tagName: "a" });
+                a.setAttribute('href', url);
+                children.forEach(c => a.appendChild(c));
+                return [a];
+            }
+            if (code === 'REF' || code === 'PAGEREF') {
+                const anchor = parsed.args[0] ?? '';
+                if (!anchor)
+                    return children;
+                const a = this.h({ tagName: "a" });
+                a.setAttribute('href', '#' + anchor);
+                children.forEach(c => a.appendChild(c));
+                return [a];
+            }
+            return children;
         }
         renderContainer(elem, tagName) {
             return this.h({ tagName, children: this.renderElements(elem.children) });
@@ -4139,10 +4909,32 @@ section.${c}>ol>li::before {
                 href += `#${elem.anchor}`;
             }
             res.href = href;
-            return this.h(res);
+            const link = this.h(res);
+            if (elem.tooltip) {
+                link.setAttribute('title', elem.tooltip);
+            }
+            if (elem.targetFrame && /^_(blank|self|parent|top)$/.test(elem.targetFrame)) {
+                link.setAttribute('target', elem.targetFrame);
+                if (rawHref && !link.hasAttribute('rel')) {
+                    link.setAttribute('rel', 'noopener noreferrer');
+                }
+            }
+            return link;
         }
         renderSmartTag(elem) {
             return this.renderContainer(elem, "span");
+        }
+        renderSdt(elem) {
+            const children = this.renderElements(elem.children);
+            const span = this.h({ tagName: "span", children });
+            span.setAttribute("role", "group");
+            if (elem.sdtAlias) {
+                span.setAttribute("aria-label", elem.sdtAlias);
+            }
+            if (elem.sdtTag) {
+                span.dataset.sdtTag = elem.sdtTag;
+            }
+            return span;
         }
         renderCommentRangeStart(commentStart) {
             if (!this.options.renderComments)
@@ -4221,13 +5013,17 @@ section.${c}>ol>li::before {
         }
         renderDrawing(elem) {
             var result = this.toHTML(elem, ns.html, "div");
-            result.style.display = "inline-block";
-            result.style.position = "relative";
+            const parsed = elem.cssStyle ?? {};
+            if (!parsed["display"] && !parsed["float"])
+                result.style.display = "inline-block";
+            if (!parsed["position"] && !parsed["float"])
+                result.style.position = "relative";
             result.style.textIndent = "0px";
             return result;
         }
         renderImage(elem) {
             let result = this.toHTML(elem, ns.html, "img", []);
+            result.alt = elem.altText ?? "";
             let transform = elem.cssStyle?.transform;
             if (elem.srcRect && elem.srcRect.some(x => x != 0)) {
                 var [left, top, right, bottom] = elem.srcRect;
@@ -4410,8 +5206,8 @@ section.${c}>ol>li::before {
         renderBookmarkStart(elem) {
             return this.h({ tagName: "span", id: elem.name });
         }
-        renderRun(elem) {
-            if (elem.fieldRun)
+        renderRun(elem, bypassFieldGuard = false) {
+            if (elem.fieldRun && !bypassFieldGuard)
                 return null;
             let children = this.renderElements(elem.children);
             if (elem.verticalAlign) {
@@ -4477,11 +5273,52 @@ section.${c}>ol>li::before {
             const children = [];
             if (elem.gridBefore)
                 children.push(this.renderTableCellPlaceholder(elem.gridBefore));
-            children.push(...this.renderElements(elem.children));
+            const rowBookmarks = [];
+            const cellChildren = [];
+            for (const child of (elem.children ?? [])) {
+                if (child.type === DomType.BookmarkStart) {
+                    const bm = child;
+                    if (bm.colFirst != null && bm.colLast != null && bm.name) {
+                        rowBookmarks.push({ name: bm.name, colFirst: bm.colFirst, colLast: bm.colLast });
+                        continue;
+                    }
+                }
+                if (child.type === DomType.BookmarkEnd)
+                    continue;
+                cellChildren.push(child);
+            }
+            const prevHeader = this.currentRowIsHeader;
+            this.currentRowIsHeader = elem.isHeader === true;
+            const renderedCells = this.renderElements(cellChildren);
+            this.currentRowIsHeader = prevHeader;
+            children.push(...renderedCells);
             if (elem.gridAfter)
                 children.push(this.renderTableCellPlaceholder(elem.gridAfter));
             this.currentCellPosition.row++;
             const tr = this.toHTML(elem, ns.html, "tr", children);
+            if (rowBookmarks.length > 0) {
+                const cellNodes = [];
+                let idx = 0;
+                for (const child of cellChildren) {
+                    if (child.type === DomType.Cell) {
+                        const node = renderedCells[idx];
+                        if (node instanceof HTMLElement)
+                            cellNodes.push(node);
+                    }
+                    idx++;
+                }
+                const ranges = [];
+                for (const bm of rowBookmarks) {
+                    ranges.push(`${bm.colFirst}-${bm.colLast}`);
+                    const targetCell = cellNodes[bm.colFirst];
+                    if (!targetCell)
+                        continue;
+                    const anchor = document.createElement('span');
+                    anchor.setAttribute('id', bm.name);
+                    targetCell.insertBefore(anchor, targetCell.firstChild);
+                }
+                tr.setAttribute('data-bookmark-cols', ranges.join(','));
+            }
             if (this.showChanges && elem.rowRevisionKind) {
                 this.applyRowRevision(tr, elem);
             }
@@ -4521,7 +5358,11 @@ section.${c}>ol>li::before {
             return this.h({ tagName: "td", colSpan, style: { border: "none" } });
         }
         renderTableCell(elem) {
-            let result = this.toHTML(elem, ns.html, "td");
+            const tagName = this.currentRowIsHeader ? "th" : "td";
+            let result = this.toHTML(elem, ns.html, tagName);
+            if (this.currentRowIsHeader) {
+                result.setAttribute("scope", "col");
+            }
             const key = this.currentCellPosition.col;
             if (elem.verticalMerge) {
                 if (elem.verticalMerge == "restart") {
@@ -4685,7 +5526,7 @@ section.${c}>ol>li::before {
         numberingCounter(id, lvl) {
             return `${this.className}-num-${id}-${lvl}`;
         }
-        levelTextToContent(text, suff, id, numformat) {
+        levelTextToContent(text, suff, id, numformat, isLgl = false) {
             const suffMap = {
                 "tab": "\\9",
                 "space": "\\a0",
@@ -4699,7 +5540,8 @@ section.${c}>ol>li::before {
                     parts.push(`"${escapeCssStringContent(text.slice(last, m.index))}"`);
                 }
                 const lvl = parseInt(m[0].substring(1), 10) - 1;
-                parts.push(`counter(${this.numberingCounter(id, lvl)}, ${numformat})`);
+                const fmt = isLgl ? "decimal" : numformat;
+                parts.push(`counter(${this.numberingCounter(id, lvl)}, ${fmt})`);
                 last = re.lastIndex;
             }
             if (last < text.length) {
