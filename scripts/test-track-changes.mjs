@@ -985,6 +985,152 @@ async function renderFixture(path, options) {
     );
 }
 
+// ── 22. Headers/footers repeat on every split sub-page ───────────────────
+// Word prints headers and footers on every page. The pagination splitter
+// previously kept them only on the first sub-page, so later pages rendered
+// without chrome. applyVisualPageBreaks now deep-clones the header/footer
+// DOM onto each injected sibling section.
+{
+    const root = document.createElement('div');
+    const section = document.createElement('section');
+    section.className = 'docx';
+    const header = document.createElement('header');
+    header.textContent = 'Repeating Header';
+    const footer = document.createElement('footer');
+    footer.textContent = 'Repeating Footer';
+    const article = document.createElement('article');
+    for (let i = 0; i < 6; i++) {
+        const p = document.createElement('p');
+        p.textContent = `paragraph ${i}`;
+        article.appendChild(p);
+    }
+    section.appendChild(header);
+    section.appendChild(article);
+    section.appendChild(footer);
+    root.appendChild(section);
+    document.body.appendChild(root);
+
+    const PAGE = 400;
+    const PARA = 100;
+    const CHROME = 20; // header/footer height each
+    const heights = new Map();
+    heights.set(section, { width: 800, height: PAGE * 6, minHeight: PAGE });
+    heights.set(article, { width: 800, height: PAGE * 6, minHeight: 0 });
+    heights.set(header, { width: 800, height: CHROME, minHeight: 0 });
+    heights.set(footer, { width: 800, height: CHROME, minHeight: 0 });
+    for (const p of article.children) heights.set(p, { width: 800, height: PARA, minHeight: 0 });
+
+    const inserted = applyVisualPageBreaks(root, { className: 'docx' }, (el) => {
+        return heights.get(el) ?? { width: 0, height: 0, minHeight: 0 };
+    });
+
+    const sectionsAfter = root.querySelectorAll('section.docx');
+    note(`22·: split with chrome → ${sectionsAfter.length} section(s), inserted=${inserted}`);
+    assert(inserted > 0, '22a: forced overflow with chrome should insert sections');
+
+    // Every split section, including clones, must contain exactly one header
+    // and one footer.
+    for (const s of sectionsAfter) {
+        const headers = s.querySelectorAll(':scope > header');
+        const footers = s.querySelectorAll(':scope > footer');
+        assert(
+            headers.length === 1,
+            `22b: each split section should have exactly one <header> (got ${headers.length})`,
+        );
+        assert(
+            footers.length === 1,
+            `22c: each split section should have exactly one <footer> (got ${footers.length})`,
+        );
+        assert(
+            headers[0].textContent === 'Repeating Header',
+            `22d: each header should carry the cloned text`,
+        );
+        assert(
+            footers[0].textContent === 'Repeating Footer',
+            `22e: each footer should carry the cloned text`,
+        );
+    }
+
+    root.remove();
+}
+
+// ── 23. Oversized tables split at row boundaries ──────────────────────────
+// When a single table child is too tall for the remaining page room, the
+// splitter now slices at a row boundary so rows that fit stay on the
+// current page and the rest move to a new table on the next. Column
+// widths and thead repeat.
+{
+    const root = document.createElement('div');
+    const section = document.createElement('section');
+    section.className = 'docx';
+    const article = document.createElement('article');
+    const table = document.createElement('table');
+    const colgroup = document.createElement('colgroup');
+    const col = document.createElement('col');
+    col.setAttribute('style', 'width: 50%');
+    colgroup.appendChild(col);
+    table.appendChild(colgroup);
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    const th = document.createElement('th');
+    th.textContent = 'Column';
+    headRow.appendChild(th);
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (let i = 0; i < 10; i++) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.textContent = `row ${i}`;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    article.appendChild(table);
+    section.appendChild(article);
+    root.appendChild(section);
+    document.body.appendChild(root);
+
+    const PAGE = 400;
+    const ROW = 80;
+    const THEAD = 20;
+    const heights = new Map();
+    heights.set(section, { width: 800, height: PAGE * 3, minHeight: PAGE });
+    heights.set(article, { width: 800, height: PAGE * 3, minHeight: 0 });
+    heights.set(table, { width: 800, height: THEAD + ROW * 10, minHeight: 0 });
+    heights.set(thead, { width: 800, height: THEAD, minHeight: 0 });
+    for (const tr of tbody.children) heights.set(tr, { width: 800, height: ROW, minHeight: 0 });
+
+    const inserted = applyVisualPageBreaks(root, { className: 'docx' }, (el) => {
+        return heights.get(el) ?? { width: 0, height: 0, minHeight: 0 };
+    });
+
+    const sectionsAfter = root.querySelectorAll('section.docx');
+    note(`23·: oversized table → ${sectionsAfter.length} section(s), inserted=${inserted}`);
+    assert(inserted >= 1, '23a: oversized table should force >= 1 new section');
+
+    // Count total body rows across all sections. Must still be 10 — rows
+    // moved from head to tail, none lost, none duplicated.
+    const totalRows = root.querySelectorAll('section.docx tbody > tr').length;
+    assert(totalRows === 10, `23b: total <tbody> rows should remain 10 across all sections (got ${totalRows})`);
+
+    // Every non-empty table must carry the cloned colgroup and thead.
+    const tables = root.querySelectorAll('section.docx table');
+    assert(tables.length >= 2, `23c: expected >= 2 tables after split (got ${tables.length})`);
+    for (const t of tables) {
+        assert(
+            t.querySelector(':scope > colgroup') !== null,
+            '23d: each split table should retain a colgroup for column widths',
+        );
+        assert(
+            t.querySelector(':scope > thead') !== null,
+            '23e: each split table should retain a thead so headers repeat',
+        );
+    }
+
+    root.remove();
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -993,5 +1139,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${21} scenarios passed`);
+    console.log(`\n✓ all ${23} scenarios passed`);
 }
