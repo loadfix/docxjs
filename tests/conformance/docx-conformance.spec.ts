@@ -1,7 +1,9 @@
 // Playwright conformance runner — docxjs edition.
 //
 // Discovers every manifest in `../ooxml-reference-corpus/features/docx/`
-// that carries a `render_assertions` block, renders the committed
+// that carries a `render_assertions` block (literal) or a
+// `render_assertions_template` block (parameterised), expands
+// parameterised manifests via `expandManifest`, renders the committed
 // machine fixture through docxjs in a headless page, evaluates each
 // render_assertion, and writes a result JSON shaped exactly like
 // `FeatureResult.to_dict()` from
@@ -10,7 +12,9 @@
 // Output:
 //   ../ooxml-validate/conformance/results/docxjs/<feature_id>.json
 // where feature_id is e.g. `docx/bold-text`, so the file lands at
-// `docxjs/docx/bold-text.json`.
+// `docxjs/docx/bold-text.json`. Parameterised cases naturally land
+// alongside with a `--<axis-id>` suffix in the filename (e.g.
+// `docxjs/docx/font-color--red.json`).
 //
 // Test-failure semantics mirror the Python runner:
 //   - a `fail` verdict is real signal (we write it) but does NOT fail
@@ -38,6 +42,7 @@ import {
     type RenderAssertion,
     type VisualSsimAssertion,
 } from './evaluator';
+import { expandManifest, type Manifest } from './expand-manifest';
 
 // Layout on disk:
 //   /home/ben/code/docxjs/                       (this repo)
@@ -65,12 +70,12 @@ const TOOL_VERSION = (() => {
 })();
 
 interface ManifestEntry {
-    featureName: string;       // e.g. "bold-text"
-    featureId: string;         // e.g. "docx/bold-text"
-    manifestPath: string;      // absolute
+    featureName: string;       // e.g. "bold-text" or "font-color--red"
+    featureId: string;         // e.g. "docx/bold-text" or "docx/font-color--red"
+    manifestPath: string;      // absolute path to the SOURCE manifest
     fixturePath: string;       // absolute, resolved via fixtures.machine
     renderAssertions: RenderAssertion[];
-    manifest: any;
+    manifest: Manifest;        // expanded (post-expandManifest) case
 }
 
 function listManifests(): ManifestEntry[] {
@@ -80,28 +85,43 @@ function listManifests(): ManifestEntry[] {
         if (!name.endsWith('.json')) continue;
         const p = join(MANIFESTS_DIR, name);
         if (!statSync(p).isFile()) continue;
-        let manifest: any;
+        let raw: Manifest;
         try {
-            manifest = JSON.parse(readFileSync(p, 'utf-8'));
+            raw = JSON.parse(readFileSync(p, 'utf-8')) as Manifest;
         } catch {
             continue;
         }
-        const renderAssertions: RenderAssertion[] | undefined = manifest.render_assertions;
-        if (!renderAssertions || renderAssertions.length === 0) continue;
-        // `roles` defaults to ['authoring','rendering'] per the schema.
-        // Include the feature unless it explicitly omits 'rendering'.
-        const roles: string[] | undefined = manifest.roles;
-        if (roles && !roles.includes('rendering')) continue;
-        const machine: string | undefined = manifest?.fixtures?.machine;
-        const fixturePath = machine ? join(FIXTURES_ROOT, `${machine}.docx`) : '';
-        out.push({
-            featureName: name.replace(/\.json$/, ''),
-            featureId: manifest.id ?? `docx/${name.replace(/\.json$/, '')}`,
-            manifestPath: p,
-            fixturePath,
-            renderAssertions,
-            manifest,
-        });
+        // Expand parameterised manifests into their concrete cases
+        // before filtering; the template lives on the parent but the
+        // `render_assertions` key only appears on an expanded case.
+        let expanded: Manifest[];
+        try {
+            expanded = expandManifest(raw);
+        } catch {
+            continue;
+        }
+        for (const m of expanded) {
+            const renderAssertions = m.render_assertions as RenderAssertion[] | undefined;
+            if (!renderAssertions || renderAssertions.length === 0) continue;
+            // `roles` defaults to ['authoring','rendering'] per the schema.
+            // Include the feature unless it explicitly omits 'rendering'.
+            const roles = m.roles as string[] | undefined;
+            if (roles && !roles.includes('rendering')) continue;
+            const machine = m.fixtures?.machine as string | undefined;
+            const fixturePath = machine ? join(FIXTURES_ROOT, `${machine}.docx`) : '';
+            // Derive feature name by stripping "docx/" from id when
+            // present; fall back to the source filename for literals.
+            const id = String(m.id ?? `docx/${name.replace(/\.json$/, '')}`);
+            const featureName = id.startsWith('docx/') ? id.slice('docx/'.length) : id;
+            out.push({
+                featureName,
+                featureId: id,
+                manifestPath: p,
+                fixturePath,
+                renderAssertions,
+                manifest: m,
+            });
+        }
     }
     return out;
 }
@@ -162,7 +182,9 @@ function writeResultJson(
 ): string {
     // Output path: results/<library>/<feature_id>.json. feature_id
     // contains a slash ("docx/bold-text") so the library dir gets a
-    // nested `docx/` child, matching the README layout.
+    // nested `docx/` child, matching the README layout. Parameterised
+    // cases land as `docx/font-color--red.json` (the `--<axis-id>`
+    // suffix is already baked into featureId).
     const out = join(RESULTS_ROOT, LIBRARY, `${entry.featureId}.json`);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, JSON.stringify(result, null, 2) + '\n', 'utf-8');
