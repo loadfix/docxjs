@@ -103,31 +103,45 @@ function splitSection(section: HTMLElement, measureFn: MeasureFn, slack: number)
     // Find the single content `<article>` — that's what `createSectionContent`
     // in html-renderer.ts emits for each section. If there isn't one we bail;
     // anything else (headers, footers, footnote containers) we leave alone.
-    //
-    // NOTE: v1 keeps headers/footers on the first sub-page only. Later
-    // sub-pages get a fresh empty article in a cloned section shell — no
-    // header/footer is duplicated. Known limitation: a real Word print
-    // would repeat the header/footer on every page. Tracked as out of
-    // scope for this change.
     const article = section.querySelector<HTMLElement>(':scope > article');
     if (!article) return [section];
+
+    // Capture the original section's header(s) and footer(s) so every cloned
+    // sub-page can render them too — matches Word's print convention of
+    // repeating chrome on every page.
+    const headers = Array.from(section.querySelectorAll<HTMLElement>(':scope > header'));
+    const footers = Array.from(section.querySelectorAll<HTMLElement>(':scope > footer'));
 
     // Walk the children, measuring cumulative offset. When we'd exceed the
     // page height, start a new section from that child.
     //
-    // TODO (v1 limitation): if a single child is taller than the page we
-    // leave it where it is and accept overflow on that sub-page. Splitting
-    // inside a child (e.g. mid-paragraph or mid-table) is out of scope.
+    // Oversized children — a single child taller than a page worth of
+    // available room — used to just overflow on one sub-page. We now split
+    // `<table>` children at row boundaries so a multi-page table flows
+    // across pages; paragraphs and other leaves remain unsplit and accept
+    // the overflow (see `splitTableAtRowBoundary` below).
     const children = Array.from(article.children) as HTMLElement[];
     if (children.length === 0) return [section];
 
     const articleTopOffset = offsetWithinSection(article, section, measureFn);
+
+    // Repeated headers/footers consume vertical room on every sub-page.
+    // Their measured heights are what the browser actually laid them out
+    // to, including margin-top/minHeight CSS the renderer set from the
+    // DOCX pageMargins.
+    const headerHeight = headers.reduce((sum, h) => sum + measureFn(h).height, 0);
+    const footerHeight = footers.reduce((sum, f) => sum + measureFn(f).height, 0);
 
     const subPages: HTMLElement[] = [section];
     let currentArticle = article;
     let currentTop = articleTopOffset; // offset of currentArticle's top within its section
     let runningHeight = 0;              // height consumed so far inside currentArticle
     let currentSection = section;
+
+    // Usable vertical room inside an article. For the first page we trust
+    // the original layout (pageHeight - articleTopOffset - footerHeight);
+    // for later pages it's pageHeight - headerHeight - footerHeight.
+    const roomForCurrent = () => pageHeight - currentTop - footerHeight;
 
     for (let i = 0; i < children.length; i++) {
         const child = children[i];
@@ -136,14 +150,45 @@ function splitSection(section: HTMLElement, measureFn: MeasureFn, slack: number)
         // If this child on its own would break to a new page (and we've
         // already placed something on the current page), spin up a new
         // section starting with this child.
-        const roomLeft = pageHeight - currentTop - runningHeight;
-        const willOverflow = ch > roomLeft;
+        let willOverflow = ch > (roomForCurrent() - runningHeight);
+
+        // If the oversized child is a table, try splitting it at a row
+        // boundary so the rows that *do* fit render on the current page
+        // and the rest spills to the next. Splitting leaves the original
+        // `child` as the head (remains in the article) and returns the
+        // tail, which replaces subsequent positions in `children`.
+        if (willOverflow && child.tagName === 'TABLE') {
+            const room = roomForCurrent() - runningHeight;
+            const tail = splitTableAtRowBoundary(child as HTMLTableElement, room, measureFn);
+            if (tail) {
+                // The head `child` now fits (some rows stayed); insert the
+                // tail into `children` immediately after `child` so the
+                // next loop iteration starts the new page with it.
+                children.splice(i + 1, 0, tail);
+                // Recompute: child may now be small enough to fit.
+                const { height: newCh } = measureFn(child);
+                runningHeight += newCh;
+                continue;
+            }
+            // No row fit — fall through to the standard "start a new page
+            // with this whole child" path below.
+            willOverflow = true;
+        }
 
         if (willOverflow && runningHeight > 0) {
             // Close out the current page and start a new one with `child`.
             const newSection = cloneSectionShell(currentSection);
+            // Clone each header in order and insert at the top of the shell
+            // so the browser lays them out above the content article.
+            // cloneNode(true) is safe here: header/footer DOM is static
+            // content the renderer builds from DOCX, and we don't attach
+            // event listeners to it — so we're not losing behavior. We
+            // strip descendant `id` attributes to avoid duplicates in the
+            // document once the clones are inserted.
+            for (const h of headers) newSection.appendChild(cloneChromeForRepeat(h));
             const newArticle = cloneArticleShell(currentArticle);
             newSection.appendChild(newArticle);
+            for (const f of footers) newSection.appendChild(cloneChromeForRepeat(f));
 
             // Insert right after the current section.
             currentSection.parentNode!.insertBefore(newSection, currentSection.nextSibling);
@@ -154,10 +199,11 @@ function splitSection(section: HTMLElement, measureFn: MeasureFn, slack: number)
                 newArticle.appendChild(children[j]);
             }
 
-            // Continue walking in the new section.
+            // Continue walking in the new section. The new article sits
+            // below the repeated header, so our offset reflects that.
             currentSection = newSection;
             currentArticle = newArticle;
-            currentTop = 0; // fresh section, article starts at top (no header)
+            currentTop = headerHeight;
             runningHeight = ch;
 
             // children[i] is now inside newArticle, already accounted for.
@@ -314,4 +360,100 @@ function cloneArticleShell(source: HTMLElement): HTMLElement {
     const shell = source.cloneNode(false) as HTMLElement;
     shell.removeAttribute('id');
     return shell;
+}
+
+// Split a `<table>` at a row boundary so the rows that fit within `room`
+// stay in the original element (the head) and the remainder are returned
+// as a new `<table>` (the tail). Returns null if zero body rows fit —
+// caller should treat the whole table as oversized and start a new page.
+//
+// The tail preserves the original's attributes (via cloneNode(false)) plus
+// a cloned `<colgroup>` (if any) and a cloned `<thead>` (if any), so a
+// multi-page table still shows column widths and header rows on every
+// page. We do not clone `<tfoot>` onto the head — by convention Word
+// shows tfoot only at the very bottom, but docxjs doesn't emit tfoot,
+// so the question is academic.
+//
+// Security: no DOCX strings are interpolated into CSS or innerHTML here.
+// Row motion uses appendChild; the cloned thead uses cloneNode which the
+// browser handles safely (attribute copying, not HTML parsing).
+function splitTableAtRowBoundary(
+    table: HTMLTableElement,
+    room: number,
+    measureFn: MeasureFn,
+): HTMLTableElement | null {
+    if (room <= 0) return null;
+
+    // Work out the live rows in source order across tbody (multiple
+    // tbodies are possible). thead rows are excluded from splitting:
+    // they repeat on every page.
+    const thead = table.querySelector<HTMLTableSectionElement>(':scope > thead');
+    const tbodies = Array.from(table.querySelectorAll<HTMLTableSectionElement>(':scope > tbody'));
+    const rows = tbodies.flatMap(tb =>
+        Array.from(tb.children).filter(c => c.tagName === 'TR') as HTMLTableRowElement[],
+    );
+    if (rows.length === 0) return null;
+
+    // The rows we measure sit at whatever offset under the table; we
+    // care about cumulative row height, not absolute y. Measure using
+    // the supplied measureFn (same as the rest of the module so jsdom
+    // stubs work).
+    const theadHeight = thead ? measureFn(thead).height : 0;
+    let consumed = theadHeight;
+    let cutIndex = -1;
+    for (let i = 0; i < rows.length; i++) {
+        const rh = measureFn(rows[i]).height;
+        if (consumed + rh > room) break;
+        consumed += rh;
+        cutIndex = i;
+    }
+    if (cutIndex < 0) return null; // Not even one row fits.
+    if (cutIndex === rows.length - 1) return null; // Everything fits already — nothing to split.
+
+    // Build the tail table shell.
+    const tail = table.cloneNode(false) as HTMLTableElement;
+    tail.removeAttribute('id');
+    const colgroup = table.querySelector<HTMLTableColElement>(':scope > colgroup');
+    if (colgroup) {
+        const colClone = colgroup.cloneNode(true) as HTMLElement;
+        colClone.removeAttribute('id');
+        tail.appendChild(colClone);
+    }
+    if (thead) {
+        const theadClone = thead.cloneNode(true) as HTMLElement;
+        theadClone.removeAttribute('id');
+        for (const el of Array.from(theadClone.querySelectorAll<HTMLElement>('[id]'))) {
+            el.removeAttribute('id');
+        }
+        tail.appendChild(theadClone);
+    }
+    const tailBody = (tbodies[0] ?? table).cloneNode(false) as HTMLTableSectionElement;
+    // If we cloned a <tbody>, strip its id too.
+    tailBody.removeAttribute('id');
+    // Move the post-cut rows into tail tbody.
+    for (let i = cutIndex + 1; i < rows.length; i++) {
+        tailBody.appendChild(rows[i]);
+    }
+    tail.appendChild(tailBody);
+
+    // Remove now-empty tbodies from the head table (if every row of a
+    // tbody went to the tail).
+    for (const tb of tbodies) {
+        if (!tb.querySelector(':scope > tr')) tb.remove();
+    }
+
+    return tail;
+}
+
+// Deep-clone a header/footer for repetition on a sub-page, scrubbing any
+// descendant `id` so the cloned tree doesn't collide with the original
+// (HTML requires ids to be unique per document). Header/footer content is
+// static text/layout built from DOCX; removing ids doesn't affect rendering.
+function cloneChromeForRepeat(source: HTMLElement): HTMLElement {
+    const clone = source.cloneNode(true) as HTMLElement;
+    clone.removeAttribute('id');
+    for (const el of Array.from(clone.querySelectorAll<HTMLElement>('[id]'))) {
+        el.removeAttribute('id');
+    }
+    return clone;
 }

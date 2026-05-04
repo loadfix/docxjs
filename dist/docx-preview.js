@@ -4554,8 +4554,11 @@ section.${c}>ol>li::before {
             container.appendChild(result);
             requestAnimationFrame(() => {
                 const bb = container.firstElementChild.getBBox();
-                container.setAttribute("width", `${Math.ceil(bb.x + bb.width)}`);
-                container.setAttribute("height", `${Math.ceil(bb.y + bb.height)}`);
+                const w = Math.max(1, Math.ceil(bb.width));
+                const h = Math.max(1, Math.ceil(bb.height));
+                container.setAttribute("width", `${w}`);
+                container.setAttribute("height", `${h}`);
+                container.setAttribute("viewBox", `${Math.floor(bb.x)} ${Math.floor(bb.y)} ${w} ${h}`);
             });
             return container;
         }
@@ -4951,24 +4954,43 @@ section.${c}>ol>li::before {
         const article = section.querySelector(':scope > article');
         if (!article)
             return [section];
+        const headers = Array.from(section.querySelectorAll(':scope > header'));
+        const footers = Array.from(section.querySelectorAll(':scope > footer'));
         const children = Array.from(article.children);
         if (children.length === 0)
             return [section];
         const articleTopOffset = offsetWithinSection(article, section);
+        const headerHeight = headers.reduce((sum, h) => sum + measureFn(h).height, 0);
+        const footerHeight = footers.reduce((sum, f) => sum + measureFn(f).height, 0);
         const subPages = [section];
         let currentArticle = article;
         let currentTop = articleTopOffset;
         let runningHeight = 0;
         let currentSection = section;
+        const roomForCurrent = () => pageHeight - currentTop - footerHeight;
         for (let i = 0; i < children.length; i++) {
             const child = children[i];
             const { height: ch } = measureFn(child);
-            const roomLeft = pageHeight - currentTop - runningHeight;
-            const willOverflow = ch > roomLeft;
+            let willOverflow = ch > (roomForCurrent() - runningHeight);
+            if (willOverflow && child.tagName === 'TABLE') {
+                const room = roomForCurrent() - runningHeight;
+                const tail = splitTableAtRowBoundary(child, room, measureFn);
+                if (tail) {
+                    children.splice(i + 1, 0, tail);
+                    const { height: newCh } = measureFn(child);
+                    runningHeight += newCh;
+                    continue;
+                }
+                willOverflow = true;
+            }
             if (willOverflow && runningHeight > 0) {
                 const newSection = cloneSectionShell(currentSection);
+                for (const h of headers)
+                    newSection.appendChild(cloneChromeForRepeat(h));
                 const newArticle = cloneArticleShell(currentArticle);
                 newSection.appendChild(newArticle);
+                for (const f of footers)
+                    newSection.appendChild(cloneChromeForRepeat(f));
                 currentSection.parentNode.insertBefore(newSection, currentSection.nextSibling);
                 subPages.push(newSection);
                 for (let j = i; j < children.length; j++) {
@@ -4976,7 +4998,7 @@ section.${c}>ol>li::before {
                 }
                 currentSection = newSection;
                 currentArticle = newArticle;
-                currentTop = 0;
+                currentTop = headerHeight;
                 runningHeight = ch;
                 continue;
             }
@@ -5063,6 +5085,64 @@ section.${c}>ol>li::before {
         const shell = source.cloneNode(false);
         shell.removeAttribute('id');
         return shell;
+    }
+    function splitTableAtRowBoundary(table, room, measureFn) {
+        if (room <= 0)
+            return null;
+        const thead = table.querySelector(':scope > thead');
+        const tbodies = Array.from(table.querySelectorAll(':scope > tbody'));
+        const rows = tbodies.flatMap(tb => Array.from(tb.children).filter(c => c.tagName === 'TR'));
+        if (rows.length === 0)
+            return null;
+        const theadHeight = thead ? measureFn(thead).height : 0;
+        let consumed = theadHeight;
+        let cutIndex = -1;
+        for (let i = 0; i < rows.length; i++) {
+            const rh = measureFn(rows[i]).height;
+            if (consumed + rh > room)
+                break;
+            consumed += rh;
+            cutIndex = i;
+        }
+        if (cutIndex < 0)
+            return null;
+        if (cutIndex === rows.length - 1)
+            return null;
+        const tail = table.cloneNode(false);
+        tail.removeAttribute('id');
+        const colgroup = table.querySelector(':scope > colgroup');
+        if (colgroup) {
+            const colClone = colgroup.cloneNode(true);
+            colClone.removeAttribute('id');
+            tail.appendChild(colClone);
+        }
+        if (thead) {
+            const theadClone = thead.cloneNode(true);
+            theadClone.removeAttribute('id');
+            for (const el of Array.from(theadClone.querySelectorAll('[id]'))) {
+                el.removeAttribute('id');
+            }
+            tail.appendChild(theadClone);
+        }
+        const tailBody = (tbodies[0] ?? table).cloneNode(false);
+        tailBody.removeAttribute('id');
+        for (let i = cutIndex + 1; i < rows.length; i++) {
+            tailBody.appendChild(rows[i]);
+        }
+        tail.appendChild(tailBody);
+        for (const tb of tbodies) {
+            if (!tb.querySelector(':scope > tr'))
+                tb.remove();
+        }
+        return tail;
+    }
+    function cloneChromeForRepeat(source) {
+        const clone = source.cloneNode(true);
+        clone.removeAttribute('id');
+        for (const el of Array.from(clone.querySelectorAll('[id]'))) {
+            el.removeAttribute('id');
+        }
+        return clone;
     }
 
     const STYLE_MARKER = 'data-docxjs-thumbnails';
