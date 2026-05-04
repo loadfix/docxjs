@@ -50,6 +50,33 @@ Fixtures live in `tests/render-test/<name>/document.docx`. The demo has no in-UI
 - `renderChanges: boolean` is the legacy track-changes switch; `changes.show` is the newer nested option. `mergeOptions()` in `docx-preview.ts` translates the legacy flag if `changes.show` isn't set explicitly. **Never drop `renderChanges` from the `Options` interface.**
 - Same pattern for `renderComments` vs `comments.*`.
 
+## OOXML feature workflow (required before adding rendering for any new feature)
+
+Every OOXML feature is defined by a manifest in the shared corpus
+repository `loadfix/ooxml-reference-corpus` (sibling checkout at
+`../ooxml-reference-corpus/`). docxjs is a renderer — it reads a fixture
+rather than authoring one — but it must agree with `python-docx` on what
+the feature's XML looks like.
+
+1. **Read the manifest.** Look under
+   `../ooxml-reference-corpus/features/docx/` for a JSON manifest
+   covering the feature you're rendering. The `assertions` block tells
+   you what XML to expect in the fixture.
+
+2. **Consult the ECMA-376 5th edition spec** (corpus-only):
+   - PDFs: `../ooxml-reference-corpus/spec/ecma-376-5/part-{1,2,3,4}/*.pdf`
+   - RNC schemas (easier to read): `../ooxml-reference-corpus/spec/ecma-376-5/part-1/rnc/`
+   - XSD schemas: `../ooxml-reference-corpus/spec/ecma-376-5/part-1/xsd/`
+
+3. **If no manifest exists**, ask python-docx's maintainer to author
+   one first — the manifest is the definition of "done", and
+   authoring-side libraries own the definition. docxjs then confirms
+   it can render the committed fixture correctly.
+
+4. **Verify rendering.** The Playwright test suite should include a
+   render smoke for the fixture (load the committed fixture from the
+   corpus, render, assert the DOM + visual output).
+
 ## Security constraints
 
 All string content in a DOCX is attacker-controlled. Treat `author`, `id`, `paraId`, revision ids, comment ids, etc. as untrusted.
