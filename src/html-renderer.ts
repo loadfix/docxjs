@@ -24,6 +24,8 @@ import { BaseHeaderFooterPart } from './header-footer/parts';
 import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReference } from './comments/elements';
+import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
+import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
@@ -57,6 +59,37 @@ export function isSafeHyperlinkHref(raw: string | null | undefined): boolean {
 		// paths like `foo/bar.html`. Treat as safe — no scheme, no sink.
 		return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
 	}
+}
+
+// Returns the fldCharType of the first WmlFieldChar nested inside the element,
+// or null if this element doesn't represent a field-char delimiter run.
+function complexFieldCharType(elem: OpenXmlElement): string | null {
+	if (!elem || elem.type !== DomType.Run) return null;
+	const run = elem as WmlRun;
+	if (!run.fieldRun || !run.children) return null;
+	for (const c of run.children) {
+		if (c.type === DomType.ComplexField) return (c as WmlFieldChar).charType;
+	}
+	return null;
+}
+
+function isComplexFieldBeginRun(elem: OpenXmlElement): boolean {
+	return complexFieldCharType(elem) === 'begin';
+}
+
+// Concatenates the text of every w:instrText inside the instruction-portion
+// runs of a complex field.
+function collectInstructionText(runs: OpenXmlElement[]): string {
+	let out = '';
+	for (const r of runs) {
+		if (!r || r.type !== DomType.Run || !r.children) continue;
+		for (const c of r.children) {
+			if (c.type === DomType.Instruction) {
+				out += (c as WmlInstructionText).text ?? '';
+			}
+		}
+	}
+	return out;
 }
 
 // Internal-only — addresses a rendered change element via data-change-kind.
@@ -1242,9 +1275,20 @@ section.${c}>ol>li::before {
 
 			case DomType.Hyperlink:
 				return this.renderHyperlink(elem);
-			
+
 			case DomType.SmartTag:
 				return this.renderSmartTag(elem);
+
+			case DomType.SimpleField:
+				return this.renderSimpleField(elem as WmlFieldSimple);
+
+			case DomType.ComplexField:
+			case DomType.Instruction:
+				// Field-char delimiter and instrText elements only carry meaning
+				// when grouped across sibling runs. renderElements() collapses
+				// begin..separate..end sequences into a single wrapped group; a
+				// stray delimiter outside that grouping renders nothing.
+				return null;
 
 			case DomType.Drawing:
 				return this.renderDrawing(elem);
@@ -1398,12 +1442,132 @@ section.${c}>ol>li::before {
 		if (elems == null)
 			return null;
 
-		var result = elems.flatMap(e => this.renderElement(e)).filter(e => e != null);
+		// Fast path: no complex-field delimiter runs present. Most element
+		// lists take this path and pay nothing extra.
+		const hasComplexField = elems.some(e => isComplexFieldBeginRun(e));
+		const source = hasComplexField ? this.groupComplexFields(elems) : elems;
+
+		var result = source.flatMap(e => {
+			// groupComplexFields may return already-rendered Nodes inline with
+			// the element list — pass those through untouched.
+			if (e instanceof Node) return [e];
+			return this.renderElement(e as OpenXmlElement);
+		}).filter(e => e != null);
 
 		if (into)
 			result.forEach(c => into.appendChild(isString(c) ? document.createTextNode(c) : c));
 
 		return result;
+	}
+
+	// Walks a child list and replaces each <w:fldChar begin>…<w:fldChar end>
+	// sequence with the rendered wrapped result. Runs in the instruction
+	// portion (begin..separate) contribute their <w:instrText> to the
+	// instruction string; runs in the result portion (separate..end) render
+	// normally (the fieldRun guard is bypassed for them).
+	private groupComplexFields(elems: OpenXmlElement[]): (OpenXmlElement | Node)[] {
+		const out: (OpenXmlElement | Node)[] = [];
+		let i = 0;
+		while (i < elems.length) {
+			const el = elems[i];
+			if (!isComplexFieldBeginRun(el)) {
+				out.push(el);
+				i++;
+				continue;
+			}
+			// Scan forward for separate and end. We tolerate malformed input
+			// (missing separate or end) by stopping at the end of the list.
+			let sep = -1;
+			let end = -1;
+			for (let j = i + 1; j < elems.length; j++) {
+				const ct = complexFieldCharType(elems[j]);
+				if (ct === 'separate' && sep === -1) sep = j;
+				else if (ct === 'end') { end = j; break; }
+			}
+			if (end === -1) {
+				// Unterminated field; fall back to default rendering of the
+				// begin run (which renders nothing thanks to fieldRun) and
+				// continue past it.
+				i++;
+				continue;
+			}
+			const instrRuns = elems.slice(i + 1, sep === -1 ? end : sep);
+			const resultRuns = sep === -1 ? [] : elems.slice(sep + 1, end);
+			const instruction = collectInstructionText(instrRuns);
+			const parsed = parseFieldInstruction(instruction);
+			// Render cached-result runs. They are usually ordinary runs
+			// (fieldRun=false), but we bypass the guard explicitly so any
+			// unusual run carrying both a fldChar-less instrText/etc. and
+			// cached text still emits its cached text.
+			const rendered: Node[] = [];
+			for (const r of resultRuns) {
+				let n: Node | Node[] | null = null;
+				if (r && r.type === DomType.Run) {
+					n = this.renderRun(r as WmlRun, true);
+				} else {
+					n = this.renderElement(r);
+				}
+				if (n == null) continue;
+				if (Array.isArray(n)) rendered.push(...n);
+				else rendered.push(n);
+			}
+			const wrapped = this.wrapFieldResult(rendered, parsed);
+			out.push(...wrapped);
+			i = end + 1;
+		}
+		return out;
+	}
+
+	renderSimpleField(elem: WmlFieldSimple): Node | Node[] {
+		const parsed = parseFieldInstruction(elem.instruction);
+		const children = this.renderElements(elem.children) ?? [];
+		return this.wrapFieldResult(children, parsed);
+	}
+
+	// Wraps the rendered cached-result nodes based on the parsed instruction.
+	// HYPERLINK → <a href=…> (scheme-allowlisted). REF / PAGEREF → internal
+	// <a href="#anchor">. All other codes render as-is.
+	private wrapFieldResult(children: Node[], parsed: ParsedFieldInstruction): Node[] {
+		if (!children || children.length === 0) return children ?? [];
+		const code = parsed.code;
+		if (code === 'HYPERLINK') {
+			// "\l anchor" = internal fragment. Otherwise first positional
+			// arg is an external URL.
+			const hasLocal = parsed.switches.some(s => s.toLowerCase() === '\\l');
+			if (hasLocal) {
+				const anchor = parsed.args[0] ?? '';
+				const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+				a.setAttribute('href', '#' + anchor);
+				children.forEach(c => a.appendChild(c));
+				return [a];
+			}
+			const url = parsed.args[0] ?? '';
+			if (!isSafeHyperlinkHref(url)) {
+				// Drop the href — render an inert span so the cached text is
+				// still visible but has no navigation sink. Matches
+				// renderHyperlink's handling of unsafe schemes. See
+				// SECURITY_REVIEW.md #2.
+				const span = this.h({ tagName: "span" }) as HTMLElement;
+				children.forEach(c => span.appendChild(c));
+				return [span];
+			}
+			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+			a.setAttribute('href', url);
+			children.forEach(c => a.appendChild(c));
+			return [a];
+		}
+		if (code === 'REF' || code === 'PAGEREF') {
+			const anchor = parsed.args[0] ?? '';
+			if (!anchor) return children;
+			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+			a.setAttribute('href', '#' + anchor);
+			children.forEach(c => a.appendChild(c));
+			return [a];
+		}
+		// PAGE, NUMPAGES, DATE, TIME, AUTHOR, FILENAME, SEQ, STYLEREF,
+		// LISTNUM, MERGEFIELD, IF, ASK, FILLIN, INCLUDETEXT, TOC, and any
+		// code we don't recognise — render cached result verbatim.
+		return children;
 	}
 
 	renderContainer<T extends keyof HTMLElementTagNameMap>(elem: OpenXmlElement, tagName: T): HTMLElementTagNameMap[T] {
@@ -1843,8 +2007,12 @@ section.${c}>ol>li::before {
 		return this.h({ tagName: "span", id: elem.name });
 	}
 
-	renderRun(elem: WmlRun) {
-		if (elem.fieldRun)
+	renderRun(elem: WmlRun, bypassFieldGuard: boolean = false) {
+		// The fieldRun flag is set on any run containing a w:fldChar or
+		// w:instrText. Those delimiter / instruction runs render nothing by
+		// default. groupComplexFields() passes bypassFieldGuard=true when
+		// rendering a result-portion run so its cached text is preserved.
+		if (elem.fieldRun && !bypassFieldGuard)
 			return null;
 
 		let children = this.renderElements(elem.children);
