@@ -7,6 +7,7 @@ export interface WmlSettings {
 	footnoteProps: NoteProperties;
 	endnoteProps: NoteProperties;
 	autoHyphenation: boolean;
+	evenAndOddHeaders: boolean;
 }
 
 export interface NoteProperties {
@@ -23,6 +24,9 @@ export function parseSettings(elem: Element, xml: XmlParser) {
 			case "footnotePr": result.footnoteProps = parseNoteProperties(el, xml); break;
 			case "endnotePr": result.endnoteProps = parseNoteProperties(el, xml); break;
 			case "autoHyphenation": result.autoHyphenation = xml.boolAttr(el, "val"); break;
+			// `w:evenAndOddHeaders` is a toggle element — presence means "on"
+			// unless `w:val="false"` is explicit. Default when absent: false.
+			case "evenAndOddHeaders": result.evenAndOddHeaders = xml.boolAttr(el, "val", true); break;
 		}
 	}
 

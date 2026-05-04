@@ -1237,6 +1237,73 @@ async function renderFixture(path, options) {
     note(`28·: numbering fixture still renders post-override-plumbing`);
 }
 
+// ── 29. Heading outline → <h1>..<h6> (Wave 2.1) ──────────────────────────
+// renderParagraph should emit an <h1>..<h6> when a paragraph has an
+// outline level (0..5) or a style chain that resolves to Heading 1..6.
+// Levels 6..8 stay as <p>. Synthetic paragraph with outlineLevel=0 →
+// <h1>; we just confirm nothing crashes on the standard fixtures and
+// that when <h*> elements appear they don't duplicate the <p>.
+{
+    const { container } = await renderFixture('text');
+    const headings = container.querySelectorAll('h1,h2,h3,h4,h5,h6');
+    // text fixture may or may not have a heading; just assert that any <h*>
+    // has at least one child node (text/span), not that it exists at all.
+    for (const h of headings) {
+        assert(
+            h.childNodes.length > 0,
+            `29a: <${h.tagName.toLowerCase()}> should contain rendered content`,
+        );
+    }
+    note(`29·: text fixture produced ${headings.length} heading element(s)`);
+}
+
+// ── 30. Character formatting (Wave 2.2) ──────────────────────────────────
+// Smoke-test that the text fixture still renders after the parser gained
+// cases for kern/spacing/w:w/emboss/imprint/outline/shadow/dstrike/cr/
+// softHyphen/specVanish. None of those are expected in the plain text
+// fixture, so the test is purely a parser-regression guard.
+{
+    const { container } = await renderFixture('text');
+    const runs = container.querySelectorAll('span');
+    assert(
+        runs.length > 0,
+        `30a: text fixture should still produce run spans after char-format parser rewrite`,
+    );
+    note(`30·: text fixture produced ${runs.length} run span(s) post-char-format rewrite`);
+}
+
+// ── 31. Section-level fidelity (Wave 2.3) ────────────────────────────────
+// page-layout / header-footer fixtures should still render sections after
+// the parser added lnNumType / docGrid / mirrorMargins / per-column
+// widths / page borders. Purely a regression guard.
+{
+    const { container } = await renderFixture('page-layout');
+    const sections = container.querySelectorAll('section.docx');
+    assert(
+        sections.length > 0,
+        `31a: page-layout fixture should still produce sections after section-level rewrite`,
+    );
+    note(`31·: page-layout fixture produced ${sections.length} section(s)`);
+}
+
+// ── 32. Table fidelity — thead/tbody split (Wave 2.4) ────────────────────
+// renderTable should now separate header rows into <thead> and body rows
+// into <tbody> based on row.isHeader. The existing table fixture doesn't
+// necessarily have a w:tblHeader row, so just confirm that when rows
+// exist, they live inside either <thead> or <tbody> — never dangling.
+{
+    const { container } = await renderFixture('table');
+    const tables = container.querySelectorAll('table');
+    for (const t of tables) {
+        const directRows = t.querySelectorAll(':scope > tr');
+        assert(
+            directRows.length === 0,
+            `32a: <table> should not have <tr> direct children — they belong inside <thead>/<tbody>`,
+        );
+    }
+    note(`32·: table fixture produced ${tables.length} table(s), all row-containers segregated`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1245,5 +1312,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${28} scenarios passed`);
+    console.log(`\n✓ all ${32} scenarios passed`);
 }

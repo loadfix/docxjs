@@ -16,6 +16,7 @@ import {
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
 import { FooterHeaderReference, SectionProperties } from './document/section';
+import { Border } from './document/border';
 import { WmlRun } from './document/run';
 import { WmlBookmarkStart } from './document/bookmarks';
 import { IDomStyle } from './document/style';
@@ -117,6 +118,82 @@ interface Section {
 
 declare const Highlight: any;
 
+// BCP 47 subset: a language subtag of 1-8 ASCII letters, optionally followed
+// by one or more `-`-separated subtags of 1-8 alphanumerics. Doesn't enforce
+// registered codes — just the shape — which is the most a renderer can do
+// without shipping a language registry. DOCX `w:lang/@w:val` is attacker-
+// controlled, so anything not matching this drops silently (the `lang`
+// attribute is never emitted for that element).
+const BCP47_RE = /^[A-Za-z]{1,8}(-[A-Za-z0-9]{1,8})*$/;
+
+function isValidBcp47LanguageTag(value: unknown): value is string {
+	return typeof value === 'string' && BCP47_RE.test(value);
+}
+
+// Map a paragraph to a heading tag (`h1..h6`) or `p`. Precedence:
+//   1. explicit `outlineLevel` on the paragraph itself
+//   2. the resolved style's `paragraphProps.outlineLevel` (already merged
+//      through `basedOn` by processStyles)
+//   3. style name / id matching `Heading 1..9` (case-insensitive, tolerant
+//      of the space-less `Heading1` form)
+// HTML only has h1..h6, so DOCX outline levels 6..8 (Heading 7..9) fall
+// back to <p>. A level of 0 is "Heading 1" → h1.
+export function getHeadingTagName(
+	paragraph: WmlParagraph | null | undefined,
+	stylesMap: Record<string, IDomStyle> | null | undefined,
+): string {
+	if (!paragraph) return 'p';
+
+	const level = resolveHeadingLevel(paragraph, stylesMap);
+	if (level == null) return 'p';
+	if (!Number.isInteger(level) || level < 0 || level > 5) return 'p';
+	return `h${level + 1}`;
+}
+
+function resolveHeadingLevel(
+	paragraph: WmlParagraph,
+	stylesMap: Record<string, IDomStyle> | null | undefined,
+): number | null {
+	if (Number.isInteger(paragraph.outlineLevel) && paragraph.outlineLevel >= 0 && paragraph.outlineLevel <= 8) {
+		return paragraph.outlineLevel;
+	}
+
+	const style = paragraph.styleName && stylesMap?.[paragraph.styleName];
+	if (!style) return null;
+
+	// processStyles already merged paragraphProps through the basedOn chain,
+	// so checking the resolved style is enough — no need to walk basedOn
+	// again here.
+	const styleLevel = style.paragraphProps?.outlineLevel;
+	if (Number.isInteger(styleLevel) && styleLevel >= 0 && styleLevel <= 8) {
+		return styleLevel;
+	}
+
+	// Fall back to the style name / id. Word ships "Heading 1..9" by name
+	// with ids like `Heading1` or localized variants; walk the basedOn chain
+	// by id so a user style `basedOn="Heading2"` still resolves to h2.
+	const seen = new Set<string>();
+	let cursor: IDomStyle | undefined = style;
+	while (cursor && !seen.has(cursor.id)) {
+		seen.add(cursor.id);
+		const nameLevel = headingLevelFromName(cursor.name) ?? headingLevelFromName(cursor.id);
+		if (nameLevel != null) return nameLevel;
+		cursor = cursor.basedOn ? stylesMap?.[cursor.basedOn] : undefined;
+	}
+
+	return null;
+}
+
+function headingLevelFromName(name: string | null | undefined): number | null {
+	if (!name) return null;
+	// Tolerant match: "Heading 1", "heading  1", "Heading1", "heading1".
+	const m = /^heading\s*([1-9])$/i.exec(name.trim());
+	if (!m) return null;
+	const n = Number(m[1]);
+	// DOCX "Heading 1" → outline level 0 → h1.
+	return n - 1;
+}
+
 type CellVerticalMergeType = Record<number, HTMLTableCellElement>;
 
 export class HtmlRenderer {
@@ -132,6 +209,12 @@ export class HtmlRenderer {
 	currentVerticalMerge: CellVerticalMergeType = null;
 	tableCellPositions: CellPos[] = [];
 	currentCellPosition: CellPos = null;
+	// Band sizes (w:tblStyleColBandSize / w:tblStyleRowBandSize) for the
+	// current table. A value of 1 means alternate every row/column (the
+	// classic zebra stripe); 2 means alternate every two, etc. Pushed
+	// as a stack so nested tables restore the outer sizes on exit.
+	tableBandSizes: { col: number; row: number }[] = [];
+	currentTableBandSizes: { col: number; row: number } = { col: 1, row: 1 };
 	// Set while rendering a WmlTableRow whose isHeader is true so
 	// renderTableCell can emit <th scope="col"> instead of <td>.
 	private currentRowIsHeader: boolean = false;
@@ -154,6 +237,11 @@ export class HtmlRenderer {
 
 	defaultTabSize: string;
 	currentTabs: any[] = [];
+
+	// Sequential counter used to scope inline line-numbering rules to a
+	// single article (`<article class="docx-lnno-N">`). Incremented each
+	// time createSectionContent emits an article with line numbering on.
+	private lineNumberingArticleSeq: number = 0;
 
 	commentHighlight: any;
 	commentMap: Record<string, Range> = {};
@@ -458,13 +546,22 @@ export class HtmlRenderer {
 		return output;
 	}
 
-	createPageElement(className: string, props: SectionProperties, docStyle: Record<string, any>) {
+	createPageElement(className: string, props: SectionProperties, docStyle: Record<string, any>, pageIndex: number = 0) {
 		const style: Record<string, string> = { ...docStyle };
 
 		if (props) {
 			if (props.pageMargins) {
-				style.paddingLeft = props.pageMargins.left;
-				style.paddingRight = props.pageMargins.right;
+				let { left, right } = props.pageMargins;
+
+				// w:mirrorMargins swaps inner/outer on facing pages. We treat
+				// the 0-indexed page as the first "odd" (recto) page, so even
+				// indices get the mirrored layout.
+				if (props.mirrorMargins && pageIndex % 2 === 1) {
+					[left, right] = [right, left];
+				}
+
+				style.paddingLeft = left;
+				style.paddingRight = right;
 				style.paddingTop = props.pageMargins.top;
 				style.paddingBottom = props.pageMargins.bottom;
 			}
@@ -475,25 +572,139 @@ export class HtmlRenderer {
 				if (!this.options.ignoreHeight)
 					style.minHeight = props.pageSize.height;
 			}
+
+			if (props.pageBorders) {
+				for (const edge of ["top", "right", "bottom", "left"] as const) {
+					const border = props.pageBorders[edge] as Border | undefined;
+					const css = this.borderToCss(border);
+					if (css) {
+						const key = `border${edge.charAt(0).toUpperCase()}${edge.slice(1)}` as
+							"borderTop" | "borderRight" | "borderBottom" | "borderLeft";
+						style[key] = css;
+					}
+				}
+			}
 		}
 
 		return this.h({ tagName: "section", className, style }) as HTMLElement;
 	}
 
+	/**
+	 * Builds a `border: <size> <style> <color>` shorthand from a parsed
+	 * WordprocessingML border. Returns null if the border is absent, has no
+	 * recognised style, or carries an unsafe color string.
+	 */
+	borderToCss(border: Border | undefined): string | null {
+		if (!border || !border.type || border.type === "none" || border.type === "nil") {
+			return null;
+		}
+
+		// WordprocessingML border sizes are in eighths of a point; the
+		// LengthUsage.Border parser already converts to a "<n>pt" string.
+		const size = border.size || "0.5pt";
+
+		// Very rough mapping of Word border styles to CSS equivalents. Art
+		// borders (w:art="...") are not handled — kept as a TODO per the
+		// project's known-gap list.
+		const styleMap: Record<string, string> = {
+			single: "solid", thick: "solid", double: "double",
+			dotted: "dotted", dashed: "dashed", dashSmallGap: "dashed",
+			dotDash: "dashed", dotDotDash: "dashed",
+			wave: "solid", doubleWave: "double",
+		};
+		const cssStyle = styleMap[border.type] ?? "solid";
+
+		const color = sanitizeCssColor(border.color) ?? "currentColor";
+
+		return `${size} ${cssStyle} ${color}`;
+	}
+
 	createSectionContent(props: SectionProperties) {
 		const style: Record<string, string> = {};
+		const classNames: string[] = [];
+		const extraChildren: Node[] = [];
 
 		if (props.columns && props.columns.numberOfColumns) {
-			style.columnCount = `${props.columns.numberOfColumns}`;
-			style.columnGap = props.columns.space;
+			const { columns } = props;
+			const perColumnWidths = columns.columns
+				?.map(c => c.width)
+				.filter((w): w is string => !!w);
+
+			if (columns.equalWidth === false && perColumnWidths && perColumnWidths.length > 0) {
+				// w:cols with per-w:col widths. Use CSS grid rather than the
+				// multi-column box, which can't express unequal column widths.
+				style.display = "grid";
+				style.gridTemplateColumns = perColumnWidths.join(" ");
+				if (columns.space) {
+					style.columnGap = columns.space;
+				}
+			} else {
+				style.columnCount = `${columns.numberOfColumns}`;
+				style.columnGap = columns.space;
+			}
 
 			if (props.columns.separator) {
 				style.columnRule = "1px solid black";
 			}
 		}
 
-		return this.h({ tagName: "article", style }) ;
-	}	
+		// w:docGrid linePitch is in twentieths of a point. Only the numeric
+		// line-height derived from linePitch is applied; the other docGrid
+		// `type` variants (lines / linesAndChars / snapToChars) drive Asian
+		// character-grid layouts that require glyph-level advance control
+		// the browser doesn't expose. We accept the pitch as a hint only.
+		if (props.docGrid && props.docGrid.linePitch > 0) {
+			const pitchPt = props.docGrid.linePitch / 20;
+			if (isFinite(pitchPt) && pitchPt > 0) {
+				style.lineHeight = `${pitchPt}pt`;
+			}
+		}
+
+		// w:lnNumType — CSS counter scoped to this article. Browsers don't
+		// expose line-box positions, so we fall back to numbering
+		// *paragraphs* rather than visual lines.
+		// TODO: paragraph-count fallback; browsers don't expose line boxes.
+		if (props.lineNumbering && props.lineNumbering.countBy > 0) {
+			// Force `countBy` through a numeric coercion so we can safely
+			// interpolate it into the :nth-of-type() selector below.
+			const countBy = Math.max(1, Math.floor(Number(props.lineNumbering.countBy)) || 1);
+			// `counter-reset` on the article re-starts line numbers per
+			// section. Per-page restart is approximated by section restart
+			// here because we don't re-wrap sections per page in this pass.
+			// restart="continuous" suppresses the reset so the counter
+			// carries across sections.
+			const restart = props.lineNumbering.restart || "newPage";
+			if (restart !== "continuous") {
+				const start = Math.max(0, (props.lineNumbering.start ?? 1) - 1);
+				style.counterReset = `docx-line ${start}`;
+			}
+
+			// Assign the article a unique class so the :nth-of-type rule
+			// only matches this section's children. `countBy` is numeric
+			// after the coercion above — no DOCX string reaches the CSS.
+			const seq = ++this.lineNumberingArticleSeq;
+			const scopeClass = `${this.className}-lnno-${seq}`;
+			classNames.push(scopeClass);
+
+			// Inline <style> with a scoped selector. The rule technically
+			// applies globally, but only matches paragraphs inside this
+			// article because of the unique scopeClass. Every Nth paragraph
+			// increments the counter by `countBy` (so the displayed number
+			// approximates a per-line count) and renders the counter via
+			// ::before.
+			const rule =
+				`.${scopeClass} > p { counter-increment: docx-line; }\n` +
+				`.${scopeClass} > p:nth-of-type(${countBy}n)::before { ` +
+				`content: counter(docx-line); display: inline-block; ` +
+				`width: 2.5em; margin-left: -3em; margin-right: 0.5em; ` +
+				`text-align: right; color: #666; font-size: 0.85em; ` +
+				`vertical-align: top; }`;
+			extraChildren.push(this.h({ tagName: "style", children: [rule] }));
+		}
+
+		const className = classNames.length ? classNames.join(" ") : undefined;
+		return this.h({ tagName: "article", className, style, children: extraChildren }) ;
+	}
 
 	renderSections(document: DocumentElement): HTMLElement[] {
 		const result = [];
@@ -508,7 +719,7 @@ export class HtmlRenderer {
 
 			const section = pages[i][0];
 			let props = section.sectProps;
-			const pageElement = this.createPageElement(this.className, props, document.cssStyle);
+			const pageElement = this.createPageElement(this.className, props, document.cssStyle, result.length);
 
 			this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props,
 				result.length, prevProps != props, pageElement);
@@ -543,8 +754,15 @@ export class HtmlRenderer {
 	renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement) {
 		if (!refs) return;
 
+		// The "even" reference only activates when settings.xml opts in with
+		// <w:evenAndOddHeaders/>. Without that flag, Word uses the default
+		// header/footer on every page regardless of parity. Previously we
+		// unconditionally picked "even" on odd page indices, which broke
+		// documents whose even reference was dormant metadata.
+		const evenAndOdd = this.document?.settingsPart?.settings?.evenAndOddHeaders === true;
+
 		var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-			?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+			?? (evenAndOdd && page % 2 == 1 ? refs.find(x => x.type == "even") : null)
 			?? refs.find(x => x.type == "default");
 
 		var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart) as BaseHeaderFooterPart;
@@ -1638,7 +1856,15 @@ section.${c}>ol>li::before {
 	}
 
 	renderParagraph(elem: WmlParagraph) {
-		var result = this.toHTML(elem, ns.html, "p");
+		// Emit the correct heading element for paragraphs with outlineLevel
+		// (or a style that resolves to Heading 1..6). Everything else stays
+		// as <p>. This is a tagName substitution only — class, style, data
+		// attributes, and children are unchanged.
+		this.applyParagraphBreakControls(elem);
+		this.applyParagraphDropCap(elem);
+
+		const tagName = getHeadingTagName(elem, this.styleMap);
+		var result = this.toHTML(elem, ns.html, tagName);
 
 		const style = this.findStyle(elem.styleName);
 		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
@@ -1663,6 +1889,71 @@ section.${c}>ol>li::before {
 		}
 
 		return result;
+	}
+
+	// Writes the four Word "keep with" / pagination controls into the
+	// paragraph's cssStyle so they flow through toHTML unchanged. Falls
+	// back to the paragraph style for any value the paragraph itself
+	// doesn't set — Word's resolution order.
+	private applyParagraphBreakControls(elem: WmlParagraph) {
+		const css = elem.cssStyle ??= {};
+		const style = this.findStyle(elem.styleName);
+		const styleProps = style?.paragraphProps;
+
+		const widowControl = elem.widowControl ?? styleProps?.widowControl;
+		const keepNext = elem.keepNext ?? styleProps?.keepNext;
+		const keepLines = elem.keepLines ?? styleProps?.keepLines;
+		const pageBreakBefore = elem.pageBreakBefore ?? styleProps?.pageBreakBefore;
+
+		// Word's default is widowControl=on; only emit CSS when it's been
+		// explicitly turned off.
+		if (widowControl === false) {
+			css["widows"] = "0";
+			css["orphans"] = "0";
+		}
+
+		if (keepNext === true && !css["break-after"]) {
+			css["break-after"] = "avoid";
+		}
+
+		if (keepLines === true && !css["break-inside"]) {
+			css["break-inside"] = "avoid";
+		}
+
+		// The existing page-splitter in parseDocument() already shunts a
+		// paragraph whose style sets pageBreakBefore into its own section, so
+		// a CSS `break-before: page` is belt-and-braces. It does nothing when
+		// the splitter has already broken, and it's correct for the
+		// non-experimental (single-page) render path.
+		if (pageBreakBefore === true && !css["break-before"]) {
+			css["break-before"] = "page";
+		}
+	}
+
+	// Applies the CSS implementing a Word drop cap. The parser stores the
+	// variant (`drop` = in-flow float, `margin` = floats into the page
+	// margin) and the span-in-lines on the paragraph itself.
+	private applyParagraphDropCap(elem: WmlParagraph) {
+		if (!elem.dropCap) return;
+		const lines = (Number.isInteger(elem.dropCapLines) && elem.dropCapLines! >= 1)
+			? elem.dropCapLines!
+			: 3;
+		const css = elem.cssStyle ??= {};
+
+		css["float"] = "left";
+		// Scale the first glyph to roughly `lines` lines tall. `line-height:
+		// 1` on a font-size of Nem gives N line heights of body text — in
+		// practice Word's rendering lands closer to 0.9 so use that.
+		css["font-size"] = `${lines}em`;
+		css["line-height"] = "0.9";
+		if (elem.dropCap === "drop") {
+			css["margin"] = "0 0.1em 0 0";
+		} else {
+			// "margin" variant: the drop cap outdents into the page margin.
+			// A negative margin-left roughly half an em per covered line gives
+			// the effect without needing real Word page-margin metrics.
+			css["margin-left"] = `-${lines * 0.5}em`;
+		}
 	}
 
 	private appendParagraphMarkRevision(paragraphEl: HTMLElement, elem: WmlParagraph) {
@@ -2188,15 +2479,45 @@ section.${c}>ol>li::before {
 		this.currentVerticalMerge = {};
 		this.currentCellPosition = { col: 0, row: 0 };
 
+		// Track band sizes so renderTableRow / renderTableCell can emit
+		// data-band attributes that account for tblStyleColBandSize /
+		// tblStyleRowBandSize > 1. Push/pop around nested tables.
+		this.tableBandSizes.push(this.currentTableBandSizes);
+		this.currentTableBandSizes = {
+			col: Math.max(1, elem.colBandSize ?? 1),
+			row: Math.max(1, elem.rowBandSize ?? 1),
+		};
+
 		const children = [];
 
 		if (elem.columns)
 			children.push(this.renderTableColumns(elem.columns));
 
-		children.push(...this.renderElements(elem.children));
+		// Split children into header rows (w:tblHeader set) and
+		// everything else. Header rows go into a <thead> so the visual
+		// pagination helper (splitTableAtRowBoundary) can clone them
+		// onto every sub-page. Non-row siblings (e.g. bookmarks) stay in
+		// document order inside <tbody> where they would otherwise land.
+		const headerRendered: Node[] = [];
+		const bodyRendered: Node[] = [];
+		for (const child of (elem.children ?? [])) {
+			const rendered = this.renderElement(child as any);
+			if (rendered == null) continue;
+			const bucket = (child.type === DomType.Row && (child as WmlTableRow).isHeader) ? headerRendered : bodyRendered;
+			if (Array.isArray(rendered)) bucket.push(...rendered);
+			else bucket.push(rendered);
+		}
+
+		if (headerRendered.length > 0) {
+			children.push(this.h({ tagName: "thead", children: headerRendered }));
+		}
+		if (bodyRendered.length > 0) {
+			children.push(this.h({ tagName: "tbody", children: bodyRendered }));
+		}
 
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
+		this.currentTableBandSizes = this.tableBandSizes.pop();
 		return this.toHTML(elem, ns.html, "table", children);
 	}
 
@@ -2247,6 +2568,17 @@ section.${c}>ol>li::before {
 		this.currentCellPosition.row++;
 
 		const tr = this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+
+		// Project row-level metadata onto data-* attributes. All values
+		// are numeric or empty strings; no DOCX-derived text reaches CSS.
+		if (elem.cantSplit) {
+			tr.setAttribute("data-cant-split", "");
+		}
+		const rowBandSize = this.currentTableBandSizes.row;
+		if (rowBandSize > 0) {
+			const rowIdx = Math.max(0, (this.currentCellPosition.row - 1) | 0);
+			tr.setAttribute("data-band", String(Math.floor(rowIdx / rowBandSize) % 2));
+		}
 
 		// Attach column-range bookmarks to the rendered row. The anchor span
 		// is placed as the first child of the first cell in the range so
@@ -2330,6 +2662,17 @@ section.${c}>ol>li::before {
 		// Header rows (w:tblHeader on w:trPr) emit <th scope="col"> so screen
 		// readers can associate data cells with their column header.
 		const tagName = this.currentRowIsHeader ? "th" : "td";
+
+		// Extract $-prefixed metadata keys (diagonal borders, etc.) from
+		// cssStyle before rendering so they don't leak into the style
+		// attribute. toH builds the <td>/<th> from cssStyle as-is; html.ts
+		// assigns via Object.assign(result.style, …), which would silently
+		// drop these anyway, but styleToString would emit them verbatim
+		// for first-row/first-col CNF selectors. Skipping them here also
+		// keeps the style string clean in devtools.
+		const diagTlBr = elem.cssStyle?.["$diag-tlbr"];
+		const diagTrBl = elem.cssStyle?.["$diag-trbl"];
+
 		let result = this.toHTML(elem, ns.html, tagName);
 		if (this.currentRowIsHeader) {
 			(result as HTMLTableCellElement).setAttribute("scope", "col");
@@ -2352,9 +2695,94 @@ section.${c}>ol>li::before {
 		if (elem.span)
 			result.colSpan = elem.span;
 
+		// Column band index — uses the *starting* column (before colSpan
+		// advances), computed modulo the column band size. Emitted only
+		// on the cell, not on the row, so horizontally-banded styles
+		// (tr[data-band="1"] td) and vertically-banded styles
+		// (td[data-band="1"]) both work.
+		const colBandSize = this.currentTableBandSizes.col;
+		if (colBandSize > 0) {
+			result.setAttribute("data-band", String(Math.floor(this.currentCellPosition.col / colBandSize) % 2));
+		}
+
 		this.currentCellPosition.col += result.colSpan;
 
+		// Diagonal borders: emit an absolutely-positioned inline SVG
+		// behind the cell's existing content. The cell needs
+		// position:relative so the SVG's inset:0 anchors correctly; and
+		// any content that was already appended by toHTML gets wrapped
+		// in a z-index:1 div so it sits above the line. Border values
+		// are emitted by parseBorderProperties as "<size> <type> <color>"
+		// strings built from xml.lengthAttr + xmlUtil.colorAttr — both
+		// allowlisted, no raw DOCX text.
+		if (diagTlBr || diagTrBl) {
+			this.applyDiagonalBorders(result as HTMLTableCellElement, diagTlBr, diagTrBl);
+		}
+
 		return result;
+	}
+
+	// Extract the stroke colour from a border string of shape
+	// "<size> <type> <color>" as produced by values.valueOfBorder.
+	// color-slot is space-separated tail, so everything after the second
+	// space is the colour. Returns a safe fallback when the shape is
+	// unexpected.
+	private parseBorderStroke(border: string | undefined): { color: string; width: string } {
+		if (!border || border === "none") return { color: "black", width: "1" };
+		const parts = border.split(/\s+/);
+		if (parts.length < 3) return { color: "black", width: "1" };
+		// Width parts look like "0.50pt"; drop unit for SVG stroke-width
+		// (SVG default unit is the user coordinate).
+		const w = parts[0].replace(/pt$/, "");
+		const color = parts.slice(2).join(" ");
+		return { color, width: w || "1" };
+	}
+
+	private applyDiagonalBorders(cell: HTMLTableCellElement, tlBr?: string, trBl?: string) {
+		// Move existing children into a content wrapper so they sit
+		// above the diagonal overlay via z-index.
+		const existing = Array.from(cell.childNodes);
+		const content = this.h({ tagName: "div", style: { position: "relative", zIndex: "1" } }) as HTMLDivElement;
+		for (const node of existing) content.appendChild(node);
+
+		// Inline SVG overlay. preserveAspectRatio="none" lets the line
+		// scale with the cell. All values are numeric/allowlisted.
+		const overlay = this.h({
+			ns: ns.svg,
+			tagName: "svg",
+			style: { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "0" },
+			preserveAspectRatio: "none",
+			viewBox: "0 0 100 100",
+		}) as SVGSVGElement;
+
+		if (tlBr) {
+			const { color, width } = this.parseBorderStroke(tlBr);
+			const line = this.h({
+				ns: ns.svg,
+				tagName: "line",
+				x1: "0", y1: "0", x2: "100", y2: "100",
+				stroke: color,
+				"stroke-width": width,
+				vectorEffect: "non-scaling-stroke",
+			}) as SVGLineElement;
+			overlay.appendChild(line);
+		}
+		if (trBl) {
+			const { color, width } = this.parseBorderStroke(trBl);
+			const line = this.h({
+				ns: ns.svg,
+				tagName: "line",
+				x1: "100", y1: "0", x2: "0", y2: "100",
+				stroke: color,
+				"stroke-width": width,
+				vectorEffect: "non-scaling-stroke",
+			}) as SVGLineElement;
+			overlay.appendChild(line);
+		}
+
+		cell.style.position = cell.style.position || "relative";
+		cell.appendChild(overlay);
+		cell.appendChild(content);
 	}
 
 	renderVmlPicture(elem: OpenXmlElement) {
@@ -2501,7 +2929,12 @@ section.${c}>ol>li::before {
 	}
 
 	toH(elem: OpenXmlElement, ns: ns, tagName: string, children: Node[] = null) {
-		const { "$lang": lang, ...style } = elem.cssStyle ?? {};
+		const { "$lang": rawLang, ...style } = elem.cssStyle ?? {};
+		// DOCX-derived strings are attacker-controlled. The lang IDL property
+		// reflects into the `lang` attribute (browser-encoded), so the sink is
+		// safe — but we still drop values that aren't BCP 47-shaped so a
+		// crafted DOCX can't stuff garbage into an assistive-tech hint.
+		const lang = isValidBcp47LanguageTag(rawLang) ? rawLang : undefined;
 		const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
 		return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) } as any;
 	}
