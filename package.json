@@ -22,6 +22,8 @@
     "@rollup/plugin-typescript": "^12.1.4",
     "diff": "^8.0.2",
     "jsdom": "^29.1.1",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
     "rollup": "^4.9.1",
     "tslib": "^2.4.0",
     "typescript": "^5.0.3"
@@ -34,7 +36,8 @@
     "dev": "npm run build && npm run serve",
     "test": "npm run build && playwright test",
     "test:track-changes": "npm run build && node scripts/test-track-changes.mjs",
-    "test:interop": "npm run build && playwright test --config=playwright.interop.config.ts"
+    "test:interop": "npm run build && playwright test --config=playwright.interop.config.ts",
+    "test:conformance": "npm run build && playwright test --config=playwright.conformance.config.ts"
   },
   "files": [
     "dist"

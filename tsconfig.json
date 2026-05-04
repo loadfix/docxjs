@@ -23,6 +23,7 @@
     "node_modules",
     "playwright.config.ts",
     "playwright.interop.config.ts",
+    "playwright.conformance.config.ts",
     "tests"
   ]
 }

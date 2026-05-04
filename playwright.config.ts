@@ -7,6 +7,9 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './tests',
   testMatch: ['**/*.spec.ts', '**/*.spec.js'],
+  // Conformance and interop suites have their own configs; keep the
+  // smoke suite (`npm test`) scoped to tests/render-test & friends.
+  testIgnore: ['**/tests/conformance/**', '**/tests/interop/**'],
   fullyParallel: true,
   retries: 0,
   workers: 4,
