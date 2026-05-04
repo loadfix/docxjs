@@ -66,6 +66,15 @@ All string content in a DOCX is attacker-controlled. Treat `author`, `id`, `para
 - `.github/workflows/` is intentionally empty (removed 2026-05-01). No automated checks run on PRs; rely on local build + harness + Playwright.
 - `dist/` is committed. Rebuild before any commit that touches `src/`.
 
+### Keep README.md and TODO.md current
+
+Whenever a feature is added, removed, or a public option changes, update both of these files *in the same PR* as the code change — stale docs have bitten us before.
+
+- **`README.md`** — the API block reflects the real `Options` interface. If you add/remove an option (including nested ones like `comments.*` or `changes.*`), add/remove a row in the API code block. If you add or remove an `export` in `src/docx-preview.ts`, reflect it in the API section. The "Breaks" / "Thumbnails" / "Status" prose should also match reality — e.g. if `experimentalPageBreaks` gains a capability, call it out there.
+- **`TODO.md`** — if the change resolves an upstream issue listed under "Bugs to investigate" or "New features to consider", move that entry into the "Resolved in fork" table with a one-line description and the PR number. Update the counts table at the top and bump the "last updated" date.
+
+Minimum check before every PR that touches `src/`: `grep -n "<option name>" README.md TODO.md` to catch stale references.
+
 ## Parallelising work with subagents
 
 When there are multiple independent tasks (bug fixes on different files, triage of many issues, a set of small low-risk patches), prefer spawning **multiple subagents in parallel** over working through them sequentially. The Agent tool accepts `run_in_background: true` — use it. Typical win: 5 small fixes in ~2 minutes wall-clock instead of 10 minutes sequential.
