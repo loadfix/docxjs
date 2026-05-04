@@ -212,3 +212,192 @@ request for a reproducing DOCX.
 - Reviewed PR #23 (our security fix) is why #194 shifted from
   `upstream-pr-worth-adopting` to `resolved-in-fork` between the initial
   triage and the final report.
+
+---
+
+## Missing Word features (read-only)
+
+Audit conducted 2026-05-02 by comparing the renderer against ECMA-376 /
+WordprocessingML read-only fidelity. Each item is categorised as **Not
+implemented**, **Partial**, or **Gap** (the case works today but is known
+to miss significant sub-cases). Source pointers use `file:line` where
+feasible; upstream issues already tracking the same case are
+cross-referenced inline.
+
+### Text and typography
+
+Run-level formatting covered: `b`, `i`, `u` (all `val` variants →
+`text-decoration`), `strike`, `caps`, `smallCaps`, `color`, `sz`,
+`position`, `rFonts` (ascii/asciiTheme/eastAsia), `highlight`, `shd`,
+`vertAlign` (via `verticalAlign` → `<sub>/<sup>` wrapping),
+`bdr` (character borders). Everything below is missing or partial.
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| `w:kern` (kerning threshold) | Not implemented | `document-parser.ts:1461` — case is present but commented out. |
+| `w:spacing` on `w:rPr` (character spacing / tracking) | Not implemented | `document-parser.ts:1484` — the `spacing` branch only runs when `elem.localName == "pPr"`, so run-level character spacing is dropped. No `letter-spacing` is ever emitted. |
+| `w:w` (character scale, e.g. stretch to 150%) | Not implemented | No `w` / `scale` branch in `parseDefaultProperties`. |
+| `w:emboss`, `w:imprint`, `w:outline`, `w:shadow` (text effects) | Not implemented | No cases in `parseDefaultProperties` (`document-parser.ts:1349+`). Would need `text-shadow` / `-webkit-text-stroke`. |
+| `w:dstrike` (double strikethrough) | Not implemented | Only `strike` is handled (`document-parser.ts:1402`). |
+| `w:vanish` / `w:specVanish` (hidden text) | Gap | `vanish` emits `display: none` (`document-parser.ts:1456`). `specVanish` is not handled; Word distinguishes field-hidden from user-hidden. |
+| `w:em` (East-Asian emphasis marks: dot above/below, comma, circle) | Not implemented | No case. Would need `text-emphasis` CSS. |
+| `w:ruby` / phonetic guides (furigana) | Not implemented | No branch in `parseRun` or `parseParagraph` for `ruby` / `rubyBase` / `rt`. Ruby runs are silently dropped. |
+| `w:fitText` (combined characters / fit-to-width) | Not implemented | No case in parser. |
+| `w:cs`, `w:rtl` on runs (complex-script bold/italic/RTL run marker) | Partial | `rtl`/`bidi` set `direction: rtl` on paragraphs (`document-parser.ts:1502`) but `cs`, `bCs`, `iCs`, `szCs` are explicitly ignored (`1508`). Complex-script font size never propagates. |
+| `w:bdo` (explicit bidi override) | Not implemented | No case in parser. |
+| `w:softHyphen` | Not implemented | `parseRun` handles `noBreakHyphen` only (`document-parser.ts:805`); `softHyphen` is dropped. The CSS equivalent is a U+00AD. |
+| `w:lang` (run / paragraph language) | Partial | Parsed as `$lang` in the style map (`document-parser.ts:1498`) but never emitted as a `lang` HTML attribute — screen readers and browser hyphenation don't see it. |
+| `w:vertAlign val="baseline"` reset inside a superscript ancestor | Gap | `renderRun` wraps children in `<sub>/<sup>` whenever `verticalAlign` is set (`html-renderer.ts:1852`), but nested runs that explicitly reset back to baseline aren't unwrapped. |
+| Font substitution chain (`w:altName`, `w:panose1`, `w:sig`) | Not implemented | Only `ascii`/`asciiTheme`/`eastAsia` names are read (`document-parser.ts:1591`). Embedded fonts from `fontTable.xml` are loaded by `word-document.ts:176` but no fallback chain is constructed; unsupported font families show the browser default. |
+| `w:hps` / `w:hpsRaise` (Asian phonetic size) | Not implemented | No ruby pipeline at all. |
+| `w:cr` run element (explicit carriage return, distinct from `w:br`) | Not implemented | No case in `parseRun` (`document-parser.ts:753`). `w:br type="page"` is handled. |
+
+### Paragraphs and sections
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| `w:widowControl`, `w:keepNext`, `w:keepLines`, `w:pageBreakBefore` | Not implemented | All parsed into `WmlParagraph` (`document/paragraph.ts:81-91`) but never emitted as CSS (`break-before`/`break-inside`/`break-after`). The cases in `parseDefaultProperties` (`document-parser.ts:1519-1521`) are explicit no-ops. |
+| `w:pBdr` art borders (`apples`, `stars` etc.) | Gap | `parseBorderProperties` only knows left/right/top/bottom (`document-parser.ts:1678`). Art border values via `w:art` on any `cnf` are dropped. |
+| `w:pgBorders` (page borders) | Not implemented | Parsed into `SectionProperties.pageBorders` (`document/section.ts:113`) but never consumed by the renderer — `grep pageBorders html-renderer.ts` returns nothing. |
+| `w:lnNumType` (line numbering) | Not implemented | Not parsed by `parseSectionProperties` (`document/section.ts:68`). |
+| `w:docGrid` (Asian character grid layout) | Not implemented | Not parsed; all body text is laid out with HTML line-height defaults only. |
+| Drop cap via `w:framePr dropCap` (drop / margin) | Partial | `parseFrame` emits `float: left` unconditionally when `dropCap == "drop"` (`document-parser.ts:704`). No font-size scaling, no `lines` attribute support, no `margin` variant styling. |
+| Tab stops: decimal, bar, custom leaders (heavy/middleDot) | Gap | `javascript.ts:83` maps `dot/middleDot` → dotted underline and `hyphen/heavy/underscore` → solid underline; `decimal` and `bar` tab styles aren't handled (`tab.style == "right"` / `"center"` is), and the tab engine only runs when `options.experimental` is truthy (`html-renderer.ts:1833`), so by default all tabs render as a single em-space (` `). See upstream #178 above. |
+| Multiple `w:tab` stops — default spacing & alignment | Partial | When `experimental` is on, stops sort and apply, but the computation depends on live layout and mis-handles right/centre tabs inside wrapped lines. See upstream #178. |
+| Numbering: `w:lvlRestart`, `w:isLgl` (legal-style forced arabic), `w:lvlJc`, `w:suff` beyond "tab" | Partial | `parseNumberingLevel` (`document-parser.ts:490`) reads `start`, `lvlText`, `numFmt`, `suff`, `lvlPicBulletId`. `lvlRestart`, `isLgl`, `lvlJc`, `legacy` are not parsed. Multilevel lists only restart at the next lower level via CSS `counter-set` (`html-renderer.ts:1110`), which is close to correct but doesn't honour an explicit `w:lvlRestart` in between. |
+| `w:num` `w:lvlOverride` / `w:startOverride` | Not implemented | Only the `num` → `abstractNumId` mapping is read (`document-parser.ts:450`). Overrides per `numId` aren't parsed, so restarting a shared abstract numbering inside a doc is ignored. |
+| `w:pPr w:sectPr` mid-section continuation vs `nextPage` / `evenPage` / `oddPage` | Partial | Section splitting is in `splitBySection` (`html-renderer.ts`); `type` is parsed but `evenPage`/`oddPage` forcing blank pages isn't implemented (page-break.ts is visual-only). |
+| `w:settings evenAndOddHeaders` | Not implemented | `renderHeaderFooter` (`html-renderer.ts:506`) picks the `"even"` reference on odd-indexed pages unconditionally. The DOCX toggle that controls whether even/odd headers apply (`w:evenAndOddHeaders` in settings.xml) is not parsed (`settings/settings.ts`). Result: the `even` header fires even when the document only defined it as a placeholder. |
+| Different-first-page header/footer across sections beyond page 1 | Gap | `firstOfSection` is passed in (`html-renderer.ts:506`) but `titlePage` is a per-section boolean; if two sections both have `titlePage` the first page of the second section won't always land on the first-type header. |
+| `w:mirrorMargins` | Not implemented | Not parsed. Margin values are applied as-is to every page. |
+| `w:cols` equalWidth=false + explicit per-`w:col` widths | Gap | `parseColumns` reads per-col widths (`document/section.ts:126`) but `createSectionContent` (`html-renderer.ts:446`) only emits `column-count`/`column-gap`, discarding the per-column array. |
+| Watermarks (header VML shape with `o:bullet="t"` / DrawingML behind text) | Gap | VML shapes render inline (`vml/vml.ts`), but `behindDoc` from the drawing anchor is parsed (`document-parser.ts:980`) and then ignored, so the shape isn't layered under the body. |
+| Footnote/endnote placement policy (bottom-of-page vs end-of-section) | Partial | Footnotes are appended per page at section end (`html-renderer.ts:486`), not positioned at the actual physical bottom. Numbering restart policies (`numRestart` in `footnotePr`) aren't parsed. |
+| Paragraph outline level → structural heading | Gap | `outlineLvl` is parsed into `paragraph.outlineLevel` (`document/paragraph.ts:93`) but the renderer always emits `<p>` (`html-renderer.ts:1417`); there's no mapping to `<h1>`..`<h6>` even when a style is linked to `Heading 1`. |
+
+### Tables
+
+Implemented: `tblLayout` fixed/auto (`document-parser.ts:1476`), `tblW`,
+`gridCol`, `gridSpan` for horizontal merge, `vMerge restart/continue` for
+vertical merge, `cnfStyle` class-based conditional formatting, first/last
+row/col via `tblLook`, banded rows/cols, cell vertical alignment,
+`textDirection` (btLr / lrTb / tbRl), cell/table borders per-edge,
+`tblCellSpacing`, `trHeight` exact/atLeast, `tblStyle` with
+`tblStylePr` for `firstRow`/`lastRow`/`firstCol`/`lastCol`/band
+variants.
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| Diagonal cell borders (`w:tl2br`, `w:tr2bl`) | Not implemented | `parseBorderProperties` only walks `start/end/left/right/top/bottom` (`document-parser.ts:1678`). Diagonals need SVG or `linear-gradient`. |
+| `w:tblHeader` repeating header rows across page breaks | Partial | `row.isHeader` is set (`document-parser.ts:1242`) but the renderer never re-emits the row on each new page. The visual pagination pass (`page-break.ts`) splits on row boundaries but does not duplicate headers. |
+| `w:cantSplit` on a row | Not implemented | Not parsed; page-break.ts is free to break inside a row. |
+| `w:tblInd` | Partial | `tblInd` → `parseIndentation` sets `margin-inline-start` (`document-parser.ts:1427`). Mixed with `tblpPr` float it stacks oddly. |
+| `w:tblpPr` float positioning with `leftFromText`/`rightFromText` | Partial | `parseTablePosition` emits `float: left` unconditionally (`document-parser.ts:1209`), ignoring `horzAnchor`/`vertAnchor` semantics and `tblpX`/`tblpY`. |
+| `w:noWrap` on cell | Not implemented | Case exists but is commented out (`document-parser.ts:1466`). |
+| `w:tblStyleColBandSize` / `w:tblStyleRowBandSize` numeric values | Partial | Parsed into `table.colBandSize` / `rowBandSize` (`document-parser.ts:1169`) but only the boolean presence of banding is used; a colBandSize of 2 (every 2nd column banded) isn't honoured — the class selector targets `odd-col`/`even-col`. |
+| Table style `tblStylePr type="band2Horz"` conditional formatting with a band > 1 | Gap | Same root cause as above. |
+| `w:tblBorders` inside a `tblStylePr` (first-row borders only) | Gap | `parseTableStyle` emits `tblPr`/`tcPr` values via the generic default-properties path (`document-parser.ts:420`); `tblBorders` inside a conditional sub-style attach to the whole selector and can over-border sibling cells. |
+| Nested tables | Gap | Supported structurally (`parseTableCell` handles `tbl`, `document-parser.ts:1281`) but CSS inheritance from the outer `tblStyle` cascades into nested tables in a way Word doesn't. |
+| `w:shd` with `w:color`/`w:val` patterns (solid, pct, diagStripe) | Partial | Only `fill` is read (`document-parser.ts:1373`); pattern values (`pct10`, `diagStripe`, `clear`) fall through to the solid fill. |
+
+### Graphics (DrawingML / VML)
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| DrawingML shapes `wps:wsp` (rectangle, ellipse, triangles, arrows, callouts, stars) | Not implemented | `parseGraphic` switch only handles `pic` (`document-parser.ts:1064`). See #167 above. |
+| DrawingML shape groups `wpg:wgp` | Not implemented | Same switch (`document-parser.ts:1062`). See #167. |
+| DrawingML text boxes `wps:txbx` | Not implemented | Same site. See #80 / #97 above. |
+| Custom geometry `a:custGeom` | Not implemented | No DrawingML SVG pipeline at all. |
+| SmartArt (`dgm:relIds`) | Not implemented | Not parsed; SmartArt content is silently dropped. |
+| Charts (`c:chart`) | Not implemented | Not parsed; see #57 / #91 / #189 above. |
+| WordArt / `a:gradFill`, `a:pattFill`, `a:blipFill` on shapes | Not implemented | No shape pipeline. |
+| VML path / 3D / shadow | Partial | `parseVmlElement` (`vml/vml.ts:31`) handles `rect`, `oval`, `line`, `shape`, `textbox`, `stroke`, `fill`, `imagedata`. `path`, `shadow`, `extrusion`, `fill type="gradient"` / `type="pattern"` fall through (see `parseFill`, `vml/vml.ts:129` — the body is commented out). |
+| VML `v:group` with transformed coordinate spaces | Gap | Children render but `coordsize`/`coordorigin` on the group aren't applied; nested shapes appear at wrong offsets. |
+| Image wrap mode `wrapSquare` | Not implemented | `parseDrawingWrapper` only recognises `wrapTopAndBottom` and `wrapNone` (`document-parser.ts:1016-1021`). `wrapSquare` falls through and the image renders inline. See upstream #102/#130/#155-159. |
+| Image wrap mode `wrapTight` | Not implemented | Same switch. Polygon wrap paths (`wrapPolygon`) aren't parsed either. |
+| Image wrap mode `wrapThrough` | Not implemented | Same. |
+| Image positioning `relativeFrom="margin"`/`"column"`/`"paragraph"` | Partial | `parseDrawingWrapper` captures `relative` but always translates `align` into `float` or `text-align` regardless of anchor (`document-parser.ts:1052`). `column`-relative and `paragraph`-relative coordinates are not honoured. |
+| `w:distT/B/L/R` (text-wrap padding around image) | Not implemented | Case commented out (`document-parser.ts:972-976`). |
+| Image `a:srcRect` crop | Implemented | `parsePicture` (`document-parser.ts:1076`) + `renderImage` emits `clip-path` + a compensating `scale()` transform (`html-renderer.ts:1627`). |
+| Image `a:tile` / `a:stretch` variants beyond default | Partial | Only `blipFill@embed` is read; `a:tile`, `a:stretch/a:fillRect` are ignored. |
+| Image effects: `a:alphaModFix` (transparency), `a:duotone`, `a:lum`, `a:biLevel` | Not implemented | No DrawingML effect pipeline. |
+| Image rotation (`xfrm@rot`) | Implemented | `document-parser.ts:1095` → `renderImage` (`html-renderer.ts:1633`). |
+| WMF / EMF image decoding | Not implemented | No decoder; `loadDocumentImage` passes the blob straight to `URL.createObjectURL` (`word-document.ts:166`). Browsers cannot display `image/x-wmf` or `image/x-emf`, so these images appear broken. See upstream #51. |
+| TIFF support | Gap (out of scope) | Demo has a TIFF preprocessor; library itself relies on browser. |
+| OLE objects (`w:object` / `o:OLEObject`) | Not implemented | No `object` branch in `parseRun`. OLE-embedded spreadsheets, equations in the legacy Equation Editor, etc. are dropped. |
+| Equations: `acc` (accent), `borderBox`, `sSubSup`, `phant`, `sGroup` | Not implemented | `mmlTagMap` (`document-parser.ts:85`) omits `acc`, `borderBox`, `sSubSup`, `phant`, `sGroup`. Legacy Equation Editor 3.x embeds (via OLE) are also dropped (see above). |
+| Equations: nary operator positioning (`limLoc="undOvr"` / `"subSup"`) | Gap | `parseMathProperies` reads `chr`/`vertJc`/`pos` (`document-parser.ts:894`) but `limLoc` is not parsed, so n-ary with under/over limits always renders as `<msubsup>` regardless. |
+| Equations: `ctrlPr` run-level math formatting | Partial | Only `chr`/`vertJc`/`pos`/`degHide`/`begChr`/`endChr` are parsed. |
+
+### Fields and content
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| Simple field (`w:fldSimple`) — PAGE, NUMPAGES, DATE, TIME, AUTHOR, FILENAME, TOC, REF, HYPERLINK, SEQ, LISTNUM, MERGEFIELD, IF, ASK, FILLIN, INCLUDETEXT, STYLEREF | Not implemented | `WmlFieldSimple` is parsed (`document-parser.ts:778`) but `renderElement` has no `case DomType.SimpleField`. The run wrapping the field is marked `fieldRun = true` and `renderRun` early-returns `null` (`html-renderer.ts:1847`) — so simple fields render as an empty node. |
+| Complex fields (`w:fldChar begin/separate/end`) — any instruction code | Not implemented | `WmlFieldChar` / `WmlInstructionText` are parsed (`document-parser.ts:787/795`) but no renderer case; the separate-end text (the cached result) is swallowed by the `fieldRun = true` guard. See upstream #4 for TOC specifically. |
+| Cross-references (`REF`, `PAGEREF`, internal `HYPERLINK \l`) rendered as clickable | Not implemented | Bookmarks emit an empty `<span id=name>` (`html-renderer.ts:1842`), but there's no field pipeline to turn a `REF _Toc12345` into an `<a href="#_Toc12345">`. Hyperlinks via `w:hyperlink w:anchor` work (`renderHyperlink`, `html-renderer.ts:1505`). |
+| `w:sdt` content controls — rich/plain text | Partial | `parseSdt` extracts `sdtContent` and recurses (`document-parser.ts:541`). The structured wrapper type is lost, so a rich-text control vs a block is indistinguishable. |
+| `w:sdt` checkbox, dropdown, date picker, picture, building-block gallery | Not implemented | Same site. Checkbox state (`w14:checkbox w14:checked`) is not read — unchecked/checked glyph is always whatever's in `sdtContent`. See upstream PR #65 above. |
+| Glossary documents (`/word/glossary/document.xml`) | Not implemented | Not loaded by `word-document.ts`. |
+| Data-bound `w:sdt` pulling from custom XML parts | Not implemented | Custom XML parts aren't loaded. |
+| `w:altChunk` embedded HTML / RTF content | Not implemented (intentional) | Parser emits an `AltChunk` node (`document-parser.ts:578`); renderer returns `null` with a security comment (`html-renderer.ts:1386`). Live content from an embedded chunk is never shown. |
+| Form fields (`FORMTEXT`, `FORMCHECKBOX`, `FORMDROPDOWN`) | Not implemented | Same field-code gap; see simple/complex fields above. |
+| Hyperlink tooltip (`w:tooltip`) | Not implemented | `parseHyperlink` (`document-parser.ts:711`) does not read the `w:tooltip` attribute; the `title` attribute on `<a>` is never set. |
+| `<mc:AlternateContent>` fallback | Implemented | `checkAlternateContent` (`document-parser.ts:941`) picks `Choice` when the namespace is supported, else `Fallback`. |
+| Bookmark columns (`w:colFirst`/`w:colLast` on table bookmarks) | Gap | Parsed (`document/bookmarks.ts:15`) but never applied — bookmark renders as a zero-width span regardless of cell range. |
+
+### Document-level
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| Document properties exposed in rendered output (title, author) | Not implemented | `src/document-props` is parsed but never emitted to DOM. Not usually shown in Word either — noted only for completeness. |
+| Document protection markers (`w:documentProtection`) | Not implemented | Not parsed; no visual affordance (e.g. "protected"). |
+| Compatibility settings (`w:compat`) | Not implemented | Not parsed; rendering always uses modern line-height defaults, which diverges from Word 2003 compat mode. |
+| W3C XML digital signatures | Not implemented | Not applicable to read-only rendering beyond showing a "signed" badge; no surface. |
+
+### Accessibility and semantics
+
+| Item | Status | Source pointer / notes |
+|---|---|---|
+| Image alt text (`wp:docPr@descr`, `a:blip.../@descr`) | Not implemented | `parsePicture` (`document-parser.ts:1072`) reads `embed` only; `cNvPr@descr` (and the 2010+ `wp:docPr@descr`) is dropped. See #124 above. |
+| Heading outline (`<h1>`..`<h6>` emission) | Not implemented | `renderParagraph` always emits `<p>` (`html-renderer.ts:1417`). Even paragraphs whose style is named `heading 1` render as `<p class="heading-1">`, so screen-reader landmarks and PDF tagging are absent. |
+| Run / paragraph `w:lang` → HTML `lang` attribute | Not implemented | Parsed as `$lang` in the style object (`document-parser.ts:1498`) but never emitted. Also blocks correct browser hyphenation. |
+| Paragraph `docRole` / structured-tag accessibility | Not implemented | Not parsed. |
+| `w:sdt` alias/tag as `aria-label` | Not implemented | `parseSdt` drops the wrapper entirely. |
+| Table header role (`w:tblHeader` → `scope="col"`) | Not implemented | Rows are still `<tr>`; cells are `<td>` not `<th>`, even when `isHeader` is set. |
+| `w:style.uiPriority` / `w:hidden` style used to hide auto-TOC rows | Not implemented | Parsed but ignored at `document-parser.ts:341-348`. |
+
+### Priority recommendation
+
+For real-world academic and business documents, the five items that would
+most improve perceived fidelity:
+
+1. **Field results rendering** (PAGE, NUMPAGES, TOC, REF, HYPERLINK,
+   DATE, SEQ). Virtually every business/academic DOCX relies on field
+   results. The cached result is already in the XML between
+   `fldChar/@separate` and `fldChar/@end`; we only need to emit it instead
+   of dropping it in `renderRun`'s `fieldRun` guard. This single fix
+   resolves TOC rendering (#4), page numbers in headers, cross-references
+   in academic papers, and mail-merge previews.
+2. **DrawingML shapes and text boxes** (`wps:wsp`, `wps:txbx`, basic
+   `wpg:wgp`). Currently silently dropped at `parseGraphic`
+   (`document-parser.ts:1064`). Addresses #80, #97, #167 and the whole
+   #155–#159 cluster. A minimal SVG-based renderer for preset geometries
+   (rect, ellipse, line, arrow, callout) plus text-box content would
+   unblock many real-world docs.
+3. **Float wrap modes `wrapSquare` / `wrapTight`** in
+   `parseDrawingWrapper` (`document-parser.ts:1016`). Today anything but
+   "top and bottom" or "in front/behind text" renders inline, causing
+   issue-cluster #102/#130/#155-159. `wrapSquare` in particular is a
+   one-line addition (apply `float` with `shape-margin`).
+4. **Heading outline and `lang` attribute emission**. Promote paragraphs
+   styled as Heading 1..6 (or with `outlineLvl` 0..5) to real `<h1>..<h6>`
+   and emit `lang` on runs. Both are a small diff in `renderParagraph` /
+   `renderRun` and dramatically improve accessibility, SEO, and browser
+   hyphenation, all without changing visual output.
+5. **Numbered list restart + `lvlOverride` / `startOverride`**. Real docs
+   re-use abstract numbering across sections (legal contracts,
+   requirement specs) and break when the same `numId` appears twice
+   without honouring `startOverride`. Adds a small parser change in
+   `parseNumberingFile` (`document-parser.ts:434`) and one CSS
+   `counter-reset` on the paragraph with the override.
