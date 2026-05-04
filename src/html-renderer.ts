@@ -30,8 +30,10 @@ import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReferen
 import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
-import { DrawingShape, DrawingGroup } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
 import { renderShape, renderShapeGroup } from './drawing/shapes';
+import { ChartPart } from './charts/chart-part';
+import { renderChart as renderChartSvg } from './charts/render';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -1606,6 +1608,9 @@ section.${c}>ol>li::before {
 			case DomType.DrawingGroup:
 				return this.renderDrawingShapeGroup(elem as DrawingGroup);
 
+			case DomType.Chart:
+				return this.renderChart(elem as DrawingChart);
+
 			case DomType.Text:
 				return this.renderText(elem as WmlText);
 
@@ -2442,6 +2447,41 @@ section.${c}>ol>li::before {
 		}
 
 		return result;
+	}
+
+	// Renders a <c:chart> reference by looking up the associated
+	// ChartPart through the current part's relationship map, then
+	// delegating to the SVG renderer in src/charts/render.ts.
+	//
+	// The rel id is DOCX-controlled; we look it up via findPartByRelId
+	// (a Map lookup) so there's no way for an attacker-supplied string
+	// to break out of an attribute or selector. A missing chart part
+	// falls back to an empty inline-block so the caller's layout
+	// doesn't collapse.
+	renderChart(elem: DrawingChart): HTMLElement {
+		const fallback = this.createElement("span");
+		fallback.className = `${this.className}-chart`;
+		fallback.style.display = "inline-block";
+
+		if (!elem.relId || !this.document) return fallback;
+
+		const part = this.document.findPartByRelId(
+			elem.relId,
+			this.currentPart ?? this.document.documentPart,
+		);
+		if (!part || !(part instanceof ChartPart) || !part.chart) return fallback;
+
+		try {
+			const svg = renderChartSvg(part.chart);
+			const wrapper = this.createElement("span");
+			wrapper.className = `${this.className}-chart`;
+			wrapper.style.display = "inline-block";
+			wrapper.appendChild(svg);
+			return wrapper;
+		} catch {
+			// Never let a malformed chart abort the whole render.
+			return fallback;
+		}
 	}
 
 	renderText(elem: WmlText) {

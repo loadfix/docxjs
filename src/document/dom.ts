@@ -79,7 +79,8 @@ export enum DomType {
     RubyBase = "rubyBase",
     RubyText = "rubyText",
     FitText = "fitText",
-    BidiOverride = "bidiOverride"
+    BidiOverride = "bidiOverride",
+    Chart = "chart"
 }
 
 // Structured Document Tag (content control). Parsed from w:sdt when

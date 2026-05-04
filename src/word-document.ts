@@ -18,6 +18,7 @@ import { SettingsPart } from "./settings/settings-part";
 import { CustomPropsPart } from "./document-props/custom-props-part";
 import { CommentsPart } from "./comments/comments-part";
 import { CommentsExtendedPart } from "./comments/comments-extended-part";
+import { ChartPart } from "./charts/chart-part";
 import { ContentType } from "./common/content-types";
 
 const topLevelRels = [
@@ -144,6 +145,13 @@ export class WordDocument {
 
 			case RelationshipTypes.CommentsExtended:
 				this.commentsExtendedPart = part = new CommentsExtendedPart(this._package, path);
+				break;
+
+			case RelationshipTypes.Chart:
+				// Chart parts live under /word/charts/. The renderer
+				// resolves them from the enclosing (document / header /
+				// footer) part's relationship map.
+				part = new ChartPart(this._package, path);
 				break;
 		}
 
