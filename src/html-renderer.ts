@@ -132,6 +132,12 @@ export class HtmlRenderer {
 	currentVerticalMerge: CellVerticalMergeType = null;
 	tableCellPositions: CellPos[] = [];
 	currentCellPosition: CellPos = null;
+	// Band sizes (w:tblStyleColBandSize / w:tblStyleRowBandSize) for the
+	// current table. A value of 1 means alternate every row/column (the
+	// classic zebra stripe); 2 means alternate every two, etc. Pushed
+	// as a stack so nested tables restore the outer sizes on exit.
+	tableBandSizes: { col: number; row: number }[] = [];
+	currentTableBandSizes: { col: number; row: number } = { col: 1, row: 1 };
 	// Set while rendering a WmlTableRow whose isHeader is true so
 	// renderTableCell can emit <th scope="col"> instead of <td>.
 	private currentRowIsHeader: boolean = false;
@@ -2188,15 +2194,45 @@ section.${c}>ol>li::before {
 		this.currentVerticalMerge = {};
 		this.currentCellPosition = { col: 0, row: 0 };
 
+		// Track band sizes so renderTableRow / renderTableCell can emit
+		// data-band attributes that account for tblStyleColBandSize /
+		// tblStyleRowBandSize > 1. Push/pop around nested tables.
+		this.tableBandSizes.push(this.currentTableBandSizes);
+		this.currentTableBandSizes = {
+			col: Math.max(1, elem.colBandSize ?? 1),
+			row: Math.max(1, elem.rowBandSize ?? 1),
+		};
+
 		const children = [];
 
 		if (elem.columns)
 			children.push(this.renderTableColumns(elem.columns));
 
-		children.push(...this.renderElements(elem.children));
+		// Split children into header rows (w:tblHeader set) and
+		// everything else. Header rows go into a <thead> so the visual
+		// pagination helper (splitTableAtRowBoundary) can clone them
+		// onto every sub-page. Non-row siblings (e.g. bookmarks) stay in
+		// document order inside <tbody> where they would otherwise land.
+		const headerRendered: Node[] = [];
+		const bodyRendered: Node[] = [];
+		for (const child of (elem.children ?? [])) {
+			const rendered = this.renderElement(child as any);
+			if (rendered == null) continue;
+			const bucket = (child.type === DomType.Row && (child as WmlTableRow).isHeader) ? headerRendered : bodyRendered;
+			if (Array.isArray(rendered)) bucket.push(...rendered);
+			else bucket.push(rendered);
+		}
+
+		if (headerRendered.length > 0) {
+			children.push(this.h({ tagName: "thead", children: headerRendered }));
+		}
+		if (bodyRendered.length > 0) {
+			children.push(this.h({ tagName: "tbody", children: bodyRendered }));
+		}
 
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
+		this.currentTableBandSizes = this.tableBandSizes.pop();
 		return this.toHTML(elem, ns.html, "table", children);
 	}
 
@@ -2247,6 +2283,17 @@ section.${c}>ol>li::before {
 		this.currentCellPosition.row++;
 
 		const tr = this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+
+		// Project row-level metadata onto data-* attributes. All values
+		// are numeric or empty strings; no DOCX-derived text reaches CSS.
+		if (elem.cantSplit) {
+			tr.setAttribute("data-cant-split", "");
+		}
+		const rowBandSize = this.currentTableBandSizes.row;
+		if (rowBandSize > 0) {
+			const rowIdx = Math.max(0, (this.currentCellPosition.row - 1) | 0);
+			tr.setAttribute("data-band", String(Math.floor(rowIdx / rowBandSize) % 2));
+		}
 
 		// Attach column-range bookmarks to the rendered row. The anchor span
 		// is placed as the first child of the first cell in the range so
@@ -2330,6 +2377,17 @@ section.${c}>ol>li::before {
 		// Header rows (w:tblHeader on w:trPr) emit <th scope="col"> so screen
 		// readers can associate data cells with their column header.
 		const tagName = this.currentRowIsHeader ? "th" : "td";
+
+		// Extract $-prefixed metadata keys (diagonal borders, etc.) from
+		// cssStyle before rendering so they don't leak into the style
+		// attribute. toH builds the <td>/<th> from cssStyle as-is; html.ts
+		// assigns via Object.assign(result.style, …), which would silently
+		// drop these anyway, but styleToString would emit them verbatim
+		// for first-row/first-col CNF selectors. Skipping them here also
+		// keeps the style string clean in devtools.
+		const diagTlBr = elem.cssStyle?.["$diag-tlbr"];
+		const diagTrBl = elem.cssStyle?.["$diag-trbl"];
+
 		let result = this.toHTML(elem, ns.html, tagName);
 		if (this.currentRowIsHeader) {
 			(result as HTMLTableCellElement).setAttribute("scope", "col");
@@ -2352,9 +2410,94 @@ section.${c}>ol>li::before {
 		if (elem.span)
 			result.colSpan = elem.span;
 
+		// Column band index — uses the *starting* column (before colSpan
+		// advances), computed modulo the column band size. Emitted only
+		// on the cell, not on the row, so horizontally-banded styles
+		// (tr[data-band="1"] td) and vertically-banded styles
+		// (td[data-band="1"]) both work.
+		const colBandSize = this.currentTableBandSizes.col;
+		if (colBandSize > 0) {
+			result.setAttribute("data-band", String(Math.floor(this.currentCellPosition.col / colBandSize) % 2));
+		}
+
 		this.currentCellPosition.col += result.colSpan;
 
+		// Diagonal borders: emit an absolutely-positioned inline SVG
+		// behind the cell's existing content. The cell needs
+		// position:relative so the SVG's inset:0 anchors correctly; and
+		// any content that was already appended by toHTML gets wrapped
+		// in a z-index:1 div so it sits above the line. Border values
+		// are emitted by parseBorderProperties as "<size> <type> <color>"
+		// strings built from xml.lengthAttr + xmlUtil.colorAttr — both
+		// allowlisted, no raw DOCX text.
+		if (diagTlBr || diagTrBl) {
+			this.applyDiagonalBorders(result as HTMLTableCellElement, diagTlBr, diagTrBl);
+		}
+
 		return result;
+	}
+
+	// Extract the stroke colour from a border string of shape
+	// "<size> <type> <color>" as produced by values.valueOfBorder.
+	// color-slot is space-separated tail, so everything after the second
+	// space is the colour. Returns a safe fallback when the shape is
+	// unexpected.
+	private parseBorderStroke(border: string | undefined): { color: string; width: string } {
+		if (!border || border === "none") return { color: "black", width: "1" };
+		const parts = border.split(/\s+/);
+		if (parts.length < 3) return { color: "black", width: "1" };
+		// Width parts look like "0.50pt"; drop unit for SVG stroke-width
+		// (SVG default unit is the user coordinate).
+		const w = parts[0].replace(/pt$/, "");
+		const color = parts.slice(2).join(" ");
+		return { color, width: w || "1" };
+	}
+
+	private applyDiagonalBorders(cell: HTMLTableCellElement, tlBr?: string, trBl?: string) {
+		// Move existing children into a content wrapper so they sit
+		// above the diagonal overlay via z-index.
+		const existing = Array.from(cell.childNodes);
+		const content = this.h({ tagName: "div", style: { position: "relative", zIndex: "1" } }) as HTMLDivElement;
+		for (const node of existing) content.appendChild(node);
+
+		// Inline SVG overlay. preserveAspectRatio="none" lets the line
+		// scale with the cell. All values are numeric/allowlisted.
+		const overlay = this.h({
+			ns: ns.svg,
+			tagName: "svg",
+			style: { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "0" },
+			preserveAspectRatio: "none",
+			viewBox: "0 0 100 100",
+		}) as SVGSVGElement;
+
+		if (tlBr) {
+			const { color, width } = this.parseBorderStroke(tlBr);
+			const line = this.h({
+				ns: ns.svg,
+				tagName: "line",
+				x1: "0", y1: "0", x2: "100", y2: "100",
+				stroke: color,
+				"stroke-width": width,
+				vectorEffect: "non-scaling-stroke",
+			}) as SVGLineElement;
+			overlay.appendChild(line);
+		}
+		if (trBl) {
+			const { color, width } = this.parseBorderStroke(trBl);
+			const line = this.h({
+				ns: ns.svg,
+				tagName: "line",
+				x1: "100", y1: "0", x2: "0", y2: "100",
+				stroke: color,
+				"stroke-width": width,
+				vectorEffect: "non-scaling-stroke",
+			}) as SVGLineElement;
+			overlay.appendChild(line);
+		}
+
+		cell.style.position = cell.style.position || "relative";
+		cell.appendChild(overlay);
+		cell.appendChild(content);
 	}
 
 	renderVmlPicture(elem: OpenXmlElement) {
