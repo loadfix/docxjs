@@ -31,7 +31,7 @@ import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fie
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
 import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
-import { renderShape, renderShapeGroup } from './drawing/shapes';
+import { renderShape, renderShapeGroup, ShapeRenderContext } from './drawing/shapes';
 import { ChartPart } from './charts/chart-part';
 import { renderChart as renderChartSvg } from './charts/render';
 
@@ -250,6 +250,13 @@ export class HtmlRenderer {
 	// Set while rendering a WmlTableRow whose isHeader is true so
 	// renderTableCell can emit <th scope="col"> instead of <td>.
 	private currentRowIsHeader: boolean = false;
+
+	// Monotonic counter for counter-generated SVG ids emitted by the
+	// drawing shape renderer (gradients, patterns, filters). Never
+	// seeded from DOCX data — the prefix is hard-coded at each call
+	// site and the integer is internal. See src/drawing/shapes.ts
+	// `ShapeRenderContext` for the surface.
+	private _shapeIdCounter: number = 0;
 
 	footnoteMap: Record<string, WmlFootnote> = {};
 	endnoteMap: Record<string, WmlFootnote> = {};
@@ -2394,6 +2401,23 @@ section.${c}>ol>li::before {
 		return (emu ?? 0) / 9525;
 	}
 
+	// Build a per-render-pass context for the shape pipeline. The id
+	// generator is scoped to the HtmlRenderer instance so multiple
+	// shapes across a document don't collide on ids. Theme palette
+	// comes straight from the loaded <a:clrScheme>; resolveColour
+	// sanitises each entry before it reaches an attribute.
+	private buildShapeRenderContext(): ShapeRenderContext {
+		const self = this;
+		const paletteSrc = this.document?.themePart?.theme?.colorScheme?.colors ?? null;
+		return {
+			nextId(prefix: string): string {
+				self._shapeIdCounter += 1;
+				return `${prefix}-${self._shapeIdCounter}`;
+			},
+			themePalette: paletteSrc,
+		};
+	}
+
 	renderDrawingShape(elem: DrawingShape): HTMLElement {
 		// The preset-geometry SVG and optional <wps:txbx> paragraphs
 		// live in src/drawing/shapes.ts. We pass a TextRenderer
@@ -2403,6 +2427,7 @@ section.${c}>ol>li::before {
 			elem,
 			(emu) => this.emuToPx(emu),
 			(paragraphs) => this.renderElements(paragraphs),
+			this.buildShapeRenderContext(),
 		);
 		return result;
 	}
@@ -2419,6 +2444,7 @@ section.${c}>ol>li::before {
 				if (Array.isArray(rendered)) return rendered[0] ?? null;
 				return rendered;
 			},
+			this.buildShapeRenderContext(),
 		);
 	}
 
