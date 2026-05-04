@@ -4,7 +4,8 @@ import {
 	WmlHyperlink, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlSmartTag,
 	WmlTableRow,
-	WmlSdt
+	WmlSdt,
+	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
@@ -1761,6 +1762,26 @@ section.${c}>ol>li::before {
 
 			case DomType.Sdt:
 				return this.renderSdt(elem as WmlSdt);
+
+			case DomType.Ruby:
+				return this.renderRuby(elem as WmlRuby);
+
+			case DomType.RubyBase:
+				// Base characters — render inline; the <ruby> parent puts
+				// them before the <rt>. Wrapping in a <span> keeps child
+				// structure clean without adding semantic noise.
+				return this.renderContainer(elem, "span");
+
+			case DomType.RubyText:
+				// Ruby annotation — rendered as <rt> inside the parent
+				// <ruby>. See renderRuby.
+				return this.renderContainer(elem, "rt");
+
+			case DomType.FitText:
+				return this.renderFitText(elem as WmlFitText);
+
+			case DomType.BidiOverride:
+				return this.renderBidiOverride(elem as WmlBidiOverride);
 		}
 
 		return null;
@@ -2103,6 +2124,77 @@ section.${c}>ol>li::before {
 	// DomType.Sdt wrapper when w:alias or w:tag is set on w:sdtPr — that's
 	// the only case where wrapping the content adds accessibility value.
 	// Otherwise the parser unwraps directly and this method isn't reached.
+	// w:ruby — phonetic guide. HTML's <ruby> takes the base text followed
+	// by <rt>, so we emit children in that order. The parser already splits
+	// the ruby into DomType.RubyBase and DomType.RubyText sub-elements —
+	// each of which renders as a <span> / <rt>. Ruby run contents go through
+	// renderElements → renderRun, inheriting all existing sanitisation. The
+	// only DOCX-derived strings on the ruby wrapper itself are rubyPr.lid
+	// (language tag) and rubyPr.hps (numeric); both land on attributes via
+	// setAttribute, which the browser encodes.
+	renderRuby(elem: WmlRuby) {
+		// Split children into RubyBase / RubyText ordering. DOCX allows the
+		// two in either order but HTML's <ruby> requires base first so the
+		// browser can align the annotation above it.
+		const baseNodes: OpenXmlElement[] = [];
+		const rtNodes: OpenXmlElement[] = [];
+		for (const c of elem.children ?? []) {
+			if (c.type === DomType.RubyText) rtNodes.push(c);
+			else baseNodes.push(c);
+		}
+		const children: Node[] = [
+			...this.renderElements(baseNodes),
+			...this.renderElements(rtNodes)
+		];
+		const rubyEl = this.h({ tagName: "ruby", children }) as HTMLElement;
+
+		if (elem.rubyPr?.lid) {
+			// Language tag — attribute-encoded by the browser.
+			rubyEl.setAttribute("lang", elem.rubyPr.lid);
+		}
+
+		return rubyEl;
+	}
+
+	// w:fitText — wrap the run content in an inline-block of a fixed point
+	// width. The width comes from DOCX as twips and is converted numerically
+	// (parseFloat in the parser) before being divided by 20 here — no raw
+	// DOCX string reaches CSS. For v1 we clip/constrain to the target width
+	// rather than scaling glyphs.
+	renderFitText(elem: WmlFitText) {
+		const widthTwips = typeof elem.width === "number" ? elem.width : parseFloat(elem.width as any);
+		const children = this.renderElements(elem.children);
+
+		if (!Number.isFinite(widthTwips) || widthTwips <= 0) {
+			// Target width is malformed — just render the contents unwrapped.
+			return this.h({ tagName: "span", children }) as HTMLElement;
+		}
+
+		const pt = widthTwips / 20;
+		const span = this.h({
+			tagName: "span",
+			children,
+			style: {
+				"display": "inline-block",
+				"width": `${pt}pt`,
+				"white-space": "nowrap",
+				"overflow": "hidden"
+			}
+		}) as HTMLElement;
+		return span;
+	}
+
+	// w:bdo — explicit bidi override. The dir value was already allowlisted
+	// against /^(ltr|rtl)$/ in parseRunProperties, so the field is safe to
+	// set via setAttribute. Defaults to "ltr" if somehow missing.
+	renderBidiOverride(elem: WmlBidiOverride) {
+		const dir = elem.dir === "rtl" ? "rtl" : "ltr";
+		const children = this.renderElements(elem.children);
+		const bdo = this.h({ tagName: "bdo", children }) as HTMLElement;
+		bdo.setAttribute("dir", dir);
+		return bdo;
+	}
+
 	renderSdt(elem: WmlSdt) {
 		const children = this.renderElements(elem.children);
 		const span = this.h({ tagName: "span", children }) as HTMLSpanElement;
