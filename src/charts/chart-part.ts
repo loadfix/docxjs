@@ -3,7 +3,7 @@ import { OpenXmlPackage } from "../common/open-xml-package";
 import xml from "../parser/xml-parser";
 import { sanitizeCssColor } from "../utils";
 import { ChartDataPointOverride, ChartKind, ChartModel, ChartSeries } from "./model";
-import { resolveSchemeColor } from "./theme";
+import { resolveSchemeColor } from "../drawing/theme";
 
 // Parses a `/word/charts/chart*.xml` part into a `ChartModel`. The
 // renderer (`src/charts/render.ts`) owns layout; this file only knows

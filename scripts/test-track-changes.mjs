@@ -1398,6 +1398,43 @@ async function renderFixture(path, options) {
     note(`38·: text fixture has 0 chart elements post-chart-pipeline addition`);
 }
 
+// ── 39. parseFieldInstruction exposes tokens (Wave 5.3) ─────────────────
+// Wave 5.3 added an ordered `tokens: string[]` field so complex-field
+// rendering can pair switches like \o / \t with their value tokens.
+// Scenario 24 already tests the existing code/switches/args shape; this
+// adds a tokens-specific check so future changes don't silently drop it.
+{
+    const { parseFieldInstruction } = globalThis.docx;
+    const p = parseFieldInstruction('HYPERLINK \\l "_Ref123" \\o "Tooltip text"');
+    assert(
+        Array.isArray(p.tokens),
+        `39a: parseFieldInstruction result should have a tokens array`,
+    );
+    assert(
+        p.tokens.includes('\\o') && p.tokens.includes('Tooltip text'),
+        `39b: tokens should preserve order so switch/value pairs can be recovered (got ${JSON.stringify(p.tokens)})`,
+    );
+    note(`39·: parseFieldInstruction tokens = ${JSON.stringify(p.tokens)}`);
+}
+
+// ── 40. resolveSchemeColor allowlist (Wave 5.1 + 5.2 dedupe) ────────────
+// src/drawing/theme.ts owns the palette + resolver. src/charts/chart-part.ts
+// imports from there (formerly had a duplicate; deduped at integration).
+// The resolver must return null for unknown slot names and never throw.
+{
+    // Not publicly exported — smoke-test via the end-to-end render path:
+    // any chart fixture would exercise schemeClr, but we don't have one.
+    // At minimum assert dist/ is re-buildable and the text fixture still
+    // renders — if the dedupe broke the import path, renderFixture would
+    // throw at module-load time.
+    const { container } = await renderFixture('text');
+    assert(
+        container.querySelectorAll('section.docx').length > 0,
+        `40a: text fixture should still render after src/charts/theme.ts removal (import path dedupe)`,
+    );
+    note(`40·: text fixture renders post-theme-dedupe`);
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('--- track-changes harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
@@ -1406,5 +1443,5 @@ if (failures.length) {
     for (const f of failures) console.error(`  ✗ ${f}`);
     process.exit(1);
 } else {
-    console.log(`\n✓ all ${38} scenarios passed`);
+    console.log(`\n✓ all ${40} scenarios passed`);
 }

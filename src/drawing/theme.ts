@@ -144,6 +144,17 @@ export function isAllowedSchemeSlot(val: unknown): val is string {
     return typeof val === 'string' && ALLOWED_SLOTS.has(val);
 }
 
+// Narrow helper for consumers that just want a hex from a scheme slot
+// without the full ColourRef / modifier pipeline (e.g. chart series
+// fills). Falls back to the default palette; unknown slots return null
+// so the caller can use its own fallback (palette rotation, etc.).
+export function resolveSchemeColor(val: unknown, palette?: Record<string, string>): string | null {
+    if (!isAllowedSchemeSlot(val)) return null;
+    const themed = palette?.[val];
+    if (themed) return themed;
+    return DEFAULT_THEME_PALETTE[val] ?? null;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
     if (v < lo) return lo;
     if (v > hi) return hi;
