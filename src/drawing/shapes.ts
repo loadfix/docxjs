@@ -601,6 +601,10 @@ function appendPattern(
 // Emit an <a:effectLst> as an SVG <filter> into `defs` and return the
 // id. `widthPx` / `heightPx` are the shape's render size — used to
 // size the filter region generously so drop-shadows aren't clipped.
+//
+// Reflection is not emitted here: it lives on the DOM as a mirrored
+// twin of the shape wrapper (see renderShape). Everything else is an
+// SVG <filter> chain composed over the source graphic.
 function appendEffects(
     defs: SVGDefsElement,
     effects: ShapeEffects,
@@ -610,7 +614,7 @@ function appendEffects(
 ): string | null {
     if (!effects) return null;
     const hasEffect =
-        effects.outerShadow || effects.innerShadow || effects.softEdge;
+        effects.outerShadow || effects.innerShadow || effects.softEdge || effects.glow;
     if (!hasEffect) return null;
 
     const id = safeId(context.nextId('docx-filter'));
@@ -618,12 +622,18 @@ function appendEffects(
 
     const filter = document.createElementNS(ns.svg, 'filter');
     filter.setAttribute('id', id);
-    // Expand the filter region to accommodate ~50% shadow offset.
+    // Expand the filter region to accommodate ~50% shadow / glow offset.
     filter.setAttribute('x', '-50%');
     filter.setAttribute('y', '-50%');
     filter.setAttribute('width', '200%');
     filter.setAttribute('height', '200%');
     filter.setAttribute('filterUnits', 'objectBoundingBox');
+
+    // Track intermediate filter-result names so later primitives can
+    // pick up earlier output and merge everything back over the source
+    // at the end. Each effect appends its own `result="N"` and pushes
+    // the name onto `layers`; a final feMerge composes them in order.
+    const layers: string[] = [];
 
     // Outer shadow → feDropShadow. feDropShadow already samples the
     // source alpha, so a single primitive covers the common case.
@@ -639,20 +649,64 @@ function appendEffects(
             ? Math.max(0, Math.min(1, alpha / 100000))
             : 0.5;
 
+        const resultName = `outerShadow-${layers.length}`;
         const fe = document.createElementNS(ns.svg, 'feDropShadow');
+        fe.setAttribute('in', 'SourceGraphic');
         fe.setAttribute('dx', dx.toFixed(2));
         fe.setAttribute('dy', dy.toFixed(2));
         fe.setAttribute('stdDeviation', blur.toFixed(2));
         fe.setAttribute('flood-color', colour);
         fe.setAttribute('flood-opacity', opacity.toFixed(3));
+        fe.setAttribute('result', resultName);
         filter.appendChild(fe);
+        layers.push(resultName);
     }
 
-    // Inner shadow: a common recipe is SourceAlpha → offset → blur →
-    // composite with inverted source. Full emulation is complex; for
-    // v1 we degrade to a feDropShadow that sits on top of the fill —
-    // visually noticeable but not pixel-perfect. TODO: full inner
-    // shadow via feComposite / feFlood.
+    // Glow → blur SourceAlpha, flood-fill with the glow colour, clip
+    // the flood to the blurred alpha, then merge behind the source.
+    // The filter chain emits the glow only (layered under the source
+    // via the final feMerge); the source is drawn on top by the
+    // SourceGraphic entry at the bottom of the feMerge list.
+    if (effects.glow) {
+        const rad = emuToShadowPx(effects.glow.rad);
+        const colour = sanitizeCssColor(
+            resolveColour(effects.glow.colour, context.themePalette),
+        ) ?? '#FFFF00';
+        const alpha = effects.glow.colour?.mods?.alpha;
+        const opacity = typeof alpha === 'number' && Number.isFinite(alpha)
+            ? Math.max(0, Math.min(1, alpha / 100000))
+            : 1;
+
+        const blurResult = `glowBlur-${layers.length}`;
+        const blur = document.createElementNS(ns.svg, 'feGaussianBlur');
+        blur.setAttribute('in', 'SourceAlpha');
+        blur.setAttribute('stdDeviation', rad.toFixed(2));
+        blur.setAttribute('result', blurResult);
+        filter.appendChild(blur);
+
+        const floodResult = `glowFlood-${layers.length}`;
+        const flood = document.createElementNS(ns.svg, 'feFlood');
+        flood.setAttribute('flood-color', colour);
+        flood.setAttribute('flood-opacity', opacity.toFixed(3));
+        flood.setAttribute('result', floodResult);
+        filter.appendChild(flood);
+
+        const compResult = `glow-${layers.length}`;
+        const comp = document.createElementNS(ns.svg, 'feComposite');
+        comp.setAttribute('in', floodResult);
+        comp.setAttribute('in2', blurResult);
+        comp.setAttribute('operator', 'in');
+        comp.setAttribute('result', compResult);
+        filter.appendChild(comp);
+
+        layers.push(compResult);
+    }
+
+    // Inner shadow: blur SourceAlpha, offset, invert via arithmetic
+    // composite (k2=-1, k3=1) so we get the "hole" where the shape
+    // used to be, then flood with the shadow colour clipped to the
+    // shape's alpha, then composite back over the source so the
+    // shadow appears *inside* the shape rather than outside it.
     if (effects.innerShadow) {
         const s = effects.innerShadow;
         const { dx, dy } = shadowOffset(s.dir, s.dist);
@@ -660,24 +714,110 @@ function appendEffects(
         const colour = sanitizeCssColor(
             resolveColour(s.colour, context.themePalette),
         ) ?? '#000000';
-        const fe = document.createElementNS(ns.svg, 'feDropShadow');
-        fe.setAttribute('dx', dx.toFixed(2));
-        fe.setAttribute('dy', dy.toFixed(2));
-        fe.setAttribute('stdDeviation', blur.toFixed(2));
-        fe.setAttribute('flood-color', colour);
-        fe.setAttribute('flood-opacity', '0.6');
-        filter.appendChild(fe);
+        const alpha = s.colour?.mods?.alpha;
+        const opacity = typeof alpha === 'number' && Number.isFinite(alpha)
+            ? Math.max(0, Math.min(1, alpha / 100000))
+            : 0.6;
+
+        const blurResult = `innerBlur-${layers.length}`;
+        const blurEl = document.createElementNS(ns.svg, 'feGaussianBlur');
+        blurEl.setAttribute('in', 'SourceAlpha');
+        blurEl.setAttribute('stdDeviation', blur.toFixed(2));
+        blurEl.setAttribute('result', blurResult);
+        filter.appendChild(blurEl);
+
+        const offsetResult = `innerOffset-${layers.length}`;
+        const offsetEl = document.createElementNS(ns.svg, 'feOffset');
+        offsetEl.setAttribute('in', blurResult);
+        offsetEl.setAttribute('dx', dx.toFixed(2));
+        offsetEl.setAttribute('dy', dy.toFixed(2));
+        offsetEl.setAttribute('result', offsetResult);
+        filter.appendChild(offsetEl);
+
+        // Invert the offset alpha against the original SourceAlpha:
+        // arithmetic with k2=-1, k3=1 gives (SourceAlpha - offsetAlpha),
+        // i.e. the region of the shape *not* covered by the blurred
+        // offset — exactly where the inner shadow should appear.
+        const invResult = `innerInvert-${layers.length}`;
+        const invEl = document.createElementNS(ns.svg, 'feComposite');
+        invEl.setAttribute('in', 'SourceAlpha');
+        invEl.setAttribute('in2', offsetResult);
+        invEl.setAttribute('operator', 'arithmetic');
+        invEl.setAttribute('k2', '-1');
+        invEl.setAttribute('k3', '1');
+        invEl.setAttribute('result', invResult);
+        filter.appendChild(invEl);
+
+        const floodResult = `innerFlood-${layers.length}`;
+        const flood = document.createElementNS(ns.svg, 'feFlood');
+        flood.setAttribute('flood-color', colour);
+        flood.setAttribute('flood-opacity', opacity.toFixed(3));
+        flood.setAttribute('result', floodResult);
+        filter.appendChild(flood);
+
+        // Clip the flood to the inverted alpha so the colour only
+        // fills the inner-shadow region.
+        const clippedResult = `innerShadow-${layers.length}`;
+        const clipEl = document.createElementNS(ns.svg, 'feComposite');
+        clipEl.setAttribute('in', floodResult);
+        clipEl.setAttribute('in2', invResult);
+        clipEl.setAttribute('operator', 'in');
+        clipEl.setAttribute('result', clippedResult);
+        filter.appendChild(clipEl);
+
+        // Composite the inner shadow *over* the source so the shadow
+        // sits on top of the fill. This differs from the other layers:
+        // an inner shadow is a within-shape effect, not a behind-shape
+        // halo, so we pre-merge source+shadow here and feed that as a
+        // single layer into the outer feMerge.
+        const mergedResult = `innerShadowOver-${layers.length}`;
+        const overEl = document.createElementNS(ns.svg, 'feComposite');
+        overEl.setAttribute('in', clippedResult);
+        overEl.setAttribute('in2', 'SourceGraphic');
+        overEl.setAttribute('operator', 'over');
+        overEl.setAttribute('result', mergedResult);
+        filter.appendChild(overEl);
+
+        layers.push(mergedResult);
     }
 
-    // Soft edge — blur the alpha channel. feGaussianBlur with
-    // `in="SourceAlpha"` produces the classic fade.
+    // Soft edge — blur the source graphic so the silhouette fades out
+    // at the shape boundary. Emitted as a dedicated layer so it
+    // composes with anything earlier in the chain.
     if (effects.softEdge) {
         const rad = emuToShadowPx(effects.softEdge.rad);
+        const resultName = `softEdge-${layers.length}`;
         const blur = document.createElementNS(ns.svg, 'feGaussianBlur');
         blur.setAttribute('in', 'SourceGraphic');
         blur.setAttribute('stdDeviation', rad.toFixed(2));
+        blur.setAttribute('result', resultName);
         filter.appendChild(blur);
+        layers.push(resultName);
     }
+
+    // Final merge: stack glow/outer-shadow layers behind the source
+    // graphic, with inner-shadow / soft-edge layers (which already
+    // include the source pre-merged) drawn on top in declaration
+    // order. If nothing was produced (shouldn't happen — we gated on
+    // hasEffect above), skip the merge so the browser doesn't render
+    // a blank filter.
+    const containsSource =
+        !!effects.innerShadow || !!effects.softEdge;
+    const merge = document.createElementNS(ns.svg, 'feMerge');
+    for (const name of layers) {
+        const node = document.createElementNS(ns.svg, 'feMergeNode');
+        node.setAttribute('in', name);
+        merge.appendChild(node);
+    }
+    // When none of the layers already includes SourceGraphic, add it
+    // on top so the shape fill stays visible above glow / outer
+    // shadow halos.
+    if (!containsSource) {
+        const src = document.createElementNS(ns.svg, 'feMergeNode');
+        src.setAttribute('in', 'SourceGraphic');
+        merge.appendChild(src);
+    }
+    filter.appendChild(merge);
 
     defs.appendChild(filter);
     return id;
@@ -877,6 +1017,50 @@ export function renderShape(
         if (filterId) path.setAttribute('filter', `url(#${filterId})`);
         svg.appendChild(path);
     }
+
+    // Emit a reflection twin *before* the main SVG so DOM order puts
+    // the reflection behind the shape. We position it absolutely at
+    // `top: 100% + dist` via the wrapper-relative coord space, flip
+    // it vertically via CSS, and fade it with a mask-image gradient
+    // derived from stA / endA. Non-vertical `dir` values are treated
+    // as vertical in v1 (spec'd below).
+    if (shape.effects?.reflection) {
+        const ref = shape.effects.reflection;
+        const distPx = emuToShadowPx(ref.dist);
+        const stA = typeof ref.stA === 'number' && Number.isFinite(ref.stA) ? ref.stA : 50000;
+        const endA = typeof ref.endA === 'number' && Number.isFinite(ref.endA) ? ref.endA : 300;
+        // 1000ths → fraction; clamp to [0..1]. Word's visible
+        // reflection tends to be dimmer than the raw stA suggests, so
+        // we scale by 0.5 for closer visual parity (spec also defaults
+        // to 52% reflectance).
+        const startOpacity = Math.max(0, Math.min(1, stA / 100000)) * 0.5;
+        const endOpacity = Math.max(0, Math.min(1, endA / 100000)) * 0.5;
+        // Clone the SVG so the reflection carries the same paths,
+        // fills, strokes, and filter references. cloneNode(true) is
+        // safe — it only duplicates the DOM tree we built above, and
+        // every attribute on that tree has already been sanitized.
+        const reflectionSvg = svg.cloneNode(true) as SVGSVGElement;
+        reflectionSvg.style.position = 'absolute';
+        reflectionSvg.style.left = '0';
+        reflectionSvg.style.top = `${(heightPx + distPx).toFixed(2)}px`;
+        reflectionSvg.style.width = '100%';
+        reflectionSvg.style.height = `${heightPx.toFixed(2)}px`;
+        reflectionSvg.style.transform = 'scaleY(-1)';
+        reflectionSvg.style.transformOrigin = 'top left';
+        reflectionSvg.style.pointerEvents = 'none';
+        // Linear mask fading from startOpacity at the top (closest to
+        // the original shape once flipped) to endOpacity at the
+        // bottom. Both values are clamped and already derived from
+        // DOCX numerics that went through Number.isFinite.
+        const maskGradient =
+            `linear-gradient(to bottom, ` +
+            `rgba(0,0,0,${startOpacity.toFixed(3)}) 0%, ` +
+            `rgba(0,0,0,${endOpacity.toFixed(3)}) 100%)`;
+        reflectionSvg.style.webkitMaskImage = maskGradient;
+        (reflectionSvg.style as any).maskImage = maskGradient;
+        wrapper.appendChild(reflectionSvg);
+    }
+
     wrapper.appendChild(svg);
 
     // --- Text frame (<wps:txbx>/<w:txbxContent>) ---
