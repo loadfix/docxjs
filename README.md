@@ -2,13 +2,13 @@
 [![Support Ukraine](https://img.shields.io/badge/Support-Ukraine-blue?style=flat&logo=adguard)](https://war.ukraine.ua/)
 
 # docxjs
-Docx rendering library
+Docx rendering library.
 
-Demo - https://volodymyrbaydalka.github.io/docxjs/
+This repository is a fork of [docxjs](https://github.com/VolodymyrBaydalka/docxjs) by Volodymyr Baydalka. It builds on their original work with additional features — visual page breaks, a comments sidebar, track-changes rendering, repeated headers/footers on split pages, and various security and parsing fixes. Credit for the foundational library goes to the original author.
 
 Goal
 ----
-Goal of this project is to render/convert DOCX document into HTML document with keeping HTML semantic as much as possible. 
+Goal of this project is to render/convert DOCX document into HTML document with keeping HTML semantic as much as possible.
 That means library is limited by HTML capabilities (for example Google Docs renders *.docx document on canvas as an image).
 
 Installation
@@ -40,33 +40,59 @@ API
 ```ts
 // renders document into specified element
 renderAsync(
-    document: Blob | ArrayBuffer | Uint8Array, // could be any type that supported by JSZip.loadAsync
-    bodyContainer: HTMLElement, //element to render document content,
-    styleContainer: HTMLElement, //element to render document styles, numbeings, fonts. If null, bodyContainer will be used.
+    document: Blob | ArrayBuffer | Uint8Array, // any type supported by JSZip.loadAsync
+    bodyContainer: HTMLElement, // element to render document content
+    styleContainer: HTMLElement, // element to render document styles, numberings, fonts. If null, bodyContainer is used.
     options: {
-        className: string = "docx", //class name/prefix for default and document style classes
-        inWrapper: boolean = true, //enables rendering of wrapper around document content
-        hideWrapperOnPrint: boolean = false, //disable wrapper styles on print
-        ignoreWidth: boolean = false, //disables rendering width of page
-        ignoreHeight: boolean = false, //disables rendering height of page
-        ignoreFonts: boolean = false, //disables fonts rendering
-        breakPages: boolean = true, //enables page breaking on page breaks
-        ignoreLastRenderedPageBreak: boolean = true, //disables page breaking on lastRenderedPageBreak elements
-        experimental: boolean = false, //enables experimental features (tab stops calculation)
-        trimXmlDeclaration: boolean = true, //if true, xml declaration will be removed from xml documents before parsing
-        useBase64URL: boolean = false, //if true, images, fonts, etc. will be converted to base 64 URL, otherwise URL.createObjectURL is used
-        renderChanges: false, //enables experimental rendering of document changes (inserions/deletions)
-        renderHeaders: true, //enables headers rendering
-        renderFooters: true, //enables footers rendering
-        renderFootnotes: true, //enables footnotes rendering
-        renderEndnotes: true, //enables endnotes rendering
-        renderComments: false, //enables experimental comments rendering
-        renderAltChunks: true, //enables altChunks (html parts) rendering
-        debug: boolean = false, //enables additional logging
+        className: string = "docx",                    // class name/prefix for default and document style classes
+        inWrapper: boolean = true,                     // render a wrapper around document content
+        hideWrapperOnPrint: boolean = false,           // disable wrapper styles on print
+        ignoreWidth: boolean = false,                  // disable rendering width of page
+        ignoreHeight: boolean = false,                 // disable rendering height of page
+        ignoreFonts: boolean = false,                  // disable fonts rendering
+        breakPages: boolean = true,                    // enable page breaking on DOCX page-break elements
+        ignoreLastRenderedPageBreak: boolean = true,   // disable page breaking on lastRenderedPageBreak elements
+        experimental: boolean = false,                 // enable experimental features (tab stops calculation)
+        trimXmlDeclaration: boolean = true,            // strip XML declaration before parsing
+        useBase64URL: boolean = false,                 // convert images/fonts to base64 URLs instead of object URLs
+        renderHeaders: boolean = true,                 // enable headers rendering
+        renderFooters: boolean = true,                 // enable footers rendering
+        renderFootnotes: boolean = true,               // enable footnotes rendering
+        renderEndnotes: boolean = true,                // enable endnotes rendering
+        renderChanges: boolean = false,                // legacy switch for track-changes; prefer `changes.show` below
+        renderComments: boolean = false,               // enable comments rendering
+        experimentalPageBreaks: boolean = false,       // after rendering, split sections whose content overflows
+                                                       // the page-sized min-height into multiple page-shaped siblings.
+                                                       // Repeats headers/footers and splits oversized tables at row
+                                                       // boundaries. Off by default to preserve current behaviour.
+        comments: {
+            sidebar: boolean = true,                   // render comments in a right-margin sidebar
+            highlight: boolean = true,                 // highlight the anchor text via CSS Highlight API
+            layout: 'anchored' | 'packed' = 'anchored' // 'anchored' aligns each card to its anchor; 'packed' stacks flush
+        },
+        changes: {
+            show: boolean = false,                     // master switch for track-changes rendering
+            showInsertions: boolean = true,
+            showDeletions: boolean = true,
+            showMoves: boolean = true,
+            showFormatting: boolean = true,
+            colorByAuthor: boolean = true,             // color each author's revisions distinctly
+            changeBar: boolean = true,                 // render a marginal bar next to changed paragraphs
+            legend: boolean = true,                    // inject a legend listing authors
+            sidebarCards: boolean = true               // anchor a card per revision in the right margin
+        },
+        debug: boolean = false
     }): Promise<WordDocument>
 
+// Render per-page thumbnails of an already-rendered document into a sibling container.
+renderThumbnails(
+    mainContainer: HTMLElement,      // the container renderAsync wrote into
+    thumbnailContainer: HTMLElement, // where thumbnails should be placed
+    options?: ThumbnailsOptions
+): ThumbnailsHandle
+
 /// ==== experimental / internal API ===
-// this API could be used to modify document before rendering
+// this API can be used to modify a document before rendering
 // renderAsync = parseAsync + renderDocument
 
 // parse document and return internal document object
@@ -80,33 +106,40 @@ renderDocument(
     wordDocument: WordDocument,
     options: Options
 ): Promise<Node[]>
+
+// Drive the visual-page-break pass directly (normally called by renderAsync when
+// experimentalPageBreaks is true). Useful for consumers that assemble the DOM
+// themselves.
+applyVisualPageBreaks(
+    bodyContainer: HTMLElement,
+    options?: { className?: string; slack?: number },
+    measureFn?: MeasureFn
+): number
 ```
 
-Thumbnails, TOC and etc.
+Thumbnails
 ------
-Thumbnails is added only for example and it's not part of library. Library renders DOCX into HTML, so it can't be efficiently used for thumbnails. 
+`renderThumbnails` is a first-class export that renders per-page thumbnails of an already-rendered document into a separate container. Each thumbnail is a clipped clone of the matching page section.
 
-Table of contents is built using the TOC fields and there is no efficient way to get table of contents at this point, since fields is not supported yet (http://officeopenxml.com/WPtableOfContents.php)
+Table of contents
+------
+Table-of-contents rendering is not yet supported. Word builds TOCs via TOC fields, and field evaluation is not implemented (see http://officeopenxml.com/WPtableOfContents.php).
 
 Breaks
 ------
-Currently library does break pages:
-- if user/manual page break `<w:br w:type="page"/>` is inserted - when user insert page break
-- if application page break `<w:lastRenderedPageBreak/>` is inserted - could be inserted by editor application like MS word (`ignoreLastRenderedPageBreak` should be set to false)
-- if page settings for paragraph is changed - ex: user change settings from portrait to landscape page
+The library breaks pages when:
+- a manual page break `<w:br w:type="page"/>` is inserted
+- an application page break `<w:lastRenderedPageBreak/>` is inserted — Word emits these (set `ignoreLastRenderedPageBreak: false` to honour them)
+- page settings change between paragraphs — e.g. portrait to landscape
 
-Realtime page breaking is not implemented because it's requires re-calculation of sizes on each insertion and that could affect performance a lot. 
+In addition, when `experimentalPageBreaks: true`, the library performs visual pagination after rendering: any section whose rendered height exceeds its page-sized `min-height` is split into multiple page-shaped sibling sections. Headers/footers are cloned onto every sub-page, and oversized tables are split at row boundaries (preserving `colgroup` and repeating `thead`). Mid-paragraph splitting is not yet implemented — a paragraph taller than a page will overflow its sub-page.
 
-If page breaking is crutual for you, I would recommend:
-- try to insert manual break point as much as you could
-- try use editors like MS Word, that inserts `<w:lastRenderedPageBreak/>` break points
-
-NOTE: by default `ignoreLastRenderedPageBreak` is set to `true`. You may need to set it to `false`, to make library break by `<w:lastRenderedPageBreak/>` break points
+By default `ignoreLastRenderedPageBreak` is `true`. Set it to `false` to break on `<w:lastRenderedPageBreak/>` points.
 
 Status and stability
 ------
-So far I can't come up with final approach of parsing documents and final structure of API. Only **renderAsync** function is stable and definition shouldn't be changed in future. Inner implementation of parsing and rendering may be changed at any point of time.
+The public surface (`renderAsync`, `parseAsync`, `renderDocument`, `renderThumbnails`) is stable. Newer features behind `experimental*` flags (`experimentalPageBreaks`, revision sidebar cards, etc.) may still change in shape as they settle.
 
 Contributing
 ------
-Please do not include contents of `./dist` folder in your PR's. Otherwise I most likely will reject it due to stability and security concerns.
+This fork commits `dist/` alongside source changes so consumers can pull from git directly. If you open a PR, rebuild `dist/` (via `npm run build`) before committing so the bundled output stays in sync with `src/`.

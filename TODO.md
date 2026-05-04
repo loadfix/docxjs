@@ -2,18 +2,19 @@
 
 Deep review of all 51 open issues + 4 open PRs on the upstream source repo
 [`VolodymyrBaydalka/docxjs`](https://github.com/VolodymyrBaydalka/docxjs/issues)
-as of **2026-05-02**. Each item was compared against the current state of this
-fork (master) and its commit history. Each entry has a category, a
-priority hint, and a short status explaining what we found.
+originally triaged **2026-05-02**; last updated **2026-05-04**. Each item was
+compared against the current state of this fork (master) and its commit
+history. Each entry has a category, a priority hint, and a short status
+explaining what we found.
 
 Counts by category:
 
 | Category | Count |
 |---|---|
-| bug-to-investigate | 24 |
+| bug-to-investigate | 20 |
 | duplicate-or-stale | 9 |
 | new-feature | 8 |
-| resolved-in-fork | 5 |
+| resolved-in-fork | 9 |
 | needs-info | 4 |
 | not-applicable | 3 |
 | upstream-pr-worth-adopting | 2 |
@@ -33,9 +34,11 @@ The two items you should act on first.
 
 The longest-standing upstream complaint. Fixed here: `experimentalPageBreaks`
 option in [`src/page-break.ts`](src/page-break.ts) + per-page thumbnails in
-[`src/thumbnails.ts`](src/thumbnails.ts). Worth promoting off "experimental" once
-the mid-element split case and the header/footer-on-every-page case are handled
-(both noted in PR #24's body).
+[`src/thumbnails.ts`](src/thumbnails.ts). Both follow-up blockers — repeated
+headers/footers on every sub-page and mid-element splitting (table row
+boundaries) — are now shipped (PR #44). The mid-paragraph split case remains
+out of scope. Worth promoting off "experimental" once consumers have had a
+release cycle to validate.
 
 ### [#194 — PR: sanitize hyperlink URIs to prevent XSS](https://github.com/VolodymyrBaydalka/docxjs/pull/194) (resolved-in-fork — triaged earlier, now superseded; high)
 
@@ -106,13 +109,11 @@ Ordered by priority hint.
 | [#76](https://github.com/VolodymyrBaydalka/docxjs/issues/76) | Docx-embedded header/footer render issue | `src/header-footer/` parts |
 | [#80](https://github.com/VolodymyrBaydalka/docxjs/issues/80) | Text box cannot be displayed | Likely tractable — we handle VML textboxes but not DrawingML `wps:txbx`. Good ROI. |
 | [#102](https://github.com/VolodymyrBaydalka/docxjs/issues/102) / [#130](https://github.com/VolodymyrBaydalka/docxjs/issues/130) | Image covers text / image above-or-below text broken | Same root cause: DrawingML wrap/anchor rendering gap. |
-| [#138](https://github.com/VolodymyrBaydalka/docxjs/issues/138) | `<svg>` negative width error | `html-renderer.ts:1825` — `Math.ceil(bb.x + bb.width)` can go negative for VML shapes with a negative origin. |
 | [#155](https://github.com/VolodymyrBaydalka/docxjs/issues/155), [#156](https://github.com/VolodymyrBaydalka/docxjs/issues/156), [#157](https://github.com/VolodymyrBaydalka/docxjs/issues/157), [#158](https://github.com/VolodymyrBaydalka/docxjs/issues/158), [#159](https://github.com/VolodymyrBaydalka/docxjs/issues/159) | Real-world DOCX regressions (batch filed 2025-04-13) | Likely all related to floating-image wrap modes (`wrapSquare`, `wrapTight` not implemented). |
 | [#174](https://github.com/VolodymyrBaydalka/docxjs/issues/174) | Table background / text colour not rendered correctly | Theme color resolution |
 | [#181](https://github.com/VolodymyrBaydalka/docxjs/issues/181) | Numbered lists: numbering continues across multiple previews with default className | Known footgun when mounting multiple renderers on the same page |
 | [#183](https://github.com/VolodymyrBaydalka/docxjs/issues/183) | Source map issue causes CI/CD failures | Our `dist/*.map` also has `sourcesContent: null` + missing src — worth fixing before next release |
 | [#195](https://github.com/VolodymyrBaydalka/docxjs/issues/195) | text-indent incorrect | `firstLineChars` ignored |
-| [#196](https://github.com/VolodymyrBaydalka/docxjs/issues/196) | `classNameOfCnfStyle` throws on null | One-line null-check fix |
 
 ### Low priority
 
@@ -121,9 +122,7 @@ Ordered by priority hint.
 | [#51](https://github.com/VolodymyrBaydalka/docxjs/issues/51) | Equation Editor / Shape rendering | WMF portion out of scope; DrawingML shapes tracked under #167 |
 | [#59](https://github.com/VolodymyrBaydalka/docxjs/issues/59) | Image wrap position wrong | Related to the #102/#130 wrap gap |
 | [#97](https://github.com/VolodymyrBaydalka/docxjs/issues/97) | Text box lines disappear | Same family as #80 |
-| [#117](https://github.com/VolodymyrBaydalka/docxjs/issues/117) | Wrong typings of `WordDocument` | One-liner — `Promise<any>` → `Promise<WordDocument>` at `src/docx-preview.ts:124,135` |
 | [#161](https://github.com/VolodymyrBaydalka/docxjs/issues/161) | `&` appears with curly or square brackets | XML entity escaping in a specific path |
-| [#171](https://github.com/VolodymyrBaydalka/docxjs/issues/171) | Colour format `#4472c4 [3204]` | **Trivial fix at `src/vml/vml.ts:57,107` — unsanitized index suffix.** |
 | [#178](https://github.com/VolodymyrBaydalka/docxjs/issues/178) | tabStops display bug | Tab rendering quirks |
 | [#187](https://github.com/VolodymyrBaydalka/docxjs/issues/187) | Empty `<p>` has wrong height | Empty paragraph placeholder |
 
@@ -135,12 +134,16 @@ Close out on upstream with a link to our commits.
 
 | # | Title | Fix in fork |
 |---|---|---|
-| [#39](https://github.com/VolodymyrBaydalka/docxjs/issues/39) | Page break | `src/page-break.ts` behind `experimentalPageBreaks` (PR #24) |
+| [#39](https://github.com/VolodymyrBaydalka/docxjs/issues/39) | Page break | `src/page-break.ts` behind `experimentalPageBreaks` (PR #24); headers/footers + table row splits (PR #44) |
 | [#85](https://github.com/VolodymyrBaydalka/docxjs/issues/85) | Comments support | Full sidebar feature (PRs #2 etc.) |
+| [#117](https://github.com/VolodymyrBaydalka/docxjs/issues/117) | Wrong typings of `WordDocument` | `parseAsync` / `renderAsync` now return `Promise<WordDocument>` in `src/docx-preview.ts` |
+| [#138](https://github.com/VolodymyrBaydalka/docxjs/issues/138) | `<svg>` negative width error | Clamp to `Math.max(1, Math.ceil(bb.width))` + `viewBox` (PR #43) |
+| [#171](https://github.com/VolodymyrBaydalka/docxjs/issues/171) | Colour format `#4472c4 [3204]` | `sanitizeVmlColor` strips the `[index]` suffix before `sanitizeCssColor` in `src/vml/vml.ts` |
 | [#176](https://github.com/VolodymyrBaydalka/docxjs/issues/176) | Auto-pagination | Same as #39 above |
 | [#179](https://github.com/VolodymyrBaydalka/docxjs/issues/179) | Hyperlinks clickable in preview | `renderHyperlink` opens links; scheme now allowlisted (PR #23) |
 | [#188](https://github.com/VolodymyrBaydalka/docxjs/issues/188) | `renderAsync` not available at runtime | ESM exports set correctly in our build |
 | [#194](https://github.com/VolodymyrBaydalka/docxjs/pull/194) (PR) | Sanitize hyperlink URIs to prevent XSS | PR #23 lands the same fix with a stricter allowlist |
+| [#196](https://github.com/VolodymyrBaydalka/docxjs/issues/196) | `classNameOfCnfStyle` throws on null | Null-guard in `classNameOfCnfStyle` (`src/document-parser.ts`) returns empty class when `w:val` is missing |
 
 ---
 
