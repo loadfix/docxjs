@@ -5,8 +5,12 @@ import {
 	WmlAltChunk, Revision, FormattingRevision, WmlSdt, SdtControl, SdtCheckboxControl,
 	WmlRuby, WmlFitText, WmlBidiOverride
 } from './document/dom';
-import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx } from './document/drawing';
+import {
+	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx,
+	GradientFill, PatternFill, ShapeEffects,
+} from './document/drawing';
 import { sanitizeCssColor } from './utils';
+import { ColourRef, ColourModifiers, isAllowedSchemeSlot, DEFAULT_THEME_PALETTE } from './drawing/theme';
 import { DocumentElement } from './document/document';
 import { WmlParagraph, parseParagraphProperties, parseParagraphProperty } from './document/paragraph';
 import { parseSectionProperties, SectionProperties } from './document/section';
@@ -1730,11 +1734,12 @@ export class DocumentParser {
 		return result;
 	}
 
-	// Parses <a:solidFill>/<a:gradFill>/<a:blipFill>/<a:noFill> into
-	// the shape-fill model. We collapse gradient/pattern fills onto
-	// the first colour stop encountered — theme resolution is out of
-	// scope for v1. All colour strings are sanitised before they reach
-	// the DrawingShape.
+	// Parses <a:solidFill>/<a:gradFill>/<a:blipFill>/<a:noFill>/<a:pattFill>
+	// into the shape-fill model. solidFill resolves to a concrete CSS
+	// colour (via parseColor + the fall-back palette), gradient and
+	// pattern fills preserve their ColourRefs so the renderer can
+	// resolve schemeClr against the active theme palette. All colour
+	// values pass through sanitizeCssColor on the way in.
 	private parseShapeFill(spPr: Element): DrawingShape["fill"] | undefined {
 		if (!spPr) return undefined;
 		for (const n of xml.elements(spPr)) {
@@ -1742,28 +1747,43 @@ export class DocumentParser {
 				case "noFill":
 					return { type: "none" };
 				case "solidFill": {
-					const srgb = xml.element(n, "srgbClr");
-					const color = srgb ? xml.attr(srgb, "val") : null;
-					const sanitized = sanitizeCssColor(color);
-					return sanitized ? { type: "solid", color: sanitized } : undefined;
-				}
-				case "gradFill": {
-					// Gradient → first stop's colour as a solid fill.
-					// Theme colour resolution out of scope.
-					const gsLst = xml.element(n, "gsLst");
-					if (!gsLst) continue;
-					for (const gs of xml.elements(gsLst)) {
-						const srgb = xml.element(gs, "srgbClr");
-						const color = srgb ? xml.attr(srgb, "val") : null;
-						const sanitized = sanitizeCssColor(color);
-						if (sanitized) return { type: "solid", color: sanitized };
+					// Resolve schemeClr / lumMod / lumOff here so the
+					// shape model carries a ready-to-use CSS colour for
+					// the common solid-fill case. Theme palette is not
+					// available at parse time, so we use defaults here
+					// and let the renderer apply a theme override via
+					// the schemeClr path for gradients / patterns.
+					const ref = this.parseColor(n);
+					if (ref?.hex) return { type: "solid", color: ref.hex };
+					// schemeClr-only solid fill — store as gradient with a
+					// single stop so the renderer resolves it with theme.
+					if (ref?.scheme) {
+						return {
+							type: "gradient",
+							gradient: {
+								kind: "linear",
+								stops: [
+									{ pos: 0, colour: ref },
+									{ pos: 1, colour: ref },
+								],
+								angle: 0,
+							},
+						};
 					}
 					return undefined;
 				}
+				case "gradFill": {
+					const grad = this.parseGradientFill(n);
+					if (grad) return { type: "gradient", gradient: grad };
+					return undefined;
+				}
+				case "pattFill": {
+					const patt = this.parsePatternFill(n);
+					if (patt) return { type: "pattern", pattern: patt };
+					return undefined;
+				}
 				case "blipFill":
-				case "pattFill":
-					// Image-/pattern-filled shape — out of scope for v1.
-					// TODO: render as <image> inside the SVG.
+					// Image-filled shape — out of scope for v1. TODO.
 					return undefined;
 			}
 		}
@@ -1771,7 +1791,9 @@ export class DocumentParser {
 	}
 
 	// Parses <a:ln w="…"> → stroke width (EMU) + optional <a:solidFill>
-	// colour.
+	// colour. schemeClr colours are resolved against the default palette
+	// at parse time (stroke doesn't share the renderer's theme
+	// access).
 	private parseShapeStroke(spPr: Element): DrawingShape["stroke"] | undefined {
 		if (!spPr) return undefined;
 		const ln = xml.element(spPr, "ln");
@@ -1780,11 +1802,217 @@ export class DocumentParser {
 		const w = xml.intAttr(ln, "w", 0);
 		if (w > 0) result.width = w;
 		const solid = xml.element(ln, "solidFill");
-		const srgb = solid ? xml.element(solid, "srgbClr") : null;
-		const color = srgb ? xml.attr(srgb, "val") : null;
-		const sanitized = sanitizeCssColor(color);
-		if (sanitized) result.color = sanitized;
+		if (solid) {
+			const ref = this.parseColor(solid);
+			if (ref?.hex) result.color = ref.hex;
+			else if (ref?.scheme) {
+				// Resolve against default palette so the colour is
+				// usable immediately — stroke doesn't flow through the
+				// gradient/defs pipeline. Theme palette override is
+				// only applied to shape fills (renderer has access) so
+				// stroke defaults are "close enough" for v1.
+				const p = DEFAULT_THEME_PALETTE[ref.scheme];
+				const sanitized = sanitizeCssColor(p);
+				if (sanitized) result.color = sanitized;
+			}
+		}
 		return result;
+	}
+
+	// Parse a colour-source element (<a:solidFill>, <a:gs>, <a:fgClr>,
+	// <a:outerShdw>, …) into a ColourRef capturing the base colour plus
+	// any lumMod / lumOff / tint / shade / alpha modifiers. Returns null
+	// if the element carries no recognisable colour.
+	//
+	// Security: hex values pass through sanitizeCssColor before being
+	// stored; scheme slot names are validated against an allowlist in
+	// resolveColour before reaching any attribute sink.
+	private parseColor(elem: Element): ColourRef | null {
+		if (!elem) return null;
+		// <a:srgbClr>, <a:schemeClr>, <a:sysClr>, <a:prstClr> can all
+		// appear directly or as children of the wrapper element.
+		const srgb = xml.element(elem, "srgbClr") ?? (elem.localName === "srgbClr" ? elem : null);
+		const scheme = xml.element(elem, "schemeClr") ?? (elem.localName === "schemeClr" ? elem : null);
+		const sys = xml.element(elem, "sysClr") ?? (elem.localName === "sysClr" ? elem : null);
+
+		const ref: ColourRef = {};
+		let modsSource: Element | null = null;
+
+		if (srgb) {
+			const val = xml.attr(srgb, "val");
+			const sanitized = sanitizeCssColor(val);
+			if (sanitized) ref.hex = sanitized;
+			modsSource = srgb;
+		} else if (sys) {
+			// <a:sysClr lastClr="…"> carries the resolved hex.
+			const val = xml.attr(sys, "lastClr") ?? xml.attr(sys, "val");
+			const sanitized = sanitizeCssColor(val);
+			if (sanitized) ref.hex = sanitized;
+			modsSource = sys;
+		} else if (scheme) {
+			const val = xml.attr(scheme, "val");
+			if (isAllowedSchemeSlot(val)) ref.scheme = val;
+			modsSource = scheme;
+		}
+
+		if (modsSource) {
+			const mods: ColourModifiers = {};
+			let gotMod = false;
+			for (const m of xml.elements(modsSource)) {
+				const v = xml.intAttr(m, "val");
+				if (v == null || !Number.isFinite(v)) continue;
+				switch (m.localName) {
+					case "lumMod": mods.lumMod = v; gotMod = true; break;
+					case "lumOff": mods.lumOff = v; gotMod = true; break;
+					case "tint":   mods.tint   = v; gotMod = true; break;
+					case "shade":  mods.shade  = v; gotMod = true; break;
+					case "alpha":  mods.alpha  = v; gotMod = true; break;
+				}
+			}
+			if (gotMod) ref.mods = mods;
+		}
+
+		if (!ref.hex && !ref.scheme) return null;
+		return ref;
+	}
+
+	// Parses <a:gradFill> into a GradientFill model. Stops preserve
+	// their ColourRef so the renderer can resolve schemeClr against the
+	// document's theme palette. Angles are converted from DOCX's
+	// 60000ths-of-a-degree units to plain degrees.
+	private parseGradientFill(el: Element): GradientFill | null {
+		const gsLst = xml.element(el, "gsLst");
+		if (!gsLst) return null;
+		const stops: Array<{ pos: number; colour: ColourRef }> = [];
+		for (const gs of xml.elements(gsLst, "gs")) {
+			const posRaw = xml.intAttr(gs, "pos");
+			if (posRaw == null || !Number.isFinite(posRaw)) continue;
+			const pos = Math.max(0, Math.min(1, posRaw / 100000));
+			const colour = this.parseColor(gs);
+			if (!colour) continue;
+			stops.push({ pos, colour });
+		}
+		if (stops.length === 0) return null;
+
+		const lin = xml.element(el, "lin");
+		const pathEl = xml.element(el, "path");
+
+		if (pathEl) {
+			const path = xml.attr(pathEl, "path");
+			const radialPath: 'circle' | 'rect' = path === 'rect' ? 'rect' : 'circle';
+			return { kind: 'radial', stops, path: radialPath };
+		}
+
+		let angle = 0;
+		if (lin) {
+			const ang = xml.intAttr(lin, "ang");
+			if (ang != null && Number.isFinite(ang)) {
+				// DOCX stores angles in 60000ths of a degree, measured
+				// clockwise from 3-o'clock (east). SVG's linear gradient
+				// default (x1=0,y1=0 → x2=1,y2=0) is left→right, which
+				// is also 0°. So the raw degree conversion is what the
+				// renderer wants.
+				angle = (ang / 60000) % 360;
+			}
+		}
+		return { kind: 'linear', stops, angle };
+	}
+
+	// Allowlist of preset pattern names we know how to draw. Unknown
+	// presets fall back to the foreground colour as a solid fill.
+	private readonly PATTERN_ALLOWLIST = new Set([
+		"dkDnDiag", "ltDnDiag", "dkUpDiag", "ltUpDiag",
+		"dkHorz", "ltHorz", "dkVert", "ltVert",
+		"cross", "diagCross",
+	]);
+
+	// Parses <a:pattFill prst="…"> → PatternFill. The preset name is
+	// validated against the allowlist before being stored; unknown
+	// presets still produce a PatternFill so the renderer can emit the
+	// fallback solid colour.
+	private parsePatternFill(el: Element): PatternFill | null {
+		const prst = xml.attr(el, "prst") ?? "";
+		const preset = this.PATTERN_ALLOWLIST.has(prst) ? prst : "";
+		const fgEl = xml.element(el, "fgClr");
+		const bgEl = xml.element(el, "bgClr");
+		const fg = fgEl ? this.parseColor(fgEl) : null;
+		const bg = bgEl ? this.parseColor(bgEl) : null;
+		if (!fg && !bg) return null;
+		const result: PatternFill = { preset };
+		if (fg) result.fg = fg;
+		if (bg) result.bg = bg;
+		return result;
+	}
+
+	// Allowlist of adjustment names we accept on <a:avLst>. Names are
+	// matched before being used as Record<string, number> keys in the
+	// renderer, so attacker-controlled values (e.g. "__proto__") never
+	// reach `Object.assign` / bracket-indexed lookup.
+	private readonly ADJUSTMENT_NAME_ALLOWLIST = new Set([
+		"adj", "adj1", "adj2", "adj3", "adj4", "adj5", "adj6", "adj7", "adj8",
+	]);
+
+	// Parses <a:avLst><a:gd name="adj" fmla="val N"/> into a plain
+	// {name: value} record. Only numeric `val N` formulas are accepted;
+	// formula references (`*/ 2 3 4` etc.) are ignored in v1.
+	private parseAdjustments(avLst: Element | null | undefined): Record<string, number> | undefined {
+		if (!avLst) return undefined;
+		const out: Record<string, number> = {};
+		let any = false;
+		for (const gd of xml.elements(avLst, "gd")) {
+			const name = xml.attr(gd, "name");
+			if (!name || !this.ADJUSTMENT_NAME_ALLOWLIST.has(name)) continue;
+			const fmla = xml.attr(gd, "fmla");
+			if (!fmla) continue;
+			// Only "val N" formulas in v1 — the computed guide forms
+			// (+-, *, +/) need a full formula evaluator.
+			const m = /^val\s+(-?\d+(?:\.\d+)?)$/.exec(fmla.trim());
+			if (!m) continue;
+			const n = Number(m[1]);
+			if (!Number.isFinite(n)) continue;
+			out[name] = n;
+			any = true;
+		}
+		return any ? out : undefined;
+	}
+
+	// Parses <a:effectLst> → ShapeEffects. Handles outer/inner shadow
+	// and softEdge. Glow / reflection remain TODO (see CLAUDE.md).
+	private parseEffectList(el: Element | null | undefined): ShapeEffects | undefined {
+		if (!el) return undefined;
+		const result: ShapeEffects = {};
+		let any = false;
+		for (const n of xml.elements(el)) {
+			switch (n.localName) {
+				case "outerShdw":
+				case "innerShdw": {
+					const blurRad = xml.intAttr(n, "blurRad");
+					const dist = xml.intAttr(n, "dist");
+					const dirRaw = xml.intAttr(n, "dir");
+					const colour = this.parseColor(n);
+					const entry: NonNullable<ShapeEffects["outerShadow"]> = {};
+					if (blurRad != null && Number.isFinite(blurRad)) entry.blurRad = blurRad;
+					if (dist != null && Number.isFinite(dist)) entry.dist = dist;
+					if (dirRaw != null && Number.isFinite(dirRaw)) entry.dir = (dirRaw / 60000) % 360;
+					if (colour) entry.colour = colour;
+					if (n.localName === "outerShdw") result.outerShadow = entry;
+					else result.innerShadow = entry;
+					any = true;
+					break;
+				}
+				case "softEdge": {
+					const rad = xml.intAttr(n, "rad");
+					if (rad != null && Number.isFinite(rad) && rad > 0) {
+						result.softEdge = { rad };
+						any = true;
+					}
+					break;
+				}
+				// TODO: <a:glow> → feGaussianBlur + colour.
+				// TODO: <a:reflection> → out of scope.
+			}
+		}
+		return any ? result : undefined;
 	}
 
 	// Parses <wps:bodyPr> — text-frame insets. All four sides default
@@ -1943,6 +2171,9 @@ export class DocumentParser {
 				// Validate against the allowlist — never interpolate an
 				// attacker-controlled string into SVG/CSS.
 				result.presetGeometry = this.PRESET_GEOMETRY_ALLOWLIST.has(prst) ? prst : "rect";
+				const avLst = xml.element(prstGeom, "avLst");
+				const adjustments = this.parseAdjustments(avLst);
+				if (adjustments) result.presetAdjustments = adjustments;
 			} else if (xml.element(spPr, "custGeom")) {
 				// <a:custGeom> — caller-defined path list. Parsed into
 				// CustomGeometry; presetGeometry is left blank so the
@@ -1961,6 +2192,8 @@ export class DocumentParser {
 
 			result.fill = this.parseShapeFill(spPr);
 			result.stroke = this.parseShapeStroke(spPr);
+			const effects = this.parseEffectList(xml.element(spPr, "effectLst"));
+			if (effects) result.effects = effects;
 		} else {
 			result.presetGeometry = "rect";
 			result.xfrm = { x: 0, y: 0, cx: 0, cy: 0 };
@@ -1981,8 +2214,9 @@ export class DocumentParser {
 			result.txbxParagraphs = this.parseBodyElements(txbxContent);
 		}
 
-		// TODO: <wps:style> theme-ref resolution and <a:effectLst>
-		// shadow/glow/reflection. Intentionally ignored for v1.
+		// TODO: <wps:style> theme-ref resolution. <a:effectLst> is now
+		// parsed above (outer/inner shadow + softEdge); glow and
+		// reflection remain out of scope.
 		return result;
 	}
 

@@ -1,5 +1,50 @@
 import { DomType, OpenXmlElement } from './dom';
 import { CustomGeometry } from '../drawing/shapes';
+import { ColourRef } from '../drawing/theme';
+
+// Parsed <a:gradFill>. Each stop carries a ColourRef (so
+// schemeClr / lumMod / lumOff resolution happens at render time once
+// the theme palette is known) plus a position in [0..1].
+export interface GradientFill {
+    kind: 'linear' | 'radial';
+    stops: Array<{ pos: number; colour: ColourRef }>;
+    // Linear only: final gradient angle in degrees, already converted
+    // from DOCX's 60000ths. 0 = left→right.
+    angle?: number;
+    // Radial only: 'circle' | 'rect' — selects SVG <radialGradient>
+    // vs an emulation via <linearGradient>. For v1 we use
+    // <radialGradient> for both.
+    path?: 'circle' | 'rect';
+}
+
+// Parsed <a:pattFill prst="…">. The two colours resolve at render time;
+// the hatching itself is emitted from a hard-coded catalogue in
+// src/drawing/shapes.ts.
+export interface PatternFill {
+    preset: string; // validated against PATTERN_ALLOWLIST in the parser
+    fg?: ColourRef;
+    bg?: ColourRef;
+}
+
+// Parsed <a:effectLst>. v1 handles outer/inner shadow and softEdge.
+// Glow / reflection remain TODO.
+export interface ShapeEffects {
+    outerShadow?: {
+        blurRad?: number; // EMU
+        dist?: number;    // EMU
+        dir?: number;     // degrees, converted from 60000ths
+        colour?: ColourRef;
+    };
+    innerShadow?: {
+        blurRad?: number;
+        dist?: number;
+        dir?: number;
+        colour?: ColourRef;
+    };
+    softEdge?: {
+        rad: number; // EMU
+    };
+}
 
 // DrawingML shape — the shapes authored as "Insert > Shapes" in Word
 // (rectangles, ellipses, arrows, callouts, stars, …). Parsed from
@@ -28,11 +73,22 @@ export interface DrawingShape extends OpenXmlElement {
     };
     fill?:
         | { type: 'solid'; color: string }
-        | { type: 'none' };
+        | { type: 'none' }
+        | { type: 'gradient'; gradient: GradientFill }
+        | { type: 'pattern'; pattern: PatternFill };
     stroke?: {
         color?: string;
         width?: number; // EMU
     };
+    // Parsed <a:avLst><a:gd name="adj|adj1|adj2|…" fmla="val N"/>.
+    // Only numeric `val N` formulas are accepted; keys are matched
+    // against a hard-coded allowlist (adj, adj1, adj2, adj3) before
+    // being used by presetGeometryToSvgPath.
+    presetAdjustments?: Record<string, number>;
+    // Parsed <a:effectLst>. Rendered as SVG <filter> elements in the
+    // shape's <defs>; the `filter=` attribute references them by
+    // counter-generated id.
+    effects?: ShapeEffects;
     bodyPr?: {
         lIns?: number; // EMU; default 91440
         tIns?: number;
