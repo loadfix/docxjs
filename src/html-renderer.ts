@@ -2032,9 +2032,12 @@ section.${c}>ol>li::before {
 
 		requestAnimationFrame(() => {
 			const bb = (container.firstElementChild as any).getBBox();
-
-			container.setAttribute("width", `${Math.ceil(bb.x +  bb.width)}`);
-			container.setAttribute("height", `${Math.ceil(bb.y + bb.height)}`);
+			// Use extent (width/height) for dimensions and viewBox to preserve negative origins; setAttribute rejects negative lengths.
+			const w = Math.max(1, Math.ceil(bb.width));
+			const h = Math.max(1, Math.ceil(bb.height));
+			container.setAttribute("width", `${w}`);
+			container.setAttribute("height", `${h}`);
+			container.setAttribute("viewBox", `${Math.floor(bb.x)} ${Math.floor(bb.y)} ${w} ${h}`);
 		});
 
 		return container;
