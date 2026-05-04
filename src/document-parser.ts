@@ -714,6 +714,12 @@ export class DocumentParser {
 		result.anchor = xml.attr(node, "anchor");
 		result.id = xml.attr(node, "id");
 
+		const tooltip = xml.attr(node, "tooltip");
+		if (tooltip) result.tooltip = tooltip;
+
+		const targetFrame = xml.attr(node, "tgtFrame");
+		if (targetFrame) result.targetFrame = targetFrame;
+
 		for (const c of xml.elements(node)) {
 			switch (c.localName) {
 				case "r":
@@ -1220,6 +1226,19 @@ export class DocumentParser {
 			switch (c.localName) {
 				case "tc":
 					result.children.push(this.parseTableCell(c));
+					break;
+
+				case "bookmarkStart":
+					// Row-level bookmarks carry w:colFirst / w:colLast and
+					// denote a column range. Kept in `children` alongside the
+					// cells so renderTableRow can project them onto the matching
+					// <td>s. Bookmarks without col range still round-trip here
+					// but render as a plain inline anchor.
+					result.children.push(parseBookmarkStart(c, xml));
+					break;
+
+				case "bookmarkEnd":
+					result.children.push(parseBookmarkEnd(c, xml));
 					break;
 
 				case "trPr":

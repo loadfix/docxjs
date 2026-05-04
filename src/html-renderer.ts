@@ -1507,7 +1507,28 @@ section.${c}>ol>li::before {
 		}
 
 		res.href = href;
-		return this.h(res);
+		const link = this.h(res) as HTMLElement;
+
+		// Tooltip (w:tooltip). DOCX-derived string — routed through
+		// setAttribute so the browser handles escaping. See CLAUDE.md
+		// security notes.
+		if (elem.tooltip) {
+			link.setAttribute('title', elem.tooltip);
+		}
+
+		// Target frame (w:tgtFrame). DOCX strings are attacker-controlled,
+		// so only a fixed set of values is honoured; anything else is dropped.
+		if (elem.targetFrame && /^_(blank|self|parent|top)$/.test(elem.targetFrame)) {
+			link.setAttribute('target', elem.targetFrame);
+			// For external links opened in a new browsing context, always set
+			// rel="noopener noreferrer" so the opened document cannot reach
+			// back into window.opener. No-op if the attribute is already set.
+			if (rawHref && !link.hasAttribute('rel')) {
+				link.setAttribute('rel', 'noopener noreferrer');
+			}
+		}
+
+		return link;
 	}
 	
 	renderSmartTag(elem: WmlSmartTag) {
@@ -1936,7 +1957,30 @@ section.${c}>ol>li::before {
 		if (elem.gridBefore)
 			children.push(this.renderTableCellPlaceholder(elem.gridBefore));
 
-		children.push(...this.renderElements(elem.children));
+		// Row-level bookmarks (w:bookmarkStart with w:colFirst / w:colLast)
+		// are siblings of <w:tc> in the parsed tree. They describe a column
+		// range, not a cell, so they must not render as stray <span>s inside
+		// the <tr> (invalid markup). Pull them out of the child list here and
+		// project them onto the matching <td>s after the cells are rendered.
+		const rowBookmarks: { name: string; colFirst: number; colLast: number }[] = [];
+		const cellChildren: OpenXmlElement[] = [];
+		for (const child of (elem.children ?? [])) {
+			if (child.type === DomType.BookmarkStart) {
+				const bm = child as WmlBookmarkStart;
+				if (bm.colFirst != null && bm.colLast != null && bm.name) {
+					rowBookmarks.push({ name: bm.name, colFirst: bm.colFirst, colLast: bm.colLast });
+					continue;
+				}
+			}
+			// BookmarkEnd siblings of <tc> also have no sensible inline
+			// rendering position. renderElement already maps BookmarkEnd to
+			// null, but skipping it here avoids the empty array entry.
+			if (child.type === DomType.BookmarkEnd) continue;
+			cellChildren.push(child);
+		}
+
+		const renderedCells = this.renderElements(cellChildren);
+		children.push(...renderedCells);
 
 		if (elem.gridAfter)
 			children.push(this.renderTableCellPlaceholder(elem.gridAfter));
@@ -1944,6 +1988,42 @@ section.${c}>ol>li::before {
 		this.currentCellPosition.row++;
 
 		const tr = this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+
+		// Attach column-range bookmarks to the rendered row. The anchor span
+		// is placed as the first child of the first cell in the range so
+		// fragment-based navigation lands at the intended column rather than
+		// a stray inline span at the top of the row.
+		if (rowBookmarks.length > 0) {
+			const cellNodes: HTMLElement[] = [];
+			// `cellChildren` lines up with `renderedCells` by index; cells
+			// lie at positions where the source element is DomType.Cell.
+			let idx = 0;
+			for (const child of cellChildren) {
+				if (child.type === DomType.Cell) {
+					const node = renderedCells[idx];
+					if (node instanceof HTMLElement) cellNodes.push(node);
+				}
+				idx++;
+			}
+
+			const ranges: string[] = [];
+			for (const bm of rowBookmarks) {
+				ranges.push(`${bm.colFirst}-${bm.colLast}`);
+				const targetCell = cellNodes[bm.colFirst];
+				if (!targetCell) continue;
+				// Zero-width anchor. `id` goes through setAttribute so the
+				// browser attribute-encodes the DOCX-derived name; no CSS or
+				// innerHTML sink involved. See CLAUDE.md security notes.
+				const anchor = document.createElement('span');
+				anchor.setAttribute('id', bm.name);
+				targetCell.insertBefore(anchor, targetCell.firstChild);
+			}
+
+			// data-* attributes go through setAttribute too. The range string
+			// is composed of integers we parsed with parseInt, so there's no
+			// untrusted content in the value.
+			tr.setAttribute('data-bookmark-cols', ranges.join(','));
+		}
 
 		if (this.showChanges && elem.rowRevisionKind) {
 			this.applyRowRevision(tr, elem);

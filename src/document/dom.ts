@@ -119,6 +119,8 @@ export abstract class OpenXmlElementBase implements OpenXmlElement {
 export interface WmlHyperlink extends OpenXmlElement {
 	id?: string;
     anchor?: string;
+    tooltip?: string;
+    targetFrame?: string;
 }
 
 export interface WmlAltChunk extends OpenXmlElement {
