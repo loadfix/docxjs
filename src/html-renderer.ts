@@ -117,6 +117,82 @@ interface Section {
 
 declare const Highlight: any;
 
+// BCP 47 subset: a language subtag of 1-8 ASCII letters, optionally followed
+// by one or more `-`-separated subtags of 1-8 alphanumerics. Doesn't enforce
+// registered codes — just the shape — which is the most a renderer can do
+// without shipping a language registry. DOCX `w:lang/@w:val` is attacker-
+// controlled, so anything not matching this drops silently (the `lang`
+// attribute is never emitted for that element).
+const BCP47_RE = /^[A-Za-z]{1,8}(-[A-Za-z0-9]{1,8})*$/;
+
+function isValidBcp47LanguageTag(value: unknown): value is string {
+	return typeof value === 'string' && BCP47_RE.test(value);
+}
+
+// Map a paragraph to a heading tag (`h1..h6`) or `p`. Precedence:
+//   1. explicit `outlineLevel` on the paragraph itself
+//   2. the resolved style's `paragraphProps.outlineLevel` (already merged
+//      through `basedOn` by processStyles)
+//   3. style name / id matching `Heading 1..9` (case-insensitive, tolerant
+//      of the space-less `Heading1` form)
+// HTML only has h1..h6, so DOCX outline levels 6..8 (Heading 7..9) fall
+// back to <p>. A level of 0 is "Heading 1" → h1.
+export function getHeadingTagName(
+	paragraph: WmlParagraph | null | undefined,
+	stylesMap: Record<string, IDomStyle> | null | undefined,
+): string {
+	if (!paragraph) return 'p';
+
+	const level = resolveHeadingLevel(paragraph, stylesMap);
+	if (level == null) return 'p';
+	if (!Number.isInteger(level) || level < 0 || level > 5) return 'p';
+	return `h${level + 1}`;
+}
+
+function resolveHeadingLevel(
+	paragraph: WmlParagraph,
+	stylesMap: Record<string, IDomStyle> | null | undefined,
+): number | null {
+	if (Number.isInteger(paragraph.outlineLevel) && paragraph.outlineLevel >= 0 && paragraph.outlineLevel <= 8) {
+		return paragraph.outlineLevel;
+	}
+
+	const style = paragraph.styleName && stylesMap?.[paragraph.styleName];
+	if (!style) return null;
+
+	// processStyles already merged paragraphProps through the basedOn chain,
+	// so checking the resolved style is enough — no need to walk basedOn
+	// again here.
+	const styleLevel = style.paragraphProps?.outlineLevel;
+	if (Number.isInteger(styleLevel) && styleLevel >= 0 && styleLevel <= 8) {
+		return styleLevel;
+	}
+
+	// Fall back to the style name / id. Word ships "Heading 1..9" by name
+	// with ids like `Heading1` or localized variants; walk the basedOn chain
+	// by id so a user style `basedOn="Heading2"` still resolves to h2.
+	const seen = new Set<string>();
+	let cursor: IDomStyle | undefined = style;
+	while (cursor && !seen.has(cursor.id)) {
+		seen.add(cursor.id);
+		const nameLevel = headingLevelFromName(cursor.name) ?? headingLevelFromName(cursor.id);
+		if (nameLevel != null) return nameLevel;
+		cursor = cursor.basedOn ? stylesMap?.[cursor.basedOn] : undefined;
+	}
+
+	return null;
+}
+
+function headingLevelFromName(name: string | null | undefined): number | null {
+	if (!name) return null;
+	// Tolerant match: "Heading 1", "heading  1", "Heading1", "heading1".
+	const m = /^heading\s*([1-9])$/i.exec(name.trim());
+	if (!m) return null;
+	const n = Number(m[1]);
+	// DOCX "Heading 1" → outline level 0 → h1.
+	return n - 1;
+}
+
 type CellVerticalMergeType = Record<number, HTMLTableCellElement>;
 
 export class HtmlRenderer {
@@ -1638,7 +1714,15 @@ section.${c}>ol>li::before {
 	}
 
 	renderParagraph(elem: WmlParagraph) {
-		var result = this.toHTML(elem, ns.html, "p");
+		// Emit the correct heading element for paragraphs with outlineLevel
+		// (or a style that resolves to Heading 1..6). Everything else stays
+		// as <p>. This is a tagName substitution only — class, style, data
+		// attributes, and children are unchanged.
+		this.applyParagraphBreakControls(elem);
+		this.applyParagraphDropCap(elem);
+
+		const tagName = getHeadingTagName(elem, this.styleMap);
+		var result = this.toHTML(elem, ns.html, tagName);
 
 		const style = this.findStyle(elem.styleName);
 		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
@@ -1663,6 +1747,71 @@ section.${c}>ol>li::before {
 		}
 
 		return result;
+	}
+
+	// Writes the four Word "keep with" / pagination controls into the
+	// paragraph's cssStyle so they flow through toHTML unchanged. Falls
+	// back to the paragraph style for any value the paragraph itself
+	// doesn't set — Word's resolution order.
+	private applyParagraphBreakControls(elem: WmlParagraph) {
+		const css = elem.cssStyle ??= {};
+		const style = this.findStyle(elem.styleName);
+		const styleProps = style?.paragraphProps;
+
+		const widowControl = elem.widowControl ?? styleProps?.widowControl;
+		const keepNext = elem.keepNext ?? styleProps?.keepNext;
+		const keepLines = elem.keepLines ?? styleProps?.keepLines;
+		const pageBreakBefore = elem.pageBreakBefore ?? styleProps?.pageBreakBefore;
+
+		// Word's default is widowControl=on; only emit CSS when it's been
+		// explicitly turned off.
+		if (widowControl === false) {
+			css["widows"] = "0";
+			css["orphans"] = "0";
+		}
+
+		if (keepNext === true && !css["break-after"]) {
+			css["break-after"] = "avoid";
+		}
+
+		if (keepLines === true && !css["break-inside"]) {
+			css["break-inside"] = "avoid";
+		}
+
+		// The existing page-splitter in parseDocument() already shunts a
+		// paragraph whose style sets pageBreakBefore into its own section, so
+		// a CSS `break-before: page` is belt-and-braces. It does nothing when
+		// the splitter has already broken, and it's correct for the
+		// non-experimental (single-page) render path.
+		if (pageBreakBefore === true && !css["break-before"]) {
+			css["break-before"] = "page";
+		}
+	}
+
+	// Applies the CSS implementing a Word drop cap. The parser stores the
+	// variant (`drop` = in-flow float, `margin` = floats into the page
+	// margin) and the span-in-lines on the paragraph itself.
+	private applyParagraphDropCap(elem: WmlParagraph) {
+		if (!elem.dropCap) return;
+		const lines = (Number.isInteger(elem.dropCapLines) && elem.dropCapLines! >= 1)
+			? elem.dropCapLines!
+			: 3;
+		const css = elem.cssStyle ??= {};
+
+		css["float"] = "left";
+		// Scale the first glyph to roughly `lines` lines tall. `line-height:
+		// 1` on a font-size of Nem gives N line heights of body text — in
+		// practice Word's rendering lands closer to 0.9 so use that.
+		css["font-size"] = `${lines}em`;
+		css["line-height"] = "0.9";
+		if (elem.dropCap === "drop") {
+			css["margin"] = "0 0.1em 0 0";
+		} else {
+			// "margin" variant: the drop cap outdents into the page margin.
+			// A negative margin-left roughly half an em per covered line gives
+			// the effect without needing real Word page-margin metrics.
+			css["margin-left"] = `-${lines * 0.5}em`;
+		}
 	}
 
 	private appendParagraphMarkRevision(paragraphEl: HTMLElement, elem: WmlParagraph) {
@@ -2501,7 +2650,12 @@ section.${c}>ol>li::before {
 	}
 
 	toH(elem: OpenXmlElement, ns: ns, tagName: string, children: Node[] = null) {
-		const { "$lang": lang, ...style } = elem.cssStyle ?? {};
+		const { "$lang": rawLang, ...style } = elem.cssStyle ?? {};
+		// DOCX-derived strings are attacker-controlled. The lang IDL property
+		// reflects into the `lang` attribute (browser-encoded), so the sink is
+		// safe — but we still drop values that aren't BCP 47-shaped so a
+		// crafted DOCX can't stuff garbage into an assistive-tech hint.
+		const lang = isValidBcp47LanguageTag(rawLang) ? rawLang : undefined;
 		const className = cx(elem.className, elem.styleName && this.processStyleName(elem.styleName));
 		return { ns, tagName, className, lang, style, children: children ?? this.renderElements(elem.children) } as any;
 	}

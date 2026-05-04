@@ -21,8 +21,14 @@ export interface ParagraphProperties extends CommonProperties {
     keepLines: boolean;
     keepNext: boolean;
     pageBreakBefore: boolean;
+    widowControl: boolean;
     outlineLevel: number;
 	styleName?: string;
+
+    /** Drop-cap variant from w:framePr (`drop` = in-flow, `margin` = in margin). */
+    dropCap?: "drop" | "margin";
+    /** How many lines the drop cap spans (w:lines on w:framePr). Default 3. */
+    dropCapLines?: number;
 
     runProps: RunProperties;
 }
@@ -89,7 +95,11 @@ export function parseParagraphProperty(elem: Element, props: ParagraphProperties
         case "pageBreakBefore":
             props.pageBreakBefore = xml.boolAttr(elem, "val", true);
             break;
-        
+
+        case "widowControl":
+            props.widowControl = xml.boolAttr(elem, "val", true);
+            break;
+
         case "outlineLvl":
             props.outlineLevel = xml.intAttr(elem, "val");
             break;
