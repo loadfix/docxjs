@@ -2409,6 +2409,33 @@
                     case "moveTo":
                         result.children.push(this.parseMoveTo(el, e => this.parseParagraph(e)));
                         break;
+                    case "fldSimple":
+                        result.children.push(this.parseFieldSimple(el, result));
+                        break;
+                }
+            }
+            return result;
+        }
+        parseFieldSimple(node, parent) {
+            const result = {
+                type: DomType.SimpleField,
+                instruction: globalXmlParser.attr(node, "instr"),
+                lock: globalXmlParser.boolAttr(node, "lock", false),
+                dirty: globalXmlParser.boolAttr(node, "dirty", false),
+                parent,
+                children: [],
+            };
+            for (const c of globalXmlParser.elements(node)) {
+                switch (c.localName) {
+                    case "r":
+                        result.children.push(this.parseRun(c, result));
+                        break;
+                    case "hyperlink":
+                        result.children.push(this.parseHyperlink(c, result));
+                        break;
+                    case "fldSimple":
+                        result.children.push(this.parseFieldSimple(c, result));
+                        break;
                 }
             }
             return result;
@@ -2513,12 +2540,7 @@
                         result.children.push(new WmlCommentReference(globalXmlParser.attr(c, "id")));
                         break;
                     case "fldSimple":
-                        result.children.push({
-                            type: DomType.SimpleField,
-                            instruction: globalXmlParser.attr(c, "instr"),
-                            lock: globalXmlParser.boolAttr(c, "lock", false),
-                            dirty: globalXmlParser.boolAttr(c, "dirty", false)
-                        });
+                        result.children.push(this.parseFieldSimple(c, result));
                         break;
                     case "instrText":
                         result.fieldRun = true;
@@ -6304,6 +6326,7 @@ section.${c}>ol>li::before {
     exports.keyBy = keyBy;
     exports.mergeDeep = mergeDeep;
     exports.parseAsync = parseAsync;
+    exports.parseFieldInstruction = parseFieldInstruction;
     exports.renderAsync = renderAsync;
     exports.renderDocument = renderDocument;
     exports.renderThumbnails = renderThumbnails;

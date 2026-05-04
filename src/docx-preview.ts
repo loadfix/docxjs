@@ -29,6 +29,9 @@ export {
 // VML colour sanitiser — strips Word's "[####]" theme-index suffix before
 // delegating to sanitizeCssColor. Exported for unit testing; see #171.
 export { sanitizeVmlColor } from './vml/vml';
+// Field instruction tokenizer — exported for harness testing.
+export { parseFieldInstruction } from './fields/instruction';
+export type { ParsedFieldInstruction } from './fields/instruction';
 
 export interface CommentsOptions {
     sidebar?: boolean;

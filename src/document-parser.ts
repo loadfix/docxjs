@@ -760,6 +760,42 @@ export class DocumentParser {
 				case "moveTo":
 					result.children.push(this.parseMoveTo(el, e => this.parseParagraph(e)));
 					break;
+
+				case "fldSimple":
+					// A paragraph-level simple field wraps its cached result as
+					// child runs (and occasionally nested fldSimple for e.g.
+					// HYPERLINK containing formatted text). Recurse on the
+					// children so renderSimpleField gets real content; store
+					// the instruction so the renderer can wrap the result.
+					result.children.push(this.parseFieldSimple(el, result));
+					break;
+			}
+		}
+
+		return result;
+	}
+
+	parseFieldSimple(node: Element, parent?: OpenXmlElement): WmlFieldSimple {
+		const result: WmlFieldSimple = {
+			type: DomType.SimpleField,
+			instruction: xml.attr(node, "instr"),
+			lock: xml.boolAttr(node, "lock", false),
+			dirty: xml.boolAttr(node, "dirty", false),
+			parent,
+			children: [],
+		};
+
+		for (const c of xml.elements(node)) {
+			switch (c.localName) {
+				case "r":
+					result.children.push(this.parseRun(c, result));
+					break;
+				case "hyperlink":
+					result.children.push(this.parseHyperlink(c, result));
+					break;
+				case "fldSimple":
+					result.children.push(this.parseFieldSimple(c, result));
+					break;
 			}
 		}
 
@@ -892,12 +928,7 @@ export class DocumentParser {
 					break;
 
 				case "fldSimple":
-					result.children.push(<WmlFieldSimple>{
-						type: DomType.SimpleField,
-						instruction: xml.attr(c, "instr"),
-						lock: xml.boolAttr(c, "lock", false),
-						dirty: xml.boolAttr(c, "dirty", false)
-					});
+					result.children.push(this.parseFieldSimple(c, result));
 					break;
 
 				case "instrText":
