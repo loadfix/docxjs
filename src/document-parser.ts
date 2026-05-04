@@ -848,6 +848,14 @@ export class DocumentParser {
 					// the instruction so the renderer can wrap the result.
 					result.children.push(this.parseFieldSimple(el, result));
 					break;
+
+				case "ruby":
+					// w:ruby at paragraph scope. OOXML allows ruby as a direct
+					// child of <w:p>; Wave 4.1 added the handler at run scope
+					// only. Flagging here so paragraph-level ruby doesn't get
+					// silently dropped.
+					result.children.push(this.parseRuby(el, result));
+					break;
 			}
 		}
 

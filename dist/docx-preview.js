@@ -32,6 +32,7 @@
         RelationshipTypes["Comments"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
         RelationshipTypes["CommentsExtended"] = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended";
         RelationshipTypes["AltChunk"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk";
+        RelationshipTypes["Chart"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
     })(RelationshipTypes || (RelationshipTypes = {}));
     function parseRelationships(root, xml) {
         return xml.elements(root).map(e => ({
@@ -872,6 +873,12 @@
         DomType["CommentRangeEnd"] = "commentRangeEnd";
         DomType["AltChunk"] = "altChunk";
         DomType["Sdt"] = "sdt";
+        DomType["Ruby"] = "ruby";
+        DomType["RubyBase"] = "rubyBase";
+        DomType["RubyText"] = "rubyText";
+        DomType["FitText"] = "fitText";
+        DomType["BidiOverride"] = "bidiOverride";
+        DomType["Chart"] = "chart";
     })(DomType || (DomType = {}));
     class OpenXmlElementBase {
         constructor() {
@@ -1237,6 +1244,212 @@
         }
     }
 
+    class ChartPart extends Part {
+        constructor(pkg, path) {
+            super(pkg, path);
+        }
+        parseXml(root) {
+            this.chart = parseChartSpace(root, this.path);
+        }
+    }
+    function parseChartSpace(chartSpace, path) {
+        const key = deriveKey(path);
+        const chart = globalXmlParser.element(chartSpace, "chart");
+        if (!chart) {
+            return {
+                key, title: "", showLegend: false, kind: "unknown",
+                grouping: "clustered", series: [],
+            };
+        }
+        const titleEl = globalXmlParser.element(chart, "title");
+        const legendEl = globalXmlParser.element(chart, "legend");
+        const plotArea = globalXmlParser.element(chart, "plotArea");
+        const title = titleEl ? extractRichText(titleEl) : "";
+        const showLegend = legendEl != null;
+        let kind = "unknown";
+        let grouping = "clustered";
+        let series = [];
+        if (plotArea) {
+            for (const child of globalXmlParser.elements(plotArea)) {
+                const k = localNameToKind(child.localName);
+                if (k === "unknown")
+                    continue;
+                kind = k;
+                grouping = globalXmlParser.attr(globalXmlParser.element(child, "grouping") ?? null, "val") ?? "clustered";
+                if (k === "column" || k === "bar") {
+                    const barDir = globalXmlParser.attr(globalXmlParser.element(child, "barDir") ?? null, "val");
+                    if (barDir === "bar")
+                        kind = "bar";
+                    else if (barDir === "col")
+                        kind = "column";
+                }
+                series = globalXmlParser.elements(child, "ser").map(parseSeries);
+                break;
+            }
+        }
+        return { key, title, showLegend, kind, grouping, series };
+    }
+    function deriveKey(path) {
+        const segs = path.split("/");
+        const file = segs[segs.length - 1] ?? "";
+        const dot = file.lastIndexOf(".");
+        return dot > 0 ? file.slice(0, dot) : file;
+    }
+    function localNameToKind(name) {
+        switch (name) {
+            case "barChart": return "column";
+            case "bar3DChart": return "column";
+            case "lineChart": return "line";
+            case "line3DChart": return "line";
+            case "pieChart": return "pie";
+            case "pie3DChart": return "pie";
+            case "doughnutChart": return "pie";
+            default: return "unknown";
+        }
+    }
+    function extractRichText(titleEl) {
+        const strRef = findDescendant(titleEl, "strRef");
+        if (strRef) {
+            const cache = globalXmlParser.element(strRef, "strCache");
+            if (cache) {
+                const pt = globalXmlParser.element(cache, "pt");
+                if (pt) {
+                    const v = globalXmlParser.element(pt, "v");
+                    if (v)
+                        return v.textContent ?? "";
+                }
+            }
+        }
+        const parts = [];
+        walkTextRuns(titleEl, parts);
+        return parts.join("");
+    }
+    function walkTextRuns(node, out) {
+        for (const c of globalXmlParser.elements(node)) {
+            if (c.localName === "t") {
+                out.push(c.textContent ?? "");
+            }
+            else {
+                walkTextRuns(c, out);
+            }
+        }
+    }
+    function findDescendant(node, localName) {
+        for (const c of globalXmlParser.elements(node)) {
+            if (c.localName === localName)
+                return c;
+            const d = findDescendant(c, localName);
+            if (d)
+                return d;
+        }
+        return null;
+    }
+    function parseSeries(serEl) {
+        const title = parseSeriesTitle(serEl);
+        const color = parseSeriesColor(serEl);
+        const categories = parseCategoryLabels(globalXmlParser.element(serEl, "cat"));
+        const values = parseNumericValues(globalXmlParser.element(serEl, "val"));
+        return { title, color, categories, values };
+    }
+    function parseSeriesTitle(serEl) {
+        const tx = globalXmlParser.element(serEl, "tx");
+        if (!tx)
+            return "";
+        const strRef = globalXmlParser.element(tx, "strRef");
+        if (strRef) {
+            const cache = globalXmlParser.element(strRef, "strCache");
+            if (cache) {
+                const pt = globalXmlParser.element(cache, "pt");
+                if (pt) {
+                    const v = globalXmlParser.element(pt, "v");
+                    if (v)
+                        return v.textContent ?? "";
+                }
+            }
+        }
+        const v = globalXmlParser.element(tx, "v");
+        if (v)
+            return v.textContent ?? "";
+        const rich = globalXmlParser.element(tx, "rich");
+        if (rich) {
+            const parts = [];
+            walkTextRuns(rich, parts);
+            return parts.join("");
+        }
+        return "";
+    }
+    function parseSeriesColor(serEl) {
+        const spPr = globalXmlParser.element(serEl, "spPr");
+        if (!spPr)
+            return null;
+        const solidFill = globalXmlParser.element(spPr, "solidFill");
+        if (!solidFill)
+            return null;
+        const srgb = globalXmlParser.element(solidFill, "srgbClr");
+        if (srgb) {
+            const raw = globalXmlParser.attr(srgb, "val");
+            return sanitizeCssColor(raw);
+        }
+        return null;
+    }
+    function parseCategoryLabels(catEl) {
+        if (!catEl)
+            return [];
+        const cache = findCache(catEl, ["strCache", "numCache"]);
+        if (!cache)
+            return [];
+        return extractPoints(cache, (v) => v);
+    }
+    function parseNumericValues(valEl) {
+        if (!valEl)
+            return [];
+        const cache = findCache(valEl, ["numCache", "strCache"]);
+        if (!cache)
+            return [];
+        return extractPoints(cache, (v) => {
+            const n = parseFloat(v);
+            return Number.isFinite(n) ? n : NaN;
+        });
+    }
+    function findCache(parent, localNames) {
+        for (const name of localNames) {
+            const ref = globalXmlParser.element(parent, name === "numCache" ? "numRef" : "strRef");
+            if (ref) {
+                const cache = globalXmlParser.element(ref, name);
+                if (cache)
+                    return cache;
+            }
+        }
+        for (const name of localNames) {
+            const cache = globalXmlParser.element(parent, name);
+            if (cache)
+                return cache;
+        }
+        return null;
+    }
+    const MAX_POINTS = 4096;
+    function extractPoints(cache, mapValue) {
+        const pts = globalXmlParser.elements(cache, "pt");
+        const pairs = [];
+        for (const pt of pts) {
+            const rawIdx = globalXmlParser.attr(pt, "idx");
+            const idx = rawIdx != null ? parseInt(rawIdx, 10) : NaN;
+            if (!Number.isFinite(idx) || idx < 0 || idx >= MAX_POINTS)
+                continue;
+            const v = globalXmlParser.element(pt, "v");
+            const text = v ? (v.textContent ?? "") : "";
+            pairs.push({ idx, value: mapValue(text) });
+        }
+        pairs.sort((a, b) => a.idx - b.idx);
+        if (pairs.length === 0)
+            return [];
+        const maxIdx = pairs[pairs.length - 1].idx;
+        const out = new Array(maxIdx + 1);
+        for (const { idx, value } of pairs)
+            out[idx] = value;
+        return out;
+    }
+
     const topLevelRels = [
         { type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
         { type: RelationshipTypes.ExtendedProperties, target: "docProps/app.xml" },
@@ -1320,6 +1533,9 @@
                     break;
                 case RelationshipTypes.CommentsExtended:
                     this.commentsExtendedPart = part = new CommentsExtendedPart(this._package, path);
+                    break;
+                case RelationshipTypes.Chart:
+                    part = new ChartPart(this._package, path);
                     break;
             }
             if (part == null)
@@ -2363,16 +2579,72 @@
                 const tagEl = globalXmlParser.element(sdtPr, "tag");
                 const alias = aliasEl ? globalXmlParser.attr(aliasEl, "val") : null;
                 const tag = tagEl ? globalXmlParser.attr(tagEl, "val") : null;
-                if (alias || tag) {
+                const control = this.parseSdtControl(sdtPr);
+                if (alias || tag || control) {
                     const wrapper = { type: DomType.Sdt, children };
                     if (alias)
                         wrapper.sdtAlias = alias;
                     if (tag)
                         wrapper.sdtTag = tag;
+                    if (control)
+                        wrapper.sdtControl = control;
                     return [wrapper];
                 }
             }
             return children;
+        }
+        parseSdtControl(sdtPr) {
+            for (const el of globalXmlParser.elements(sdtPr)) {
+                switch (el.localName) {
+                    case "checkbox": {
+                        const checkedEl = globalXmlParser.element(el, "checked");
+                        const checkedStateEl = globalXmlParser.element(el, "checkedState");
+                        const uncheckedStateEl = globalXmlParser.element(el, "uncheckedState");
+                        const checkedRaw = checkedEl ? globalXmlParser.attr(checkedEl, "val") : null;
+                        const checked = checkedRaw === "1" || checkedRaw === "true";
+                        const checkedChar = checkedStateEl ? globalXmlParser.hexAttr(checkedStateEl, "val") : undefined;
+                        const uncheckedChar = uncheckedStateEl ? globalXmlParser.hexAttr(uncheckedStateEl, "val") : undefined;
+                        const result = { type: "checkbox", checked };
+                        if (checkedChar != null)
+                            result.checkedChar = checkedChar;
+                        if (uncheckedChar != null)
+                            result.uncheckedChar = uncheckedChar;
+                        return result;
+                    }
+                    case "dropDownList":
+                    case "comboBox": {
+                        const items = [];
+                        for (const li of globalXmlParser.elements(el, "listItem")) {
+                            const displayText = globalXmlParser.attr(li, "displayText");
+                            const value = globalXmlParser.attr(li, "value");
+                            items.push({
+                                displayText: displayText ?? value ?? "",
+                                value: value ?? displayText ?? ""
+                            });
+                        }
+                        return { type: "dropdown", items };
+                    }
+                    case "date":
+                    case "sdtDate": {
+                        const formatEl = globalXmlParser.element(el, "dateFormat");
+                        const fullDateEl = globalXmlParser.element(el, "fullDate");
+                        const format = formatEl ? globalXmlParser.attr(formatEl, "val") : null;
+                        const fullDateAttr = globalXmlParser.attr(el, "fullDate");
+                        const fullDate = fullDateEl ? globalXmlParser.attr(fullDateEl, "val") : fullDateAttr;
+                        return {
+                            type: "date",
+                            format: format ?? undefined,
+                            fullDate: fullDate ?? undefined
+                        };
+                    }
+                    case "picture":
+                        return { type: "picture" };
+                    case "docPartList":
+                    case "docPartObj":
+                        return { type: "gallery" };
+                }
+            }
+            return null;
         }
         parseInserted(node, parentParser) {
             return {
@@ -2460,6 +2732,9 @@
                         break;
                     case "fldSimple":
                         result.children.push(this.parseFieldSimple(el, result));
+                        break;
+                    case "ruby":
+                        result.children.push(this.parseRuby(el, result));
                         break;
                 }
             }
@@ -2665,9 +2940,98 @@
                     case "pict":
                         result.children.push(this.parseVmlPicture(c));
                         break;
+                    case "ruby":
+                        result.children.push(this.parseRuby(c, result));
+                        break;
                     case "rPr":
                         this.parseRunProperties(c, result);
                         break;
+                }
+            }
+            let wrapped = result;
+            if (result.bidiOverride) {
+                const bidi = {
+                    type: DomType.BidiOverride,
+                    dir: result.bidiOverride,
+                    parent,
+                    children: [wrapped]
+                };
+                wrapped.parent = bidi;
+                delete result.bidiOverride;
+                wrapped = bidi;
+            }
+            if (result.fitText) {
+                const fit = {
+                    type: DomType.FitText,
+                    width: result.fitText.width,
+                    id: result.fitText.id,
+                    parent,
+                    children: [wrapped]
+                };
+                wrapped.parent = fit;
+                delete result.fitText;
+                wrapped = fit;
+            }
+            return wrapped;
+        }
+        parseRuby(node, parent) {
+            const result = { type: DomType.Ruby, parent, children: [] };
+            for (const c of globalXmlParser.elements(node)) {
+                switch (c.localName) {
+                    case "rubyPr": {
+                        const rubyPr = {};
+                        for (const p of globalXmlParser.elements(c)) {
+                            const v = globalXmlParser.attr(p, "val");
+                            switch (p.localName) {
+                                case "rubyAlign":
+                                    if (/^(center|distributeLetter|distributeSpace|left|right|rightVertical|start|end)$/.test(v))
+                                        rubyPr.rubyAlign = v;
+                                    break;
+                                case "hps": {
+                                    const n = globalXmlParser.intAttr(p, "val");
+                                    if (Number.isFinite(n) && n > 0 && n < 1000)
+                                        rubyPr.hps = n;
+                                    break;
+                                }
+                                case "hpsBaseText": {
+                                    const n = globalXmlParser.intAttr(p, "val");
+                                    if (Number.isFinite(n) && n > 0 && n < 1000)
+                                        rubyPr.hpsBaseText = n;
+                                    break;
+                                }
+                                case "hpsRaise": {
+                                    const n = globalXmlParser.intAttr(p, "val");
+                                    if (Number.isFinite(n) && n >= 0 && n < 1000)
+                                        rubyPr.hpsRaise = n;
+                                    break;
+                                }
+                                case "lid":
+                                    if (v)
+                                        rubyPr.lid = v;
+                                    break;
+                            }
+                        }
+                        result.rubyPr = rubyPr;
+                        break;
+                    }
+                    case "rubyBase": {
+                        const base = { type: DomType.RubyBase, parent: result, children: [] };
+                        for (const r of globalXmlParser.elements(c)) {
+                            if (r.localName === "r")
+                                base.children.push(this.parseRun(r, base));
+                        }
+                        result.children.push(base);
+                        break;
+                    }
+                    case "rt": {
+                        const rt = { type: DomType.RubyText, parent: result, children: [] };
+                        for (const r of globalXmlParser.elements(c)) {
+                            if (r.localName === "r")
+                                rt.children.push(this.parseRun(r, rt));
+                        }
+                        result.children.push(rt);
+                        break;
+                    }
                 }
             }
             return result;
@@ -2732,6 +3096,20 @@
                     case "rPrChange":
                         run.formattingRevision = parseFormattingRevision(c);
                         break;
+                    case "fitText": {
+                        const w = globalXmlParser.floatAttr(c, "val");
+                        if (Number.isFinite(w) && w > 0) {
+                            run.fitText = { width: w, id: globalXmlParser.attr(c, "id") || undefined };
+                        }
+                        break;
+                    }
+                    case "bdo": {
+                        const raw = globalXmlParser.attr(c, "val");
+                        if (raw === "ltr" || raw === "rtl") {
+                            run.bidiOverride = raw;
+                        }
+                        break;
+                    }
                     default:
                         return false;
                 }
@@ -2983,9 +3361,18 @@
                         return this.parseDrawingShape(n);
                     case "wgp":
                         return this.parseDrawingShapeGroup(n);
+                    case "chart":
+                        return this.parseChartReference(n);
                 }
             }
             return null;
+        }
+        parseChartReference(elem) {
+            const relId = globalXmlParser.attr(elem, "id");
+            return {
+                type: DomType.Chart,
+                relId: relId ?? "",
+            };
         }
         parseXfrm(xfrm) {
             if (!xfrm)
@@ -3077,6 +3464,110 @@
                 result.bIns = bIns;
             return result;
         }
+        parseCustGeom(custGeom) {
+            if (!custGeom)
+                return undefined;
+            const paths = [];
+            const pathLst = globalXmlParser.element(custGeom, "pathLst");
+            if (!pathLst)
+                return undefined;
+            for (const pathEl of globalXmlParser.elements(pathLst, "path")) {
+                const w = this.safeNum(globalXmlParser.intAttr(pathEl, "w", 0));
+                const h = this.safeNum(globalXmlParser.intAttr(pathEl, "h", 0));
+                if (w <= 0 || h <= 0)
+                    continue;
+                let d = "";
+                let penX = 0;
+                let penY = 0;
+                for (const cmd of globalXmlParser.elements(pathEl)) {
+                    switch (cmd.localName) {
+                        case "moveTo": {
+                            const pt = globalXmlParser.element(cmd, "pt");
+                            if (!pt)
+                                break;
+                            const x = this.safeNum(globalXmlParser.intAttr(pt, "x", 0));
+                            const y = this.safeNum(globalXmlParser.intAttr(pt, "y", 0));
+                            d += `M ${x} ${y} `;
+                            penX = x;
+                            penY = y;
+                            break;
+                        }
+                        case "lnTo": {
+                            const pt = globalXmlParser.element(cmd, "pt");
+                            if (!pt)
+                                break;
+                            const x = this.safeNum(globalXmlParser.intAttr(pt, "x", 0));
+                            const y = this.safeNum(globalXmlParser.intAttr(pt, "y", 0));
+                            d += `L ${x} ${y} `;
+                            penX = x;
+                            penY = y;
+                            break;
+                        }
+                        case "cubicBezTo": {
+                            const pts = globalXmlParser.elements(cmd, "pt");
+                            if (pts.length < 3)
+                                break;
+                            const x1 = this.safeNum(globalXmlParser.intAttr(pts[0], "x", 0));
+                            const y1 = this.safeNum(globalXmlParser.intAttr(pts[0], "y", 0));
+                            const x2 = this.safeNum(globalXmlParser.intAttr(pts[1], "x", 0));
+                            const y2 = this.safeNum(globalXmlParser.intAttr(pts[1], "y", 0));
+                            const x = this.safeNum(globalXmlParser.intAttr(pts[2], "x", 0));
+                            const y = this.safeNum(globalXmlParser.intAttr(pts[2], "y", 0));
+                            d += `C ${x1} ${y1} ${x2} ${y2} ${x} ${y} `;
+                            penX = x;
+                            penY = y;
+                            break;
+                        }
+                        case "quadBezTo": {
+                            const pts = globalXmlParser.elements(cmd, "pt");
+                            if (pts.length < 2)
+                                break;
+                            const x1 = this.safeNum(globalXmlParser.intAttr(pts[0], "x", 0));
+                            const y1 = this.safeNum(globalXmlParser.intAttr(pts[0], "y", 0));
+                            const x = this.safeNum(globalXmlParser.intAttr(pts[1], "x", 0));
+                            const y = this.safeNum(globalXmlParser.intAttr(pts[1], "y", 0));
+                            d += `Q ${x1} ${y1} ${x} ${y} `;
+                            penX = x;
+                            penY = y;
+                            break;
+                        }
+                        case "arcTo": {
+                            const wR = this.safeNum(globalXmlParser.intAttr(cmd, "wR", 0));
+                            const hR = this.safeNum(globalXmlParser.intAttr(cmd, "hR", 0));
+                            const stAng = this.safeNum(globalXmlParser.intAttr(cmd, "stAng", 0));
+                            const swAng = this.safeNum(globalXmlParser.intAttr(cmd, "swAng", 0));
+                            if (wR === 0 || hR === 0)
+                                break;
+                            const stRad = (stAng / 60000) * (Math.PI / 180);
+                            const swRad = (swAng / 60000) * (Math.PI / 180);
+                            const cx = penX - wR * Math.cos(stRad);
+                            const cy = penY - hR * Math.sin(stRad);
+                            const endAng = stRad + swRad;
+                            const endX = cx + wR * Math.cos(endAng);
+                            const endY = cy + hR * Math.sin(endAng);
+                            const largeArc = Math.abs(swRad) > Math.PI ? 1 : 0;
+                            const sweep = swRad >= 0 ? 1 : 0;
+                            d += `A ${wR} ${hR} 0 ${largeArc} ${sweep} ${endX} ${endY} `;
+                            penX = endX;
+                            penY = endY;
+                            break;
+                        }
+                        case "close": {
+                            d += "Z ";
+                            break;
+                        }
+                    }
+                }
+                d = d.trim();
+                if (d) {
+                    paths.push({ w, h, d });
+                }
+            }
+            return { paths };
+        }
+        safeNum(n) {
+            return typeof n === "number" && Number.isFinite(n) ? n : 0;
+        }
         parseDrawingShape(elem) {
             const result = {
                 type: DomType.DrawingShape,
@@ -3094,6 +3585,10 @@
                 else if (globalXmlParser.element(spPr, "custGeom")) {
                     result.presetGeometry = "rect";
                     result.hasCustomGeometry = true;
+                    const custGeom = this.parseCustGeom(globalXmlParser.element(spPr, "custGeom"));
+                    if (custGeom && custGeom.paths.length > 0) {
+                        result.custGeom = custGeom;
+                    }
                 }
                 else {
                     result.presetGeometry = "rect";
@@ -3567,9 +4062,42 @@
                         if (globalXmlParser.boolAttr(c, "val", true))
                             style["direction"] = "rtl";
                         break;
+                    case "cs":
+                        break;
                     case "bCs":
+                        style["font-weight"] = globalXmlParser.boolAttr(c, "val", true) ? "bold" : "normal";
+                        break;
                     case "iCs":
-                    case "szCs":
+                        style["font-style"] = globalXmlParser.boolAttr(c, "val", true) ? "italic" : "normal";
+                        break;
+                    case "szCs": {
+                        const csSize = globalXmlParser.lengthAttr(c, "val", LengthUsage.FontSize);
+                        if (csSize) {
+                            style["$cs-font-size"] = csSize;
+                            if (!style["font-size"])
+                                style["font-size"] = csSize;
+                        }
+                        break;
+                    }
+                    case "em": {
+                        const raw = globalXmlParser.attr(c, "val");
+                        switch (raw) {
+                            case "dot":
+                                style["text-emphasis"] = "filled dot";
+                                break;
+                            case "comma":
+                                style["text-emphasis"] = "filled sesame";
+                                break;
+                            case "circle":
+                                style["text-emphasis"] = "filled circle";
+                                break;
+                            case "underDot":
+                                style["text-emphasis"] = "filled dot";
+                                style["text-emphasis-position"] = "under";
+                                break;
+                        }
+                        break;
+                    }
                     case "tabs":
                     case "outlineLvl":
                     case "contextualSpacing":
@@ -3581,8 +4109,6 @@
                     case "keepLines":
                     case "keepNext":
                     case "widowControl":
-                    case "bidi":
-                    case "rtl":
                     case "noProof":
                         break;
                     default:
@@ -4095,6 +4621,74 @@
         return classNames.filter(Boolean).join(" ");
     }
 
+    const VALID_COMMANDS = new Set(['M', 'L', 'C', 'Q', 'A', 'Z']);
+    function scalePathD(d, pathW, pathH, renderW, renderH) {
+        if (pathW <= 0 || pathH <= 0)
+            return '';
+        const sx = renderW / pathW;
+        const sy = renderH / pathH;
+        const tokens = d.split(/\s+/).filter(Boolean);
+        let out = '';
+        let cmd = '';
+        let argIdx = 0;
+        const argsPerCmd = {
+            M: 2, L: 2, C: 6, Q: 4, A: 7, Z: 0,
+        };
+        for (const t of tokens) {
+            if (VALID_COMMANDS.has(t)) {
+                cmd = t;
+                argIdx = 0;
+                out += (out ? ' ' : '') + cmd;
+                continue;
+            }
+            const n = Number(t);
+            if (!Number.isFinite(n))
+                continue;
+            let v = n;
+            if (cmd === 'A') {
+                const ai = argIdx % 7;
+                if (ai === 0)
+                    v = n * sx;
+                else if (ai === 1)
+                    v = n * sy;
+                else if (ai === 2)
+                    v = n;
+                else if (ai === 3)
+                    v = n;
+                else if (ai === 4)
+                    v = n;
+                else if (ai === 5)
+                    v = n * sx;
+                else
+                    v = n * sy;
+            }
+            else if (argsPerCmd[cmd]) {
+                const ai = argIdx % argsPerCmd[cmd];
+                v = ai % 2 === 0 ? n * sx : n * sy;
+            }
+            out += ' ' + (Number.isFinite(v) ? v : 0);
+            argIdx++;
+        }
+        return out;
+    }
+    function customGeometryToSvgPaths(custGeom, renderWidth, renderHeight) {
+        if (!custGeom || !custGeom.paths || renderWidth <= 0 || renderHeight <= 0) {
+            return [];
+        }
+        const out = [];
+        for (const p of custGeom.paths) {
+            if (!p || !p.d)
+                continue;
+            if (!Number.isFinite(p.w) || !Number.isFinite(p.h))
+                continue;
+            if (p.w <= 0 || p.h <= 0)
+                continue;
+            const scaled = scalePathD(p.d, p.w, p.h, renderWidth, renderHeight);
+            if (scaled)
+                out.push(scaled);
+        }
+        return out;
+    }
     const DEFAULT_INSET_LR_EMU = 91440;
     const DEFAULT_INSET_TB_EMU = 45720;
     function presetGeometryToSvgPath(prst, w, h) {
@@ -4306,37 +4900,48 @@
         svg.style.position = 'absolute';
         svg.style.inset = '0';
         svg.style.overflow = 'visible';
-        const d = presetGeometryToSvgPath(shape.presetGeometry || 'rect', widthPx, heightPx)
-            ?? presetGeometryToSvgPath('rect', widthPx, heightPx);
-        const path = document.createElementNS(ns.svg, 'path');
-        path.setAttribute('d', d);
+        const customDs = shape.custGeom && shape.custGeom.paths && shape.custGeom.paths.length > 0
+            ? customGeometryToSvgPaths(shape.custGeom, widthPx, heightPx)
+            : [];
+        const presetD = customDs.length === 0
+            ? (presetGeometryToSvgPath(shape.presetGeometry || 'rect', widthPx, heightPx)
+                ?? presetGeometryToSvgPath('rect', widthPx, heightPx))
+            : null;
+        const dStrings = customDs.length > 0 ? customDs : (presetD ? [presetD] : []);
+        let fillAttr = '#4472C4';
         if (shape.fill && shape.fill.type === 'solid') {
             const c = sanitizeCssColor(shape.fill.color);
-            path.setAttribute('fill', c ?? 'none');
+            fillAttr = c ?? 'none';
         }
         else if (shape.fill && shape.fill.type === 'none') {
-            path.setAttribute('fill', 'none');
+            fillAttr = 'none';
         }
-        else {
-            path.setAttribute('fill', '#4472C4');
+        if (shape.presetGeometry === 'line' && customDs.length === 0) {
+            fillAttr = 'none';
         }
+        let strokeAttr = '#2F5496';
+        let strokeWidthAttr = '1';
         if (shape.stroke) {
+            strokeAttr = null;
+            strokeWidthAttr = null;
             const stroke = sanitizeCssColor(shape.stroke.color);
             if (stroke)
-                path.setAttribute('stroke', stroke);
+                strokeAttr = stroke;
             if (shape.stroke.width != null && Number.isFinite(shape.stroke.width)) {
                 const wPx = emuToPx(shape.stroke.width);
-                path.setAttribute('stroke-width', `${wPx.toFixed(2)}`);
+                strokeWidthAttr = `${wPx.toFixed(2)}`;
             }
         }
-        else {
-            path.setAttribute('stroke', '#2F5496');
-            path.setAttribute('stroke-width', '1');
+        for (const d of dStrings) {
+            const path = document.createElementNS(ns.svg, 'path');
+            path.setAttribute('d', d);
+            path.setAttribute('fill', fillAttr);
+            if (strokeAttr)
+                path.setAttribute('stroke', strokeAttr);
+            if (strokeWidthAttr)
+                path.setAttribute('stroke-width', strokeWidthAttr);
+            svg.appendChild(path);
         }
-        if (shape.presetGeometry === 'line') {
-            path.setAttribute('fill', 'none');
-        }
-        svg.appendChild(path);
         wrapper.appendChild(svg);
         if (shape.txbxParagraphs && shape.txbxParagraphs.length > 0 && renderText) {
             const text = document.createElement('div');
@@ -4406,6 +5011,509 @@
         }
         wrapper.appendChild(svg);
         return wrapper;
+    }
+
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const VIEW_W = 600;
+    const VIEW_H = 400;
+    const PADDING = 16;
+    const TITLE_HEIGHT = 28;
+    const LEGEND_ROW_HEIGHT = 18;
+    const AXIS_LABEL_WIDTH = 40;
+    const AXIS_LABEL_HEIGHT = 24;
+    const FONT_SIZE = 11;
+    const DEFAULT_PALETTE = [
+        "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000",
+        "#5B9BD5", "#70AD47", "#264478", "#9E480E",
+        "#636363", "#997300",
+    ];
+    function renderChart(model) {
+        const doc = document;
+        const svg = doc.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("viewBox", `0 0 ${VIEW_W} ${VIEW_H}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        svg.style.maxWidth = "100%";
+        svg.style.height = "auto";
+        svg.style.display = "block";
+        const title = (model.title ?? "").trim();
+        const titleBottom = title ? PADDING + TITLE_HEIGHT : PADDING;
+        if (title) {
+            const t = mkText(doc, VIEW_W / 2, PADDING + TITLE_HEIGHT - 10, title, {
+                fontSize: 14, fontWeight: "600", anchor: "middle",
+            });
+            svg.appendChild(t);
+        }
+        const legendEntries = model.showLegend
+            ? model.series.filter((s) => s.values.length > 0)
+            : [];
+        const legendLayout = layoutLegend(legendEntries, VIEW_W - 2 * PADDING, doc);
+        const legendTop = VIEW_H - PADDING - legendLayout.height;
+        const plotTop = titleBottom + 4;
+        const plotBottom = legendLayout.height > 0
+            ? legendTop - 4
+            : VIEW_H - PADDING;
+        switch (model.kind) {
+            case "column":
+            case "bar":
+                renderBarChart(svg, doc, model, {
+                    left: PADDING + AXIS_LABEL_WIDTH,
+                    right: VIEW_W - PADDING,
+                    top: plotTop,
+                    bottom: plotBottom - AXIS_LABEL_HEIGHT,
+                    horizontal: model.kind === "bar",
+                });
+                break;
+            case "line":
+                renderLineChart(svg, doc, model, {
+                    left: PADDING + AXIS_LABEL_WIDTH,
+                    right: VIEW_W - PADDING,
+                    top: plotTop,
+                    bottom: plotBottom - AXIS_LABEL_HEIGHT,
+                });
+                break;
+            case "pie":
+                renderPieChart(svg, doc, model, {
+                    left: PADDING,
+                    right: VIEW_W - PADDING,
+                    top: plotTop,
+                    bottom: plotBottom,
+                });
+                break;
+            default:
+                const msg = mkText(doc, VIEW_W / 2, VIEW_H / 2, "[chart]", {
+                    fontSize: 12, anchor: "middle", fill: "#888",
+                });
+                svg.appendChild(msg);
+                break;
+        }
+        for (const node of legendLayout.nodes(legendTop))
+            svg.appendChild(node);
+        return svg;
+    }
+    function renderBarChart(svg, doc, model, rect) {
+        const series = model.series.filter((s) => s.values.length > 0);
+        if (series.length === 0)
+            return;
+        const categories = maxLengthCategories(series);
+        const catCount = categories.length;
+        if (catCount === 0)
+            return;
+        const stacked = model.grouping === "stacked" || model.grouping === "percentStacked";
+        const percentStacked = model.grouping === "percentStacked";
+        let valMin = 0;
+        let valMax = 0;
+        if (stacked) {
+            for (let i = 0; i < catCount; i++) {
+                let sum = 0;
+                for (const s of series) {
+                    const v = finite(s.values[i]);
+                    if (v == null)
+                        continue;
+                    sum += v;
+                }
+                if (percentStacked)
+                    sum = sum === 0 ? 0 : 1;
+                valMax = Math.max(valMax, sum);
+                valMin = Math.min(valMin, sum);
+            }
+        }
+        else {
+            for (const s of series) {
+                for (const v of s.values) {
+                    const f = finite(v);
+                    if (f == null)
+                        continue;
+                    valMax = Math.max(valMax, f);
+                    valMin = Math.min(valMin, f);
+                }
+            }
+        }
+        if (valMax === valMin)
+            valMax = valMin + 1;
+        const { min: yMin, max: yMax, ticks } = niceScale(valMin, valMax, 5);
+        const horizontal = rect.horizontal;
+        const plotW = rect.right - rect.left;
+        const plotH = rect.bottom - rect.top;
+        svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom));
+        svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom));
+        for (const t of ticks) {
+            if (horizontal) {
+                const x = rect.left + ((t - yMin) / (yMax - yMin)) * plotW;
+                svg.appendChild(mkLine(doc, x, rect.bottom, x, rect.bottom + 4));
+                svg.appendChild(mkText(doc, x, rect.bottom + 16, formatTick(t), {
+                    fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                }));
+            }
+            else {
+                const y = rect.bottom - ((t - yMin) / (yMax - yMin)) * plotH;
+                svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y));
+                svg.appendChild(mkText(doc, rect.left - 6, y + 4, formatTick(t), {
+                    fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                }));
+            }
+        }
+        const slotSize = (horizontal ? plotH : plotW) / catCount;
+        const groupPad = Math.min(slotSize * 0.15, 8);
+        const innerGroup = slotSize - 2 * groupPad;
+        const barsPerSlot = stacked ? 1 : series.length;
+        const barSize = Math.max(1, innerGroup / Math.max(1, barsPerSlot));
+        for (let i = 0; i < catCount; i++) {
+            if (horizontal) {
+                const yMid = rect.top + slotSize * (i + 0.5);
+                svg.appendChild(mkText(doc, rect.left - 6, yMid + 4, categories[i] ?? "", {
+                    fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+                }));
+            }
+            else {
+                const xMid = rect.left + slotSize * (i + 0.5);
+                svg.appendChild(mkText(doc, xMid, rect.bottom + 16, categories[i] ?? "", {
+                    fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+                }));
+            }
+            if (stacked) {
+                let cumulative = 0;
+                let slotTotal = 0;
+                if (percentStacked) {
+                    for (const s of series) {
+                        const v = finite(s.values[i]);
+                        if (v == null)
+                            continue;
+                        slotTotal += v;
+                    }
+                }
+                for (let si = 0; si < series.length; si++) {
+                    const raw = finite(series[si].values[i]);
+                    if (raw == null || raw === 0)
+                        continue;
+                    const value = percentStacked
+                        ? (slotTotal === 0 ? 0 : raw / slotTotal)
+                        : raw;
+                    const color = seriesColor(series[si], si);
+                    appendBar(svg, doc, {
+                        horizontal, rect, yMin, yMax, plotW, plotH,
+                        slotIndex: i, slotSize, barIndex: 0,
+                        barSize: innerGroup, groupPad,
+                        start: cumulative, end: cumulative + value,
+                        color,
+                    });
+                    cumulative += value;
+                }
+            }
+            else {
+                for (let si = 0; si < series.length; si++) {
+                    const value = finite(series[si].values[i]);
+                    if (value == null)
+                        continue;
+                    const color = seriesColor(series[si], si);
+                    appendBar(svg, doc, {
+                        horizontal, rect, yMin, yMax, plotW, plotH,
+                        slotIndex: i, slotSize, barIndex: si,
+                        barSize, groupPad,
+                        start: 0, end: value,
+                        color,
+                    });
+                }
+            }
+        }
+    }
+    function appendBar(svg, doc, p) {
+        const scale = (v) => (v - p.yMin) / (p.yMax - p.yMin);
+        const s0 = scale(Math.min(p.start, p.end));
+        const s1 = scale(Math.max(p.start, p.end));
+        if (p.horizontal) {
+            const y = p.rect.top + p.slotSize * p.slotIndex + p.groupPad
+                + p.barSize * p.barIndex;
+            const x0 = p.rect.left + s0 * p.plotW;
+            const x1 = p.rect.left + s1 * p.plotW;
+            const rect = doc.createElementNS(SVG_NS, "rect");
+            rect.setAttribute("x", fmt(Math.min(x0, x1)));
+            rect.setAttribute("y", fmt(y));
+            rect.setAttribute("width", fmt(Math.max(0, Math.abs(x1 - x0))));
+            rect.setAttribute("height", fmt(Math.max(0, p.barSize)));
+            rect.setAttribute("fill", p.color);
+            svg.appendChild(rect);
+        }
+        else {
+            const x = p.rect.left + p.slotSize * p.slotIndex + p.groupPad
+                + p.barSize * p.barIndex;
+            const y0 = p.rect.bottom - s0 * p.plotH;
+            const y1 = p.rect.bottom - s1 * p.plotH;
+            const rect = doc.createElementNS(SVG_NS, "rect");
+            rect.setAttribute("x", fmt(x));
+            rect.setAttribute("y", fmt(Math.min(y0, y1)));
+            rect.setAttribute("width", fmt(Math.max(0, p.barSize)));
+            rect.setAttribute("height", fmt(Math.max(0, Math.abs(y1 - y0))));
+            rect.setAttribute("fill", p.color);
+            svg.appendChild(rect);
+        }
+    }
+    function renderLineChart(svg, doc, model, rect) {
+        const series = model.series.filter((s) => s.values.length > 0);
+        if (series.length === 0)
+            return;
+        const categories = maxLengthCategories(series);
+        const catCount = categories.length;
+        if (catCount === 0)
+            return;
+        let valMin = Infinity;
+        let valMax = -Infinity;
+        for (const s of series) {
+            for (const v of s.values) {
+                const f = finite(v);
+                if (f == null)
+                    continue;
+                if (f < valMin)
+                    valMin = f;
+                if (f > valMax)
+                    valMax = f;
+            }
+        }
+        if (!Number.isFinite(valMin) || !Number.isFinite(valMax))
+            return;
+        if (valMin > 0 && valMin / (valMax - valMin || 1) < 0.5)
+            valMin = 0;
+        if (valMax === valMin)
+            valMax = valMin + 1;
+        const { min: yMin, max: yMax, ticks } = niceScale(valMin, valMax, 5);
+        const plotW = rect.right - rect.left;
+        const plotH = rect.bottom - rect.top;
+        svg.appendChild(mkLine(doc, rect.left, rect.top, rect.left, rect.bottom));
+        svg.appendChild(mkLine(doc, rect.left, rect.bottom, rect.right, rect.bottom));
+        for (const t of ticks) {
+            const y = rect.bottom - ((t - yMin) / (yMax - yMin)) * plotH;
+            svg.appendChild(mkLine(doc, rect.left - 4, y, rect.left, y));
+            svg.appendChild(mkText(doc, rect.left - 6, y + 4, formatTick(t), {
+                fontSize: FONT_SIZE, anchor: "end", fill: "#555",
+            }));
+        }
+        const xStep = catCount > 1 ? plotW / (catCount - 1) : 0;
+        for (let i = 0; i < catCount; i++) {
+            const x = rect.left + xStep * i;
+            svg.appendChild(mkText(doc, x, rect.bottom + 16, categories[i] ?? "", {
+                fontSize: FONT_SIZE, anchor: "middle", fill: "#555",
+            }));
+        }
+        for (let si = 0; si < series.length; si++) {
+            const s = series[si];
+            const color = seriesColor(s, si);
+            const points = [];
+            for (let i = 0; i < catCount; i++) {
+                const v = finite(s.values[i]);
+                if (v == null)
+                    continue;
+                const x = catCount > 1 ? rect.left + xStep * i : rect.left + plotW / 2;
+                const y = rect.bottom - ((v - yMin) / (yMax - yMin)) * plotH;
+                points.push(`${fmt(x)},${fmt(y)}`);
+            }
+            if (points.length === 0)
+                continue;
+            const polyline = doc.createElementNS(SVG_NS, "polyline");
+            polyline.setAttribute("points", points.join(" "));
+            polyline.setAttribute("fill", "none");
+            polyline.setAttribute("stroke", color);
+            polyline.setAttribute("stroke-width", "2");
+            svg.appendChild(polyline);
+            for (const p of points) {
+                const [px, py] = p.split(",");
+                const circle = doc.createElementNS(SVG_NS, "circle");
+                circle.setAttribute("cx", px);
+                circle.setAttribute("cy", py);
+                circle.setAttribute("r", "2.5");
+                circle.setAttribute("fill", color);
+                svg.appendChild(circle);
+            }
+        }
+    }
+    function renderPieChart(svg, doc, model, rect) {
+        const series = model.series.find((s) => s.values.length > 0);
+        if (!series)
+            return;
+        const values = series.values.map((v) => finite(v) ?? 0);
+        const total = values.reduce((a, b) => a + (b > 0 ? b : 0), 0);
+        if (total <= 0)
+            return;
+        const cx = (rect.left + rect.right) / 2;
+        const cy = (rect.top + rect.bottom) / 2;
+        const r = Math.max(0, Math.min(rect.right - rect.left, rect.bottom - rect.top) / 2 - 8);
+        if (r <= 0)
+            return;
+        let startAngle = -Math.PI / 2;
+        for (let i = 0; i < values.length; i++) {
+            const v = values[i];
+            if (v <= 0)
+                continue;
+            const angle = (v / total) * 2 * Math.PI;
+            const endAngle = startAngle + angle;
+            const path = pieSlicePath(cx, cy, r, startAngle, endAngle);
+            const slice = doc.createElementNS(SVG_NS, "path");
+            slice.setAttribute("d", path);
+            const color = sanitizeCssColor(series.color) ?? DEFAULT_PALETTE[i % DEFAULT_PALETTE.length];
+            slice.setAttribute("fill", color);
+            slice.setAttribute("stroke", "#fff");
+            slice.setAttribute("stroke-width", "1");
+            svg.appendChild(slice);
+            startAngle = endAngle;
+        }
+    }
+    function pieSlicePath(cx, cy, r, a0, a1) {
+        if (a1 - a0 >= 2 * Math.PI - 1e-9) {
+            return `M ${fmt(cx - r)} ${fmt(cy)} A ${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(cx + r)} ${fmt(cy)} A ${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(cx - r)} ${fmt(cy)} Z`;
+        }
+        const x0 = cx + r * Math.cos(a0);
+        const y0 = cy + r * Math.sin(a0);
+        const x1 = cx + r * Math.cos(a1);
+        const y1 = cy + r * Math.sin(a1);
+        const large = a1 - a0 > Math.PI ? 1 : 0;
+        return `M ${fmt(cx)} ${fmt(cy)} L ${fmt(x0)} ${fmt(y0)} A ${fmt(r)} ${fmt(r)} 0 ${large} 1 ${fmt(x1)} ${fmt(y1)} Z`;
+    }
+    function layoutLegend(entries, maxWidth, doc) {
+        if (entries.length === 0)
+            return { height: 0, nodes: () => [] };
+        const swatchW = 10;
+        const gap = 6;
+        const entryGap = 16;
+        const estWidth = (title) => swatchW + gap + Math.max(12, title.length * FONT_SIZE * 0.55);
+        const rows = [[]];
+        let rowWidth = 0;
+        for (let i = 0; i < entries.length; i++) {
+            const e = entries[i];
+            const w = estWidth(e.title || `Series ${i + 1}`);
+            const needed = rowWidth === 0 ? w : w + entryGap;
+            if (rowWidth + needed > maxWidth && rows[rows.length - 1].length > 0) {
+                rows.push([]);
+                rowWidth = 0;
+            }
+            rows[rows.length - 1].push({ entry: e, seriesIndex: i, width: w });
+            rowWidth += needed;
+        }
+        const height = rows.length * LEGEND_ROW_HEIGHT;
+        return {
+            height,
+            nodes: (top) => {
+                const out = [];
+                for (let r = 0; r < rows.length; r++) {
+                    const row = rows[r];
+                    const totalWidth = row.reduce((a, b, i) => a + b.width + (i === 0 ? 0 : entryGap), 0);
+                    let x = (VIEW_W - totalWidth) / 2;
+                    const y = top + r * LEGEND_ROW_HEIGHT + LEGEND_ROW_HEIGHT / 2;
+                    for (const { entry, seriesIndex, width } of row) {
+                        const color = seriesColor(entry, seriesIndex);
+                        const swatch = doc.createElementNS(SVG_NS, "rect");
+                        swatch.setAttribute("x", fmt(x));
+                        swatch.setAttribute("y", fmt(y - swatchW / 2));
+                        swatch.setAttribute("width", fmt(swatchW));
+                        swatch.setAttribute("height", fmt(swatchW));
+                        swatch.setAttribute("fill", color);
+                        out.push(swatch);
+                        const label = mkText(doc, x + swatchW + gap, y + 4, entry.title || `Series ${seriesIndex + 1}`, {
+                            fontSize: FONT_SIZE, anchor: "start", fill: "#333",
+                        });
+                        out.push(label);
+                        x += width + entryGap;
+                    }
+                }
+                return out;
+            },
+        };
+    }
+    function seriesColor(s, index) {
+        return sanitizeCssColor(s.color) ?? DEFAULT_PALETTE[index % DEFAULT_PALETTE.length];
+    }
+    function finite(v) {
+        return Number.isFinite(v) ? v : null;
+    }
+    function maxLengthCategories(series) {
+        let longest = [];
+        let count = 0;
+        for (const s of series) {
+            const len = Math.max(s.values.length, s.categories.length);
+            if (len > count) {
+                count = len;
+                longest = s.categories.slice(0, len);
+            }
+        }
+        while (longest.length < count)
+            longest.push("");
+        return longest;
+    }
+    function fmt(n) {
+        if (!Number.isFinite(n))
+            return "0";
+        return Math.abs(n) < 0.005 ? "0" : n.toFixed(2);
+    }
+    function formatTick(n) {
+        if (!Number.isFinite(n))
+            return "";
+        if (Math.abs(n) >= 1000)
+            return n.toFixed(0);
+        if (Math.abs(n) >= 10)
+            return n.toFixed(1);
+        return n.toFixed(2).replace(/\.?0+$/, "") || "0";
+    }
+    function niceScale(min, max, targetTicks) {
+        const range = niceNum(max - min, false);
+        const step = niceNum(range / Math.max(1, targetTicks - 1), true);
+        const niceMin = Math.floor(min / step) * step;
+        const niceMax = Math.ceil(max / step) * step;
+        const ticks = [];
+        const maxTicks = 32;
+        for (let v = niceMin, i = 0; v <= niceMax + step * 0.5 && i < maxTicks; v += step, i++) {
+            ticks.push(Number(v.toFixed(10)));
+        }
+        return { min: niceMin, max: niceMax, ticks };
+    }
+    function niceNum(range, round) {
+        if (range <= 0)
+            return 1;
+        const exponent = Math.floor(Math.log10(range));
+        const fraction = range / Math.pow(10, exponent);
+        let niceFraction;
+        if (round) {
+            if (fraction < 1.5)
+                niceFraction = 1;
+            else if (fraction < 3)
+                niceFraction = 2;
+            else if (fraction < 7)
+                niceFraction = 5;
+            else
+                niceFraction = 10;
+        }
+        else {
+            if (fraction <= 1)
+                niceFraction = 1;
+            else if (fraction <= 2)
+                niceFraction = 2;
+            else if (fraction <= 5)
+                niceFraction = 5;
+            else
+                niceFraction = 10;
+        }
+        return niceFraction * Math.pow(10, exponent);
+    }
+    function mkLine(doc, x1, y1, x2, y2) {
+        const el = doc.createElementNS(SVG_NS, "line");
+        el.setAttribute("x1", fmt(x1));
+        el.setAttribute("y1", fmt(y1));
+        el.setAttribute("x2", fmt(x2));
+        el.setAttribute("y2", fmt(y2));
+        el.setAttribute("stroke", "#888");
+        el.setAttribute("stroke-width", "1");
+        return el;
+    }
+    function mkText(doc, x, y, text, opts = {}) {
+        const el = doc.createElementNS(SVG_NS, "text");
+        el.setAttribute("x", fmt(x));
+        el.setAttribute("y", fmt(y));
+        if (opts.anchor)
+            el.setAttribute("text-anchor", opts.anchor);
+        el.setAttribute("font-size", String(opts.fontSize ?? FONT_SIZE));
+        if (opts.fontWeight)
+            el.setAttribute("font-weight", opts.fontWeight);
+        if (opts.fill)
+            el.setAttribute("fill", opts.fill);
+        el.textContent = text;
+        return el;
     }
 
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
@@ -5462,6 +6570,8 @@ section.${c}>ol>li::before {
                     return this.renderDrawingShape(elem);
                 case DomType.DrawingGroup:
                     return this.renderDrawingShapeGroup(elem);
+                case DomType.Chart:
+                    return this.renderChart(elem);
                 case DomType.Text:
                     return this.renderText(elem);
                 case DomType.Text:
@@ -5565,6 +6675,16 @@ section.${c}>ol>li::before {
                     return null;
                 case DomType.Sdt:
                     return this.renderSdt(elem);
+                case DomType.Ruby:
+                    return this.renderRuby(elem);
+                case DomType.RubyBase:
+                    return this.renderContainer(elem, "span");
+                case DomType.RubyText:
+                    return this.renderContainer(elem, "rt");
+                case DomType.FitText:
+                    return this.renderFitText(elem);
+                case DomType.BidiOverride:
+                    return this.renderBidiOverride(elem);
             }
             return null;
         }
@@ -5805,8 +6925,96 @@ section.${c}>ol>li::before {
         renderSmartTag(elem) {
             return this.renderContainer(elem, "span");
         }
-        renderSdt(elem) {
+        renderRuby(elem) {
+            const baseNodes = [];
+            const rtNodes = [];
+            for (const c of elem.children ?? []) {
+                if (c.type === DomType.RubyText)
+                    rtNodes.push(c);
+                else
+                    baseNodes.push(c);
+            }
+            const children = [
+                ...this.renderElements(baseNodes),
+                ...this.renderElements(rtNodes)
+            ];
+            const rubyEl = this.h({ tagName: "ruby", children });
+            if (elem.rubyPr?.lid) {
+                rubyEl.setAttribute("lang", elem.rubyPr.lid);
+            }
+            return rubyEl;
+        }
+        renderFitText(elem) {
+            const widthTwips = typeof elem.width === "number" ? elem.width : parseFloat(elem.width);
             const children = this.renderElements(elem.children);
+            if (!Number.isFinite(widthTwips) || widthTwips <= 0) {
+                return this.h({ tagName: "span", children });
+            }
+            const pt = widthTwips / 20;
+            const span = this.h({
+                tagName: "span",
+                children,
+                style: {
+                    "display": "inline-block",
+                    "width": `${pt}pt`,
+                    "white-space": "nowrap",
+                    "overflow": "hidden"
+                }
+            });
+            return span;
+        }
+        renderBidiOverride(elem) {
+            const dir = elem.dir === "rtl" ? "rtl" : "ltr";
+            const children = this.renderElements(elem.children);
+            const bdo = this.h({ tagName: "bdo", children });
+            bdo.setAttribute("dir", dir);
+            return bdo;
+        }
+        renderSdt(elem) {
+            const control = elem.sdtControl;
+            let children;
+            if (control?.type === "checkbox") {
+                const box = this.h({ tagName: "input" });
+                box.setAttribute("type", "checkbox");
+                box.setAttribute("disabled", "");
+                if (control.checked)
+                    box.setAttribute("checked", "");
+                children = [box];
+            }
+            else if (control?.type === "dropdown") {
+                const rendered = this.renderElements(elem.children) ?? [];
+                const selectedText = rendered
+                    .map(n => (n instanceof Node ? (n.textContent ?? "") : String(n)))
+                    .join("")
+                    .trim();
+                const select = this.h({ tagName: "select" });
+                select.setAttribute("disabled", "");
+                for (const item of control.items) {
+                    const option = this.h({ tagName: "option" });
+                    option.setAttribute("value", item.value);
+                    option.textContent = item.displayText;
+                    if (item.value === selectedText ||
+                        item.displayText === selectedText) {
+                        option.setAttribute("selected", "");
+                    }
+                    select.appendChild(option);
+                }
+                children = [select];
+            }
+            else if (control?.type === "date") {
+                const rendered = this.renderElements(elem.children) ?? [];
+                const time = this.h({ tagName: "time" });
+                const ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/;
+                if (control.fullDate && ISO.test(control.fullDate)) {
+                    time.setAttribute("datetime", control.fullDate);
+                }
+                for (const c of rendered)
+                    time.appendChild(c);
+                children = [time];
+            }
+            else {
+                children = this.renderElements(elem.children) ?? [];
+            }
             const span = this.h({ tagName: "span", children });
             span.setAttribute("role", "group");
             if (elem.sdtAlias) {
@@ -5814,6 +7022,9 @@ section.${c}>ol>li::before {
             }
             if (elem.sdtTag) {
                 span.dataset.sdtTag = elem.sdtTag;
+            }
+            if (control) {
+                span.dataset.sdtType = control.type;
             }
             return span;
         }
@@ -5937,6 +7148,27 @@ section.${c}>ol>li::before {
                 }));
             }
             return result;
+        }
+        renderChart(elem) {
+            const fallback = this.createElement("span");
+            fallback.className = `${this.className}-chart`;
+            fallback.style.display = "inline-block";
+            if (!elem.relId || !this.document)
+                return fallback;
+            const part = this.document.findPartByRelId(elem.relId, this.currentPart ?? this.document.documentPart);
+            if (!part || !(part instanceof ChartPart) || !part.chart)
+                return fallback;
+            try {
+                const svg = renderChart(part.chart);
+                const wrapper = this.createElement("span");
+                wrapper.className = `${this.className}-chart`;
+                wrapper.style.display = "inline-block";
+                wrapper.appendChild(svg);
+                return wrapper;
+            }
+            catch {
+                return fallback;
+            }
         }
         renderText(elem) {
             return this.h(elem.text);
