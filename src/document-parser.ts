@@ -1549,6 +1549,129 @@ export class DocumentParser {
 		return result;
 	}
 
+	// Parses <a:custGeom> into a CustomGeometry. Only <a:pathLst> is
+	// consumed; <a:avLst>, <a:gdLst>, <a:ahLst>, <a:cxnLst>, and
+	// <a:rect> are out of scope for v1 (adjustment values, guide
+	// formulas, and connection points parameterise preset geometries
+	// rather than the path list; the text rectangle will matter once
+	// nested text boxes track it).
+	//
+	// Each <a:path> contributes one `d` string composed entirely of
+	// hard-coded SVG command letters (`M L C Q A Z`) plus numeric
+	// tokens parsed via xml.intAttr. A non-finite or missing number
+	// collapses to 0. No DOCX-supplied string ever reaches the output
+	// `d` attribute.
+	private parseCustGeom(
+		custGeom: Element | null | undefined,
+	): import("./drawing/shapes").CustomGeometry | undefined {
+		if (!custGeom) return undefined;
+		const paths: { w: number; h: number; d: string }[] = [];
+		const pathLst = xml.element(custGeom, "pathLst");
+		if (!pathLst) return undefined;
+		for (const pathEl of xml.elements(pathLst, "path")) {
+			const w = this.safeNum(xml.intAttr(pathEl, "w", 0));
+			const h = this.safeNum(xml.intAttr(pathEl, "h", 0));
+			if (w <= 0 || h <= 0) continue;
+			let d = "";
+			// Track the pen position so <a:arcTo> can compute its end
+			// point. DrawingML arcTo is relative to the current pen,
+			// not absolute.
+			let penX = 0;
+			let penY = 0;
+			for (const cmd of xml.elements(pathEl)) {
+				switch (cmd.localName) {
+					case "moveTo": {
+						const pt = xml.element(cmd, "pt");
+						if (!pt) break;
+						const x = this.safeNum(xml.intAttr(pt, "x", 0));
+						const y = this.safeNum(xml.intAttr(pt, "y", 0));
+						d += `M ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "lnTo": {
+						const pt = xml.element(cmd, "pt");
+						if (!pt) break;
+						const x = this.safeNum(xml.intAttr(pt, "x", 0));
+						const y = this.safeNum(xml.intAttr(pt, "y", 0));
+						d += `L ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "cubicBezTo": {
+						const pts = xml.elements(cmd, "pt");
+						if (pts.length < 3) break;
+						const x1 = this.safeNum(xml.intAttr(pts[0], "x", 0));
+						const y1 = this.safeNum(xml.intAttr(pts[0], "y", 0));
+						const x2 = this.safeNum(xml.intAttr(pts[1], "x", 0));
+						const y2 = this.safeNum(xml.intAttr(pts[1], "y", 0));
+						const x = this.safeNum(xml.intAttr(pts[2], "x", 0));
+						const y = this.safeNum(xml.intAttr(pts[2], "y", 0));
+						d += `C ${x1} ${y1} ${x2} ${y2} ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "quadBezTo": {
+						const pts = xml.elements(cmd, "pt");
+						if (pts.length < 2) break;
+						const x1 = this.safeNum(xml.intAttr(pts[0], "x", 0));
+						const y1 = this.safeNum(xml.intAttr(pts[0], "y", 0));
+						const x = this.safeNum(xml.intAttr(pts[1], "x", 0));
+						const y = this.safeNum(xml.intAttr(pts[1], "y", 0));
+						d += `Q ${x1} ${y1} ${x} ${y} `;
+						penX = x;
+						penY = y;
+						break;
+					}
+					case "arcTo": {
+						// DrawingML arc: centred at (penX + wR, penY + hR),
+						// starts at `stAng` (60000ths of a degree), sweeps
+						// `swAng`. Convert to an SVG A command.
+						const wR = this.safeNum(xml.intAttr(cmd, "wR", 0));
+						const hR = this.safeNum(xml.intAttr(cmd, "hR", 0));
+						const stAng = this.safeNum(xml.intAttr(cmd, "stAng", 0));
+						const swAng = this.safeNum(xml.intAttr(cmd, "swAng", 0));
+						if (wR === 0 || hR === 0) break;
+						const stRad = (stAng / 60000) * (Math.PI / 180);
+						const swRad = (swAng / 60000) * (Math.PI / 180);
+						// Ellipse centre: the pen sits on the ellipse at
+						// angle stAng, so centre = pen - (wR*cos, hR*sin).
+						const cx = penX - wR * Math.cos(stRad);
+						const cy = penY - hR * Math.sin(stRad);
+						const endAng = stRad + swRad;
+						const endX = cx + wR * Math.cos(endAng);
+						const endY = cy + hR * Math.sin(endAng);
+						const largeArc = Math.abs(swRad) > Math.PI ? 1 : 0;
+						const sweep = swRad >= 0 ? 1 : 0;
+						d += `A ${wR} ${hR} 0 ${largeArc} ${sweep} ${endX} ${endY} `;
+						penX = endX;
+						penY = endY;
+						break;
+					}
+					case "close": {
+						d += "Z ";
+						break;
+					}
+				}
+			}
+			d = d.trim();
+			if (d) {
+				paths.push({ w, h, d });
+			}
+		}
+		return { paths };
+	}
+
+	// Coerces any number-like to a finite value or 0. Used throughout
+	// parseCustGeom so a malformed DOCX attribute can never leak
+	// NaN / Infinity into the SVG path data.
+	private safeNum(n: number | null | undefined): number {
+		return typeof n === "number" && Number.isFinite(n) ? n : 0;
+	}
+
 	parseDrawingShape(elem: Element): DrawingShape {
 		const result: DrawingShape = {
 			type: DomType.DrawingShape,
@@ -1567,11 +1690,17 @@ export class DocumentParser {
 				// attacker-controlled string into SVG/CSS.
 				result.presetGeometry = this.PRESET_GEOMETRY_ALLOWLIST.has(prst) ? prst : "rect";
 			} else if (xml.element(spPr, "custGeom")) {
-				// TODO: custGeom path rendering (a:pathLst / a:moveTo /
-				// a:lnTo / a:cubicBezTo / a:close). Out of scope for
-				// this PR — fall back to a plain rectangle.
+				// <a:custGeom> — caller-defined path list. Parsed into
+				// CustomGeometry; presetGeometry is left blank so the
+				// renderer takes the custGeom branch. Leave the plain
+				// 'rect' as a safe fallback in case parsing yields no
+				// usable paths.
 				result.presetGeometry = "rect";
 				result.hasCustomGeometry = true;
+				const custGeom = this.parseCustGeom(xml.element(spPr, "custGeom"));
+				if (custGeom && custGeom.paths.length > 0) {
+					result.custGeom = custGeom;
+				}
 			} else {
 				result.presetGeometry = "rect";
 			}
