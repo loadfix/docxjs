@@ -84,8 +84,66 @@ function isComplexFieldBeginRun(elem: OpenXmlElement): boolean {
 	return complexFieldCharType(elem) === 'begin';
 }
 
+// HYPERLINK switches that take a quoted value argument in Word's
+// instruction syntax. Anything not in this set is treated as a flag-only
+// switch (\l, \h, \m, \n), which means the token that follows it is an
+// independent positional argument, not its value.
+const HYPERLINK_VALUE_SWITCHES = new Set(['\\o', '\\t']);
+
+// Returns the value token that immediately follows `switchName` in the
+// parsed instruction's ordered token list, or null if the switch has no
+// value (or isn't present). Used by the HYPERLINK wrapper to pair \o with
+// its tooltip string and \t with its target frame. Comparison is case-
+// insensitive because Word writes both \o and \O in real documents.
+function extractSwitchValue(
+	parsed: { tokens?: string[] },
+	switchName: string,
+): string | null {
+	const tokens = parsed.tokens ?? [];
+	const target = switchName.toLowerCase();
+	for (let i = 0; i < tokens.length; i++) {
+		if (tokens[i].toLowerCase() === target) {
+			const next = tokens[i + 1];
+			if (next && !next.startsWith('\\')) return next;
+			return null;
+		}
+	}
+	return null;
+}
+
+// Returns the first positional argument (URL / anchor name) from a
+// HYPERLINK instruction. Skips flag-only switches (\l, \h, \m, \n) and
+// skips value-taking switches along with their value (\o "tip", \t "_blank").
+function firstNonSwitchArg(parsed: { tokens?: string[] }): string | null {
+	const tokens = parsed.tokens ?? [];
+	let i = 0;
+	while (i < tokens.length) {
+		const t = tokens[i];
+		if (t.startsWith('\\')) {
+			if (HYPERLINK_VALUE_SWITCHES.has(t.toLowerCase())) {
+				const next = tokens[i + 1];
+				if (next && !next.startsWith('\\')) {
+					i += 2;
+					continue;
+				}
+			}
+			i += 1;
+			continue;
+		}
+		return t;
+	}
+	return null;
+}
+
 // Concatenates the text of every w:instrText inside the instruction-portion
-// runs of a complex field.
+// runs of a complex field. Word sometimes serialises one instruction across
+// several runs, and a single run's children may mix <w:instrText> with other
+// content (e.g. a stray <w:t>). Only the <w:instrText> children contribute
+// to the instruction string — the run itself is a fieldRun, so any non-
+// instruction children would have rendered to nothing anyway thanks to the
+// fieldRun guard in renderRun(). This split is deliberate: we need the
+// instruction text here, but we must never let the rendered output of a
+// field-delimiter / instruction-portion run leak into the DOM.
 function collectInstructionText(runs: OpenXmlElement[]): string {
 	let out = '';
 	for (const r of runs) {
@@ -94,6 +152,9 @@ function collectInstructionText(runs: OpenXmlElement[]): string {
 			if (c.type === DomType.Instruction) {
 				out += (c as WmlInstructionText).text ?? '';
 			}
+			// Non-instrText children in instruction-portion runs are dropped
+			// on purpose; the fieldRun guard in renderRun already suppresses
+			// their visible output.
 		}
 	}
 	return out;
@@ -1818,57 +1879,172 @@ section.${c}>ol>li::before {
 	// portion (begin..separate) contribute their <w:instrText> to the
 	// instruction string; runs in the result portion (separate..end) render
 	// normally (the fieldRun guard is bypassed for them).
+	//
+	// Nested fields (another <w:fldChar begin> inside the result portion) are
+	// tracked with an explicit stack so the inner field renders with its own
+	// wrapping before the outer field closes. Unterminated groups — those
+	// with a begin but no end — are salvaged if they got as far as separate,
+	// and dropped silently otherwise (matching Wave 1.1 behaviour when we
+	// have no cached result to show).
 	private groupComplexFields(elems: OpenXmlElement[]): (OpenXmlElement | Node)[] {
+		type Group = {
+			beginIdx: number;
+			instrText: string[];
+			sepIdx: number;
+			endIdx: number; // -1 if still unterminated
+			nested: Group[];
+		};
+
+		const stack: Group[] = [];
+		const topLevel: Group[] = [];
+
+		for (let i = 0; i < elems.length; i++) {
+			const el = elems[i];
+			const ct = complexFieldCharType(el);
+			if (ct === 'begin') {
+				stack.push({ beginIdx: i, instrText: [], sepIdx: -1, endIdx: -1, nested: [] });
+				continue;
+			}
+			if (ct === 'separate') {
+				if (stack.length > 0 && stack[stack.length - 1].sepIdx === -1) {
+					stack[stack.length - 1].sepIdx = i;
+				}
+				continue;
+			}
+			if (ct === 'end') {
+				if (stack.length === 0) continue; // stray end; ignore
+				const closed = stack.pop()!;
+				closed.endIdx = i;
+				if (stack.length > 0) {
+					stack[stack.length - 1].nested.push(closed);
+				} else {
+					topLevel.push(closed);
+				}
+				continue;
+			}
+			// Ordinary (non-delimiter) run. If we're inside an instruction
+			// portion (stack non-empty and current group has no separate
+			// yet), collect any instrText children onto that group.
+			if (stack.length > 0 && stack[stack.length - 1].sepIdx === -1) {
+				if (el && el.type === DomType.Run && el.children) {
+					for (const c of el.children) {
+						if (c.type === DomType.Instruction) {
+							stack[stack.length - 1].instrText.push(
+								(c as WmlInstructionText).text ?? '',
+							);
+						}
+					}
+				}
+			}
+		}
+
+		// Any frames still on the stack are unterminated (missing end). Hoist
+		// them onto the top-level list so renderComplexFieldGroup can decide
+		// whether to salvage a partial result. Preserve source order by
+		// walking the stack from bottom to top.
+		for (const unterminated of stack) {
+			topLevel.push(unterminated);
+		}
+		topLevel.sort((a, b) => a.beginIdx - b.beginIdx);
+
+		// Index the top-level groups by their begin run so we can splice them
+		// back into the linear element list in order.
+		const groupByBegin = new Map<number, Group>();
+		for (const g of topLevel) groupByBegin.set(g.beginIdx, g);
+
 		const out: (OpenXmlElement | Node)[] = [];
 		let i = 0;
 		while (i < elems.length) {
-			const el = elems[i];
-			if (!isComplexFieldBeginRun(el)) {
-				out.push(el);
-				i++;
+			const g = groupByBegin.get(i);
+			if (g) {
+				const rendered = this.renderComplexFieldGroup(g, elems);
+				out.push(...rendered);
+				// Skip to after the group's end (or past the whole tail if
+				// unterminated — nothing after it is structurally meaningful
+				// for field grouping).
+				i = g.endIdx === -1 ? elems.length : g.endIdx + 1;
 				continue;
 			}
-			// Scan forward for separate and end. We tolerate malformed input
-			// (missing separate or end) by stopping at the end of the list.
-			let sep = -1;
-			let end = -1;
-			for (let j = i + 1; j < elems.length; j++) {
-				const ct = complexFieldCharType(elems[j]);
-				if (ct === 'separate' && sep === -1) sep = j;
-				else if (ct === 'end') { end = j; break; }
-			}
-			if (end === -1) {
-				// Unterminated field; fall back to default rendering of the
-				// begin run (which renders nothing thanks to fieldRun) and
-				// continue past it.
-				i++;
+			// Runs covered by a group's interior are consumed by the group's
+			// recursive render; only runs outside every group reach this
+			// branch.
+			out.push(elems[i]);
+			i++;
+		}
+		return out;
+	}
+
+	// Renders a single complex-field group (possibly containing nested
+	// groups) to a list of DOM nodes. Nested groups inside the result portion
+	// are recursively rendered first and spliced into the outer group's
+	// rendered children list in their original source position.
+	private renderComplexFieldGroup(
+		group: {
+			beginIdx: number;
+			instrText: string[];
+			sepIdx: number;
+			endIdx: number;
+			nested: { beginIdx: number; instrText: string[]; sepIdx: number; endIdx: number; nested: any[] }[];
+		},
+		elems: OpenXmlElement[],
+	): Node[] {
+		const instruction = group.instrText.join('');
+		const parsed = parseFieldInstruction(instruction);
+
+		const unterminated = group.endIdx === -1;
+		if (unterminated && group.sepIdx === -1) {
+			// No separate reached — no cached result exists. Drop silently,
+			// matching Wave 1.1 behaviour.
+			return [];
+		}
+
+		const resultStart = group.sepIdx + 1;
+		const resultEnd = unterminated ? elems.length : group.endIdx; // exclusive
+		if (resultEnd <= resultStart) {
+			// No result runs between separate and end. Nothing to wrap.
+			return unterminated ? [this.h({ tagName: '#comment', children: ['docxjs: unterminated field'] }) as Node] : [];
+		}
+
+		// Index nested groups by their begin position so we can splice their
+		// rendered output into the result stream in source order.
+		const nestedByBegin = new Map<number, typeof group.nested[number]>();
+		for (const n of group.nested) nestedByBegin.set(n.beginIdx, n);
+
+		const rendered: Node[] = [];
+		let j = resultStart;
+		while (j < resultEnd) {
+			const inner = nestedByBegin.get(j);
+			if (inner) {
+				const innerNodes = this.renderComplexFieldGroup(inner as any, elems);
+				rendered.push(...innerNodes);
+				j = inner.endIdx === -1 ? resultEnd : inner.endIdx + 1;
 				continue;
 			}
-			const instrRuns = elems.slice(i + 1, sep === -1 ? end : sep);
-			const resultRuns = sep === -1 ? [] : elems.slice(sep + 1, end);
-			const instruction = collectInstructionText(instrRuns);
-			const parsed = parseFieldInstruction(instruction);
-			// Render cached-result runs. They are usually ordinary runs
-			// (fieldRun=false), but we bypass the guard explicitly so any
-			// unusual run carrying both a fldChar-less instrText/etc. and
-			// cached text still emits its cached text.
-			const rendered: Node[] = [];
-			for (const r of resultRuns) {
-				let n: Node | Node[] | null = null;
-				if (r && r.type === DomType.Run) {
-					n = this.renderRun(r as WmlRun, true);
-				} else {
-					n = this.renderElement(r);
-				}
-				if (n == null) continue;
+			const r = elems[j];
+			let n: Node | Node[] | null = null;
+			if (r && r.type === DomType.Run) {
+				// Bypass the fieldRun guard so result-portion runs emit their
+				// cached text even when the run happens to carry fldChar-less
+				// instrText siblings (defensive — ordinary cached-result runs
+				// won't have fieldRun set in the first place).
+				n = this.renderRun(r as WmlRun, true);
+			} else if (r) {
+				n = this.renderElement(r);
+			}
+			if (n != null) {
 				if (Array.isArray(n)) rendered.push(...n);
 				else rendered.push(n);
 			}
-			const wrapped = this.wrapFieldResult(rendered, parsed);
-			out.push(...wrapped);
-			i = end + 1;
+			j++;
 		}
-		return out;
+
+		const wrapped = this.wrapFieldResult(rendered, parsed);
+		if (unterminated) {
+			// Marker comment for debugging. Hard-coded string — no DOCX
+			// interpolation into the comment body.
+			return [this.h({ tagName: '#comment', children: ['docxjs: unterminated field'] }) as Node, ...wrapped];
+		}
+		return wrapped;
 	}
 
 	renderSimpleField(elem: WmlFieldSimple): Node | Node[] {
@@ -1878,36 +2054,19 @@ section.${c}>ol>li::before {
 	}
 
 	// Wraps the rendered cached-result nodes based on the parsed instruction.
-	// HYPERLINK → <a href=…> (scheme-allowlisted). REF / PAGEREF → internal
-	// <a href="#anchor">. All other codes render as-is.
+	// HYPERLINK → <a href=…> (scheme-allowlisted), with optional tooltip
+	// (\o), target frame (\t, \n) — every DOCX-derived string goes through
+	// the same allowlists renderHyperlink uses (isSafeHyperlinkHref for URLs,
+	// the fixed target-frame regex below). REF / PAGEREF → internal
+	// <a href="#anchor">. STYLEREF / SYMBOL / TOC / QUOTE / USERNAME /
+	// USERINITIALS render the cached result verbatim (Word already resolved
+	// the value; the structure is inside the cached nodes). All other codes
+	// also render as-is.
 	private wrapFieldResult(children: Node[], parsed: ParsedFieldInstruction): Node[] {
 		if (!children || children.length === 0) return children ?? [];
 		const code = parsed.code;
 		if (code === 'HYPERLINK') {
-			// "\l anchor" = internal fragment. Otherwise first positional
-			// arg is an external URL.
-			const hasLocal = parsed.switches.some(s => s.toLowerCase() === '\\l');
-			if (hasLocal) {
-				const anchor = parsed.args[0] ?? '';
-				const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
-				a.setAttribute('href', '#' + anchor);
-				children.forEach(c => a.appendChild(c));
-				return [a];
-			}
-			const url = parsed.args[0] ?? '';
-			if (!isSafeHyperlinkHref(url)) {
-				// Drop the href — render an inert span so the cached text is
-				// still visible but has no navigation sink. Matches
-				// renderHyperlink's handling of unsafe schemes. See
-				// SECURITY_REVIEW.md #2.
-				const span = this.h({ tagName: "span" }) as HTMLElement;
-				children.forEach(c => span.appendChild(c));
-				return [span];
-			}
-			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
-			a.setAttribute('href', url);
-			children.forEach(c => a.appendChild(c));
-			return [a];
+			return this.wrapHyperlinkFieldResult(children, parsed);
 		}
 		if (code === 'REF' || code === 'PAGEREF') {
 			const anchor = parsed.args[0] ?? '';
@@ -1917,10 +2076,68 @@ section.${c}>ol>li::before {
 			children.forEach(c => a.appendChild(c));
 			return [a];
 		}
-		// PAGE, NUMPAGES, DATE, TIME, AUTHOR, FILENAME, SEQ, STYLEREF,
-		// LISTNUM, MERGEFIELD, IF, ASK, FILLIN, INCLUDETEXT, TOC, and any
-		// code we don't recognise — render cached result verbatim.
+		// STYLEREF, SYMBOL, TOC, QUOTE, USERNAME, USERINITIALS plus PAGE,
+		// NUMPAGES, DATE, TIME, AUTHOR, FILENAME, SEQ, LISTNUM, MERGEFIELD,
+		// IF, ASK, FILLIN, INCLUDETEXT and any code we don't recognise —
+		// render cached result verbatim. These all resolve to a value Word
+		// has already computed and serialised into the result runs; the
+		// renderer simply preserves the computed text / structure.
 		return children;
+	}
+
+	// HYPERLINK field — external URL, internal anchor (\l), optional tooltip
+	// (\o), optional target frame (\t _blank|_self|_parent|_top), and the
+	// \n shortcut (force new window, equivalent to \t _blank). \m (image map
+	// coordinates) and \h (no history push) are ignored for v1.
+	private wrapHyperlinkFieldResult(children: Node[], parsed: ParsedFieldInstruction): Node[] {
+		const switchesLower = parsed.switches.map(s => s.toLowerCase());
+		const hasLocal = switchesLower.includes('\\l');
+		const hasNewWindow = switchesLower.includes('\\n');
+
+		// Pull optional tooltip string (\o "tip") and target frame string
+		// (\t "_blank") out of the parsed switch list. The parser normalises
+		// switch tokens to a backslash-prefixed string; the value that
+		// follows — if any — is a separate positional arg. parseFieldInstruction
+		// already guarantees balanced quotes / sensible tokenisation.
+		const tooltip = extractSwitchValue(parsed, '\\o');
+		const targetFromT = extractSwitchValue(parsed, '\\t');
+
+		const href = hasLocal
+			? '#' + (firstNonSwitchArg(parsed) ?? '')
+			: (firstNonSwitchArg(parsed) ?? '');
+
+		// Security: validate external URL against the Wave 1.5 scheme
+		// allowlist. Internal anchors (hasLocal) are fragment-only and safe.
+		if (!hasLocal && !isSafeHyperlinkHref(href)) {
+			const span = this.h({ tagName: "span" }) as HTMLElement;
+			children.forEach(c => span.appendChild(c));
+			return [span];
+		}
+
+		const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
+		a.setAttribute('href', href);
+		children.forEach(c => a.appendChild(c));
+
+		// Tooltip — DOCX-derived string via setAttribute (browser encodes).
+		if (tooltip) {
+			a.setAttribute('title', tooltip);
+		}
+
+		// Target frame — allowlist regex, identical to renderHyperlink.
+		// \n (force new window) is equivalent to \t _blank and takes
+		// precedence if both are present.
+		const effectiveTarget = hasNewWindow ? '_blank' : targetFromT;
+		if (effectiveTarget && /^_(blank|self|parent|top)$/.test(effectiveTarget)) {
+			a.setAttribute('target', effectiveTarget);
+			if (!hasLocal) {
+				// Match renderHyperlink: rel="noopener noreferrer" when an
+				// external link opens a new browsing context, so window.opener
+				// can't be abused.
+				a.setAttribute('rel', 'noopener noreferrer');
+			}
+		}
+
+		return [a];
 	}
 
 	renderContainer<T extends keyof HTMLElementTagNameMap>(elem: OpenXmlElement, tagName: T): HTMLElementTagNameMap[T] {
