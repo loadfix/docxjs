@@ -30,10 +30,11 @@ import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReferen
 import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
-import { DrawingShape, DrawingGroup, DrawingChart } from './document/drawing';
+import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx } from './document/drawing';
 import { renderShape, renderShapeGroup } from './drawing/shapes';
 import { ChartPart } from './charts/chart-part';
-import { renderChart as renderChartSvg } from './charts/render';
+import { ChartExPart } from './charts/chartex-part';
+import { renderChart as renderChartSvg, scheduleLegendOverflowAdjust } from './charts/render';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -1611,6 +1612,9 @@ section.${c}>ol>li::before {
 			case DomType.Chart:
 				return this.renderChart(elem as DrawingChart);
 
+			case DomType.ChartEx:
+				return this.renderChartEx(elem as DrawingChartEx);
+
 			case DomType.Text:
 				return this.renderText(elem as WmlText);
 
@@ -2477,11 +2481,60 @@ section.${c}>ol>li::before {
 			wrapper.className = `${this.className}-chart`;
 			wrapper.style.display = "inline-block";
 			wrapper.appendChild(svg);
+			// Post-attach rAF hook — measures legend labels via getBBox
+			// once the SVG is connected and moves the legend below the
+			// plot area when any label overflows the inline budget.
+			// Implementation lives in src/charts/render.ts so the
+			// renderer owns layout knowledge. SSR-safe: the helper
+			// guards on isConnected and requestAnimationFrame.
+			scheduleLegendOverflowAdjust(svg);
 			return wrapper;
 		} catch {
 			// Never let a malformed chart abort the whole render.
 			return fallback;
 		}
+	}
+
+	// ChartEx passthrough: renders a labelled `<div>` placeholder for
+	// modern chart types (sunburst, waterfall, funnel, treemap, ...).
+	// We do not attempt a real SVG rendering in v1; the placeholder
+	// at least signals that a chart was there and carries the
+	// chart title for accessibility.
+	//
+	// Security: `kind` is allowlisted by chartex-part.ts before it
+	// reaches the `data-chart-kind` attribute; title text reaches the
+	// DOM via textContent only. The rel-id lookup goes through
+	// findPartByRelId's Map — no string interpolation into selectors.
+	renderChartEx(elem: DrawingChartEx): HTMLElement {
+		const fallback = this.createElement("div");
+		fallback.className = `${this.className}-chartex-placeholder`;
+
+		if (!elem.relId || !this.document) return fallback;
+
+		const part = this.document.findPartByRelId(
+			elem.relId,
+			this.currentPart ?? this.document.documentPart,
+		);
+		if (!part || !(part instanceof ChartExPart) || !part.chart) return fallback;
+
+		const wrapper = this.createElement("div");
+		wrapper.className = `docx-chartex-placeholder`;
+		// Kind is already allowlisted at parse time — writing as a
+		// data-* attribute is safe even if it weren't, but we keep the
+		// parse-time allowlist for defence-in-depth.
+		wrapper.setAttribute("data-chart-kind", part.chart.kind);
+
+		const titleDiv = this.createElement("div");
+		titleDiv.className = "docx-chartex-placeholder__title";
+		titleDiv.textContent = part.chart.title || "";
+		wrapper.appendChild(titleDiv);
+
+		const noteDiv = this.createElement("div");
+		noteDiv.className = "docx-chartex-placeholder__note";
+		noteDiv.textContent = "Chart type not yet supported";
+		wrapper.appendChild(noteDiv);
+
+		return wrapper;
 	}
 
 	renderText(elem: WmlText) {

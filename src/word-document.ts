@@ -19,6 +19,7 @@ import { CustomPropsPart } from "./document-props/custom-props-part";
 import { CommentsPart } from "./comments/comments-part";
 import { CommentsExtendedPart } from "./comments/comments-extended-part";
 import { ChartPart } from "./charts/chart-part";
+import { ChartExPart } from "./charts/chartex-part";
 import { ContentType } from "./common/content-types";
 
 const topLevelRels = [
@@ -152,6 +153,13 @@ export class WordDocument {
 				// resolves them from the enclosing (document / header /
 				// footer) part's relationship map.
 				part = new ChartPart(this._package, path);
+				break;
+
+			case RelationshipTypes.ChartEx:
+				// Modern 2013+ chart parts (sunburst, waterfall, funnel,
+				// treemap, ...). Rendered as a labelled placeholder
+				// rather than a real chart — see src/charts/chartex-part.ts.
+				part = new ChartExPart(this._package, path);
 				break;
 		}
 

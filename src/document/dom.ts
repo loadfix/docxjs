@@ -80,7 +80,13 @@ export enum DomType {
     RubyText = "rubyText",
     FitText = "fitText",
     BidiOverride = "bidiOverride",
-    Chart = "chart"
+    Chart = "chart",
+    // Modern 2013+ chart parts (sunburst / waterfall / funnel / treemap /
+    // histogram / pareto / box-whisker). Rendered as a labelled
+    // placeholder rather than a real SVG chart. See
+    // src/charts/chartex-part.ts and the renderChartEx branch of
+    // html-renderer.ts.
+    ChartEx = "chartEx"
 }
 
 // Structured Document Tag (content control). Parsed from w:sdt when
