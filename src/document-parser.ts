@@ -848,10 +848,20 @@ export class DocumentParser {
 	}
 
 	parseFrame(node: Element, paragraph: WmlParagraph) {
-		var dropCap = xml.attr(node, "dropCap");
+		const dropCap = xml.attr(node, "dropCap");
 
-		if (dropCap == "drop")
-			paragraph.cssStyle["float"] = "left";
+		if (dropCap !== "drop" && dropCap !== "margin")
+			return;
+
+		// w:lines is how many lines the drop cap spans (default 3 per spec).
+		// Clamp to a sane range so a hostile DOCX can't emit a huge font-size.
+		const linesRaw = xml.intAttr(node, "lines");
+		const lines = (Number.isInteger(linesRaw) && linesRaw >= 1 && linesRaw <= 10)
+			? linesRaw
+			: 3;
+
+		paragraph.dropCap = dropCap;
+		paragraph.dropCapLines = lines;
 	}
 
 	parseHyperlink(node: Element, parent?: OpenXmlElement): WmlHyperlink {
