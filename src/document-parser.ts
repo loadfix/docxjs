@@ -2998,6 +2998,8 @@ export class DocumentParser {
 					// @w:eastAsia (CJK), @w:bidi (complex-script / RTL). Any present
 					// slot is a valid BCP-47 hint — surface whichever is set, with
 					// @w:val taking priority when multiple slots are present.
+					// Surface to screen readers and hyphenation so even a
+					// Japanese-only or RTL-only run gets a language hint.
 					{
 						const langVal = xml.attr(c, "val")
 							|| xml.attr(c, "eastAsia")

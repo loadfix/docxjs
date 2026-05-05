@@ -8567,7 +8567,9 @@
             return result.filter(x => x.length > 0);
         }
         renderWrapper(children) {
-            return this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+            const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+            wrapper.setAttribute("role", "document");
+            return wrapper;
         }
         renderWrapperWithSidebar(sectionElements) {
             const c = this.className;
@@ -8588,6 +8590,7 @@
                 className: `${c}-wrapper`,
                 children: [docContainer, this.sidebarContainer]
             });
+            wrapper.setAttribute("role", "document");
             this.later(() => {
                 this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
             });
@@ -10086,7 +10089,40 @@ section.${c}>ol>li::before {
             this.currentVerticalMerge = this.tableVerticalMerges.pop();
             this.currentCellPosition = this.tableCellPositions.pop();
             this.currentTableBandSizes = this.tableBandSizes.pop();
-            return this.toHTML(elem, ns.html, "table", children);
+            const tableResult = this.toHTML(elem, ns.html, "table", children);
+            this.applyFirstRowHeaderA11y(tableResult, elem);
+            return tableResult;
+        }
+        applyFirstRowHeaderA11y(table, elem) {
+            const hasFirstRowStyle = elem.className?.split(/\s+/).includes("first-row");
+            if (!hasFirstRowStyle)
+                return;
+            const thead = table.querySelector(":scope > thead");
+            if (thead && thead.querySelector("th, td"))
+                return;
+            const tbody = table.querySelector(":scope > tbody") ?? table;
+            const firstRow = tbody.querySelector(":scope > tr");
+            if (!firstRow)
+                return;
+            const cells = Array.from(firstRow.querySelectorAll(":scope > td, :scope > th"))
+                .filter(c => c.style.display !== "none");
+            if (cells.length === 0)
+                return;
+            const gridCols = table.querySelectorAll(":scope > colgroup > col").length
+                || cells.reduce((n, c) => n + (c.colSpan || 1), 0);
+            if (cells.length === 1) {
+                const only = cells[0];
+                if ((only.colSpan || 1) >= gridCols) {
+                    only.setAttribute("scope", "colgroup");
+                }
+                else {
+                    only.setAttribute("scope", "col");
+                }
+                return;
+            }
+            for (const cell of cells) {
+                cell.setAttribute("scope", "col");
+            }
         }
         renderTableColumns(columns) {
             const children = columns.map(x => this.h({ tagName: "col", style: { width: x.width } }));

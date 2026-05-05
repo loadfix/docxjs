@@ -1028,7 +1028,12 @@ export class HtmlRenderer {
 	}
 
 	renderWrapper(children: HTMLElement[]) {
-		return this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+		const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children }) as HTMLElement;
+		// Accessibility: mark the docx-wrapper as a document landmark so
+		// assistive tech announces the body as a single coherent reading
+		// region, matching Word's document-body semantic.
+		wrapper.setAttribute("role", "document");
+		return wrapper;
 	}
 
 	renderWrapperWithSidebar(sectionElements: HTMLElement[]) {
@@ -1056,6 +1061,8 @@ export class HtmlRenderer {
 			className: `${c}-wrapper`,
 			children: [docContainer, this.sidebarContainer]
 		}) as HTMLElement;
+		// Same a11y landmark as the non-sidebar wrapper above.
+		wrapper.setAttribute("role", "document");
 
 		this.later(() => {
 			this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
@@ -3306,7 +3313,54 @@ section.${c}>ol>li::before {
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
 		this.currentTableBandSizes = this.tableBandSizes.pop();
-		return this.toHTML(elem, ns.html, "table", children);
+		const tableResult = this.toHTML(elem, ns.html, "table", children);
+		// Accessibility: when tblLook signals a styled first row
+		// (className carries `first-row`) and no explicit <w:tblHeader/>
+		// routed any row into <thead>, treat the first body row as a
+		// visual header. Promotes the single full-width cell to
+		// scope="colgroup" (banner-header shape) or each first-row cell
+		// to scope="col", so screen readers can associate data with
+		// column headers even when the docx only signals header-ness
+		// through tblLook styling (Word's common case).
+		this.applyFirstRowHeaderA11y(tableResult, elem);
+		return tableResult;
+	}
+
+	// See caller above. Non-destructive: only sets scope="col" /
+	// scope="colgroup" on first-row cells. Explicit <thead> rows (from
+	// the w:tblHeader path) are left alone because renderTableCell
+	// already emits <th scope="col"> for them.
+	private applyFirstRowHeaderA11y(table: HTMLElement, elem: WmlTable) {
+		const hasFirstRowStyle = elem.className?.split(/\s+/).includes("first-row");
+		if (!hasFirstRowStyle) return;
+
+		const thead = table.querySelector(":scope > thead");
+		if (thead && thead.querySelector("th, td")) return;
+
+		const tbody = table.querySelector(":scope > tbody") ?? table;
+		const firstRow = tbody.querySelector(":scope > tr");
+		if (!firstRow) return;
+
+		const cells = Array.from(firstRow.querySelectorAll(":scope > td, :scope > th"))
+			.filter(c => (c as HTMLElement).style.display !== "none");
+		if (cells.length === 0) return;
+
+		const gridCols = table.querySelectorAll(":scope > colgroup > col").length
+			|| cells.reduce((n, c) => n + ((c as HTMLTableCellElement).colSpan || 1), 0);
+
+		if (cells.length === 1) {
+			const only = cells[0] as HTMLTableCellElement;
+			if ((only.colSpan || 1) >= gridCols) {
+				only.setAttribute("scope", "colgroup");
+			} else {
+				only.setAttribute("scope", "col");
+			}
+			return;
+		}
+
+		for (const cell of cells) {
+			(cell as HTMLTableCellElement).setAttribute("scope", "col");
+		}
 	}
 
 	renderTableColumns(columns: WmlTableColumn[]) {
