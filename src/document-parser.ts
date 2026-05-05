@@ -1257,6 +1257,16 @@ export class DocumentParser {
 			} else if (el.localName == "r") {
 				var run = this.parseRun(el);
 				run.type = DomType.MmlRun;
+				// Upstream #161: OMML equation arrays (m:eqArr) use a literal
+				// '&' inside m:r/m:t as a column-alignment separator. It's a
+				// layout marker, not a visible character — Word renders it as
+				// column alignment, but docxjs has no alignment engine for
+				// eqArr, so the raw '&' leaks into the output (e.g. "-x, &x<0"
+				// appears between curly/square-bracket delimiters). Strip the
+				// alignment marker from text children of math runs; any real
+				// '&' the author wanted to display would be authored as a w:sym
+				// or equivalent, not bare text inside m:t.
+				this.stripMathAlignmentMarkers(run);
 				result.children.push(run);
 			} else if (el.localName == propsTag) {
 				result.props = this.parseMathProperies(el);
@@ -1264,6 +1274,18 @@ export class DocumentParser {
 		}
 
 		return result;
+	}
+
+	private stripMathAlignmentMarkers(run: OpenXmlElement) {
+		if (!run.children) return;
+		for (const child of run.children) {
+			if (child.type === DomType.Text || child.type === DomType.DeletedText) {
+				const t = (child as WmlText).text;
+				if (t && t.indexOf('&') >= 0) {
+					(child as WmlText).text = t.replace(/&/g, '');
+				}
+			}
+		}
 	}
 
 	parseMathProperies(elem: Element): Record<string, any> {
@@ -3170,16 +3192,32 @@ export class DocumentParser {
 
 	parseIndentation(node: Element, style: Record<string, string>) {
 		var firstLine = xml.lengthAttr(node, "firstLine");
+		// w:firstLineChars — first-line indent expressed as 1/100ths of a
+		// character width. Since we don't know the exact font metrics at
+		// parse time, an `em`-based text-indent approximates it. When
+		// w:firstLineChars is present it takes precedence over w:firstLine
+		// (upstream #195) — Word prefers the char-count form when both are
+		// supplied on the same paragraph.
+		var firstLineChars = xml.intAttr(node, "firstLineChars", null);
 		var hanging = xml.lengthAttr(node, "hanging");
+		var hangingChars = xml.intAttr(node, "hangingChars", null);
 		var left = xml.lengthAttr(node, "left");
+		var leftChars = xml.intAttr(node, "leftChars", null);
 		var start = xml.lengthAttr(node, "start");
+		var startChars = xml.intAttr(node, "startChars", null);
 		var right = xml.lengthAttr(node, "right");
+		var rightChars = xml.intAttr(node, "rightChars", null);
 		var end = xml.lengthAttr(node, "end");
+		var endChars = xml.intAttr(node, "endChars", null);
 
 		if (firstLine) style["text-indent"] = firstLine;
+		if (firstLineChars != null) style["text-indent"] = `${firstLineChars / 100}em`;
 		if (hanging) style["text-indent"] = `-${hanging}`;
+		if (hangingChars != null) style["text-indent"] = `-${hangingChars / 100}em`;
 		if (left || start) style["margin-inline-start"] = left || start;
+		if (leftChars != null || startChars != null) style["margin-inline-start"] = `${(leftChars ?? startChars) / 100}em`;
 		if (right || end) style["margin-inline-end"] = right || end;
+		if (rightChars != null || endChars != null) style["margin-inline-end"] = `${(rightChars ?? endChars) / 100}em`;
 	}
 
 	parseSpacing(node: Element, style: Record<string, string>) {
