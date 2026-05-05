@@ -117,6 +117,17 @@ export interface WmlSdt extends OpenXmlElement {
     sdtAlias?: string;
     sdtTag?: string;
     sdtControl?: SdtControl;
+    // Parsed <w:dataBinding> on <w:sdtPr>. The xpath is DOCX-derived and
+    // must only be evaluated against a custom XML part document (never the
+    // rendered HTML document) and must pass the XPath safety allowlist in
+    // html-renderer.ts before reaching document.evaluate.
+    dataBinding?: SdtDataBinding;
+}
+
+export interface SdtDataBinding {
+    xpath: string;
+    storeItemID?: string;
+    prefixMappings?: string;
 }
 
 // Typed form-control metadata extracted from w:sdtPr. All DOCX-derived

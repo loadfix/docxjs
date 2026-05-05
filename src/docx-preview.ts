@@ -17,7 +17,7 @@ export type { MeasureFn, Measurement } from './page-break';
 // Security helpers re-exported so they can be unit-tested and (optionally)
 // reused by embedding code. Pure functions; see SECURITY_REVIEW.md for
 // context and the behaviours each one enforces.
-export { isSafeHyperlinkHref } from './html-renderer';
+export { isSafeHyperlinkHref, isSafeCustomXmlXPath, safeEvaluateXPath } from './html-renderer';
 export {
     sanitizeCssColor,
     sanitizeFontFamily,
@@ -113,6 +113,18 @@ export interface Options {
      * and byte-stable snapshots.
      */
     responsive?: boolean;
+    /**
+     * When `true`, emit the parsed `docProps/core.xml` metadata (title,
+     * subject, creator, lastModifiedBy, created, modified) as `data-doc-*`
+     * attributes on the `.docx-wrapper` element. Consumers can read them
+     * via `wrapper.dataset.docTitle` etc. without having to expose the
+     * parsed `WordDocument` object. Default `false` — keeps the wrapper
+     * attribute surface stable for existing consumers.
+     *
+     * No `<meta>` tags are written (the library does not own the <head>).
+     * All values reach the DOM via `dataset.*`, which is browser-encoded.
+     */
+    emitDocumentProps?: boolean;
     comments: CommentsOptions;
     changes: ChangesOptions;
     h: typeof h;
@@ -140,6 +152,7 @@ export const defaultOptions: Options = {
     showProtectionBadge: false,
     experimentalPageBreaks: false,
     responsive: false,
+    emitDocumentProps: false,
     comments: {
         sidebar: true,
         highlight: true,

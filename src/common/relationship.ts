@@ -49,7 +49,17 @@ export enum RelationshipTypes {
     DiagramLayout = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout",
     DiagramQuickStyle = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle",
     DiagramColors = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors",
-    DiagramDrawing = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing"
+    DiagramDrawing = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing",
+    // Glossary document (building blocks / auto-text). A full document part
+    // at /word/glossary/document.xml; docxjs parses it with the same
+    // pipeline as the main body but does not render it by default.
+    GlossaryDocument = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument",
+    // Custom XML data (<w:dataBinding> targets). One or more parts at
+    // /customXml/item*.xml, each with a companion itemProps*.xml rel
+    // that carries the ds:itemID (the GUID we match against storeItemID
+    // on <w:dataBinding>).
+    CustomXml = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+    CustomXmlProps = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps",
 }
 
 export function parseRelationships(root: Element, xml: XmlParser): Relationship[] {
