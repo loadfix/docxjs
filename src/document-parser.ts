@@ -3418,7 +3418,16 @@ class values {
 		var color = xmlUtil.colorAttr(c, "color");
 		var size = xml.lengthAttr(c, "sz", LengthUsage.Border);
 
-		return `${size} ${type} ${color == "auto" ? autos.borderColor : color}`;
+		// A border element with no `w:color` (and no `w:themeColor`) means
+		// "use the default foreground" — same as `auto`. Without this
+		// fallback the composite string becomes "<size> <type> null", which
+		// browsers reject as invalid CSS and the whole declaration is
+		// dropped — the failure mode the corpus's border-around-paragraph
+		// fixture hits.
+		if (color == null || color == "auto")
+			color = autos.borderColor;
+
+		return `${size} ${type} ${color}`;
 	}
 
 	// Companion to `valueOfBorder` for the `$themeColor-<prop>` sideband.
