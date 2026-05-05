@@ -334,6 +334,11 @@ export class HtmlRenderer {
 	// Set while rendering a WmlTableRow whose isHeader is true so
 	// renderTableCell can emit <th scope="col"> instead of <td>.
 	private currentRowIsHeader: boolean = false;
+	// Tracks the section that is currently rendering body content. Set in
+	// renderSections per-section loop, consumed by renderTable to clamp
+	// absolute (dxa) tblW values that would otherwise overflow the section's
+	// content area (#54).
+	private currentSectProps: SectionProperties | null = null;
 
 	// Monotonic counter for counter-generated SVG ids emitted by the
 	// drawing shape renderer (gradients, patterns, filters). Never
@@ -898,10 +903,15 @@ export class HtmlRenderer {
 
 			for (const sect of pages[i]) {
 				var contentElement = this.createSectionContent(sect.sectProps);
+				// Make the active section's geometry available to child
+				// renderers (renderTable uses it to clamp dxa table widths
+				// to the content area — fixes #54).
+				this.currentSectProps = sect.sectProps;
 				this.renderElements(sect.elements, contentElement);
 				pageElement.appendChild(contentElement);
 				props = sect.sectProps;
 			}
+			this.currentSectProps = null;
 
 			if (this.options.renderFootnotes) {
 				const notes = this.renderNotes(this.currentFootnoteIds, this.footnoteMap);
@@ -1689,7 +1699,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 
 			for (const subStyle of subStyles) {
 				//TODO temporary disable modificators until test it well
-				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''} 
+				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''}
 
 				if (style.target != subStyle.target)
 					selector += ` ${subStyle.target}`;
@@ -1697,6 +1707,14 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 				if (defautStyles[style.target] == style)
 					selector = `.${this.className} ${style.target}, ` + selector;
 
+				// #174: resolve `$themeColor-*` sidebands on the style
+				// values before serialising to CSS text. Without this, a
+				// tblStylePr/tcPr block whose background/color came from
+				// <w:shd w:themeFill="…"/> would lose its fill when
+				// styleToString skipped the `$`-prefixed keys. Mutates
+				// `subStyle.values` in place — acceptable because processed
+				// styles are only serialised once per render().
+				this.applyThemeColorSideband(subStyle.values);
 				styleText += this.styleToString(selector, subStyle.values);
 			}
 		}
@@ -3376,11 +3394,77 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 		});
 	}
 
+	// #54: returns the section's available horizontal content area in
+	// points (page width minus left + right margins), or null when the
+	// active section has no known geometry (pre-render harness, or a
+	// section whose pgSz/pgMar didn't parse). Widths are "<number><unit>"
+	// strings from the parser (via convertLength); the numeric portion
+	// is extracted via parseFloat. Any non-`pt` unit is rejected — Word
+	// only emits pgSz/pgMar as dxa (points) so a mixed unit almost
+	// certainly means the string has been post-processed and we'd be
+	// comparing apples to oranges.
+	private availableContentWidthPt(): number | null {
+		const sect = this.currentSectProps;
+		if (!sect) return null;
+		const pageW = sect.pageSize?.width;
+		const left = sect.pageMargins?.left;
+		const right = sect.pageMargins?.right;
+		if (!pageW || left == null || right == null) return null;
+		if (!/pt\s*$/.test(pageW) || !/pt\s*$/.test(left) || !/pt\s*$/.test(right)) return null;
+		const w = parseFloat(pageW);
+		const l = parseFloat(left);
+		const r = parseFloat(right);
+		if (!Number.isFinite(w) || !Number.isFinite(l) || !Number.isFinite(r)) return null;
+		const avail = w - l - r;
+		return avail > 0 ? avail : null;
+	}
+
 	renderTable(elem: WmlTable) {
+		// Detect nesting before we push — a non-empty stack means we're
+		// inside an outer table. Nested tables get an inherited-style reset
+		// at the wrapper level so outer tblStyle CSS rules (written as
+		// descendant selectors like `.docx_TblStyle td { … }`) don't cascade
+		// into the inner table's cells. Word doesn't treat an outer table
+		// style as inherited by nested tables; inline reset is the simplest
+		// faithful fix short of rewriting every style selector to stop at
+		// the first `> table >` boundary.
+		const isNested = this.tableCellPositions.length > 0;
+
 		this.tableCellPositions.push(this.currentCellPosition);
 		this.tableVerticalMerges.push(this.currentVerticalMerge);
 		this.currentVerticalMerge = {};
 		this.currentCellPosition = { col: 0, row: 0 };
+
+		// #54: clamp absolute (dxa) table widths to the section's content
+		// area so tables authored at the full page width don't extend into
+		// the section's right padding. Percent widths are already relative
+		// to the containing block in CSS, so they need no clamping. The
+		// cssStyle["width"] value comes from valueOfSize → lengthAttr, so
+		// it's always a sanitized "<number><unit>" string — we parseFloat
+		// the numeric portion for comparison and leave the string as the
+		// clamped fallback when no clamp is needed.
+		const availablePt = this.availableContentWidthPt();
+		if (elem.cssStyle && availablePt != null) {
+			const widthStr = elem.cssStyle["width"];
+			if (widthStr && /pt\s*$/.test(widthStr)) {
+				const widthPt = parseFloat(widthStr);
+				if (Number.isFinite(widthPt) && widthPt > availablePt) {
+					elem.cssStyle["width"] = `${availablePt.toFixed(2)}pt`;
+				}
+			}
+			// Safety net: even for clamped widths, declare max-width so
+			// the rendered table can never exceed the section's content
+			// area regardless of DOCX width metadata (the common overflow
+			// case in #54).
+			if (elem.cssStyle["max-width"] == null) {
+				elem.cssStyle["max-width"] = "100%";
+			}
+		} else if (elem.cssStyle && elem.cssStyle["max-width"] == null) {
+			// No section geometry available (edge case / test harness):
+			// still emit max-width: 100% so the table can't overflow its
+			// containing block.
+			elem.cssStyle["max-width"] = "100%";
+		}
 
 		// Track band sizes so renderTableRow / renderTableCell can emit
 		// data-band attributes that account for tblStyleColBandSize /
@@ -3460,6 +3544,19 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
 		this.currentTableBandSizes = this.tableBandSizes.pop();
+		if (isNested && elem.cssStyle) {
+			// Nested-table cascade reset (see comment at function top).
+			// These inline declarations win over any CSS rule selector
+			// written by the outer table style's `.docx_Style td`-form
+			// rules. The reset runs at the wrapper level so content cells
+			// can still set their own shading / borders via inline style;
+			// only the *inherited* ones are neutralised.
+			const inherited = elem.cssStyle;
+			if (inherited["background-color"] == null)
+				inherited["background-color"] = "transparent";
+			if (inherited["background-image"] == null)
+				inherited["background-image"] = "none";
+		}
 		const tableResult = this.toHTML(elem, ns.html, "table", children);
 		// Cross-format shared class (see shared-classes.ts).
 		addSharedClass(tableResult, "table");
