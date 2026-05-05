@@ -2292,7 +2292,47 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 		const isHeadingTag = /^H[1-6]$/.test(result.tagName);
 		addSharedClass(result, isHeadingTag ? "heading" : "paragraph");
 
+		// Upstream #187: an empty <p> collapses to 0 height in the browser
+		// even when it carries font-family / font-size, but Word gives it a
+		// full line of vertical space. Emit a trailing <br> so the paragraph
+		// gets one line of height from its own font metrics. Skip when the
+		// paragraph already contains visible content (text, a <br>, or any
+		// element that naturally takes space) to avoid adding a stray blank
+		// line at the end of populated paragraphs.
+		if (!this.paragraphHasVisibleContent(result)) {
+			result.appendChild(this.h({ tagName: "br" }));
+		}
+
 		return result;
+	}
+
+	// Returns true when the paragraph DOM subtree contains anything that
+	// will occupy a line box — a non-whitespace text node, a <br>, or an
+	// atomic inline element (img/svg/math). An empty <span> wrapping a
+	// rendered-but-empty run doesn't count: it's common for paragraphs that
+	// only carry formatting to still emit a run span, and those collapse to
+	// zero height. Used by renderParagraph to decide whether to append a
+	// <br> placeholder so the browser gives the empty paragraph a full line
+	// of vertical space (upstream #187).
+	private paragraphHasVisibleContent(p: HTMLElement): boolean {
+		const atomic = new Set(["BR", "IMG", "SVG", "MATH", "VIDEO", "CANVAS", "IFRAME", "OBJECT", "EMBED", "INPUT"]);
+		const walk = (node: Node): boolean => {
+			if (node.nodeType === 3) {
+				return (node.nodeValue ?? "").length > 0;
+			}
+			if (node.nodeType === 1) {
+				const el = node as Element;
+				if (atomic.has(el.tagName)) return true;
+				for (const child of Array.from(el.childNodes)) {
+					if (walk(child)) return true;
+				}
+			}
+			return false;
+		};
+		for (const child of Array.from(p.childNodes)) {
+			if (walk(child)) return true;
+		}
+		return false;
 	}
 
 	// Writes the four Word "keep with" / pagination controls into the
@@ -3212,7 +3252,13 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 	}
 
 	renderTab(elem: OpenXmlElement) {
-		var tabSpan = this.h({ tagName: "span", children: ["\u2003"] }) as HTMLElement;//"&nbsp;";
+		// Non-experimental path emits a multi-space span so tabbed text at
+		// least lands in roughly the right column. A single em-space (the
+		// earlier placeholder) was visibly too narrow for things like
+		// "Name:\t\tTeacher:" \u2014 see upstream #178. Full tab-stop math
+		// (right/centre/decimal alignment against a real position) stays
+		// behind options.experimental because it depends on live layout.
+		var tabSpan = this.h({ tagName: "span", children: ["\u2003\u2003\u2003\u2003"] }) as HTMLElement;
 
 		if (this.options.experimental) {
 			tabSpan.className = this.tabStopClass();
