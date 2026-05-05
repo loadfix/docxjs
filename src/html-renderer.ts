@@ -2902,7 +2902,21 @@ section.${c}>ol>li::before {
 	}
 
 	renderBreak(elem: WmlBreak) {
-		return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
+		if (elem.break == "textWrapping") {
+			return this.h({ tagName: "br" });
+		}
+		if (elem.break == "page") {
+			// When `breakPages` is on, the renderer has already split the
+			// document into section blocks so no visible break is needed in
+			// flow. Still emit an invisible marker element so downstream
+			// consumers (conformance selectors, CSS hooks for print CSS,
+			// etc.) can find the break point in the DOM.
+			const br = this.h({ tagName: "br" }) as HTMLBRElement;
+			br.setAttribute("class", "docx-page-break");
+			br.setAttribute("data-page-break", "");
+			return br;
+		}
+		return null;
 	}
 
 	renderInserted(elem: OpenXmlElement): Node | Node[] {

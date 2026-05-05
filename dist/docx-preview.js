@@ -5643,7 +5643,9 @@
                 return "none";
             var color = xmlUtil.colorAttr(c, "color");
             var size = globalXmlParser.lengthAttr(c, "sz", LengthUsage.Border);
-            return `${size} ${type} ${color == "auto" ? autos.borderColor : color}`;
+            if (color == null || color == "auto")
+                color = autos.borderColor;
+            return `${size} ${type} ${color}`;
         }
         static themeRefOfBorder(c) {
             if (values.parseBorderType(globalXmlParser.attr(c, "val")) == "none")
@@ -8325,7 +8327,12 @@
                     }
                 }
             }
-            return this.h({ tagName: "section", className, style });
+            const section = this.h({ tagName: "section", className, style });
+            const orient = props?.pageSize?.orientation;
+            if (typeof orient === "string" && /^(landscape|portrait)$/.test(orient)) {
+                section.setAttribute("data-orientation", orient);
+            }
+            return section;
         }
         borderToCss(border) {
             if (!border || !border.type || border.type === "none" || border.type === "nil") {
@@ -8957,6 +8964,7 @@ section.${c}>ol>li::before {
                     const id = notes[i]?.id;
                     if (node && typeof node.setAttribute === 'function' && id) {
                         node.setAttribute('data-footnote-id', id);
+                        node.setAttribute('data-footnote', '');
                     }
                 }
                 return this.h({ tagName: "ol", children: renderedChildren });
@@ -9532,6 +9540,7 @@ section.${c}>ol>li::before {
             if (this.useSidebar) {
                 const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` });
                 anchor.dataset.commentId = commentStart.id;
+                anchor.dataset.comment = '';
                 if (!this.commentAnchorElements[commentStart.id]) {
                     this.commentAnchorElements[commentStart.id] = [];
                 }
@@ -9567,6 +9576,7 @@ section.${c}>ol>li::before {
             if (this.useSidebar) {
                 const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-end` });
                 anchor.dataset.commentId = commentEnd.id;
+                anchor.dataset.comment = '';
                 if (this.useHighlight) {
                     const rng = this.commentMap[commentEnd.id];
                     this.later(() => rng?.setEnd(anchor, 0));
@@ -9764,7 +9774,16 @@ section.${c}>ol>li::before {
                 : null;
         }
         renderBreak(elem) {
-            return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
+            if (elem.break == "textWrapping") {
+                return this.h({ tagName: "br" });
+            }
+            if (elem.break == "page") {
+                const br = this.h({ tagName: "br" });
+                br.setAttribute("class", "docx-page-break");
+                br.setAttribute("data-page-break", "");
+                return br;
+            }
+            return null;
         }
         renderInserted(elem) {
             if (this.showChanges && this.options.changes?.showInsertions !== false) {
@@ -9895,6 +9914,7 @@ section.${c}>ol>li::before {
             });
             if (elem.id)
                 sup.dataset.footnoteId = elem.id;
+            sup.dataset.footnote = '';
             return sup;
         }
         renderEndnoteReference(elem) {
@@ -9985,13 +10005,31 @@ section.${c}>ol>li::before {
                 const rendered = this.renderElement(child);
                 if (rendered == null)
                     continue;
-                const bucket = (child.type === DomType.Row && child.isHeader) ? headerRendered : bodyRendered;
-                if (Array.isArray(rendered))
-                    bucket.push(...rendered);
-                else
-                    bucket.push(rendered);
+                const isHeaderRow = child.type === DomType.Row
+                    && child.isHeader !== undefined
+                    && child.isHeader !== false;
+                if (isHeaderRow) {
+                    if (Array.isArray(rendered)) {
+                        for (const node of rendered)
+                            if (node instanceof HTMLElement)
+                                headerRendered.push(node);
+                    }
+                    else if (rendered instanceof HTMLElement) {
+                        headerRendered.push(rendered);
+                    }
+                }
+                else {
+                    if (Array.isArray(rendered))
+                        bodyRendered.push(...rendered);
+                    else
+                        bodyRendered.push(rendered);
+                }
             }
             if (headerRendered.length > 0) {
+                for (const tr of headerRendered) {
+                    if (tr.tagName === "TR")
+                        tr.setAttribute("data-header", "true");
+                }
                 children.push(this.h({ tagName: "thead", children: headerRendered }));
             }
             if (bodyRendered.length > 0) {
@@ -10026,7 +10064,7 @@ section.${c}>ol>li::before {
                 cellChildren.push(child);
             }
             const prevHeader = this.currentRowIsHeader;
-            this.currentRowIsHeader = elem.isHeader === true;
+            this.currentRowIsHeader = elem.isHeader !== undefined && elem.isHeader !== false;
             const renderedCells = this.renderElements(cellChildren);
             this.currentRowIsHeader = prevHeader;
             children.push(...renderedCells);

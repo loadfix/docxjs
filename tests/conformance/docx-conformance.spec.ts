@@ -259,8 +259,18 @@ test.describe('docx conformance', () => {
                         type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                     });
                     try {
+                        // Conformance manifests assume the renderer emits
+                        // every feature's DOM hook. Defaults for comments,
+                        // footnotes, endnotes, changes are off for
+                        // back-compat; flip them on here so the manifests
+                        // can actually check their selectors.
                         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        await (window as any).docx.renderAsync(blob, container);
+                        await (window as any).docx.renderAsync(blob, container, null, {
+                            renderComments: true,
+                            renderFootnotes: true,
+                            renderEndnotes: true,
+                            experimentalPageBreaks: true,
+                        });
                         const wrappers = document.querySelectorAll('.docx-wrapper');
                         return { ok: true, wrapperCount: wrappers.length };
                     } catch (e) {
