@@ -5,7 +5,7 @@ import {
 	WmlSmartTag,
 	WmlTableRow,
 	WmlSdt,
-	WmlRuby, WmlFitText, WmlBidiOverride
+	WmlRuby, WmlFitText, WmlBidiOverride, WmlOleObject
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
@@ -319,6 +319,11 @@ export class HtmlRenderer {
 	document: WordDocument;
 	options: Options;
 	styleMap: Record<string, IDomStyle> = {};
+	// Font-table altName lookup: primary font-name → w:altName fallback.
+	// Populated from `document.fontTablePart` at the top of render() and
+	// consumed by applyFontAltNames() to append a second-chair family to
+	// any `font-family` declaration whose leading name has an altName.
+	fontAltNames: Map<string, string> = new Map();
 	currentPart: Part = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
@@ -463,6 +468,20 @@ export class HtmlRenderer {
 			this.commentHighlight = new Highlight();
 		}
 
+		// Build the font-altName lookup before any style emission so
+		// applyFontAltNames() can rewrite font-family chains as they're
+		// serialised. See src/font-table/fonts.ts — the `altName` is the
+		// font-table author's suggested substitution for consumers that
+		// don't have the primary installed.
+		this.fontAltNames = new Map();
+		if (document.fontTablePart?.fonts) {
+			for (const f of document.fontTablePart.fonts) {
+				if (f.name && f.altName) {
+					this.fontAltNames.set(f.name, f.altName);
+				}
+			}
+		}
+
 		const result: Node[] = [...this.renderDefaultStyle()];
 
 		if (document.themePart) {
@@ -471,6 +490,7 @@ export class HtmlRenderer {
 
 		if (document.stylesPart != null) {
 			this.styleMap = this.processStyles(document.stylesPart.styles);
+			this.applyFontAltNamesToStyles(document.stylesPart.styles);
 			result.push(...this.renderStyles(document.stylesPart.styles));
 		}
 
@@ -634,6 +654,45 @@ export class HtmlRenderer {
 		}
 
 		return stylesMap;
+	}
+
+	// Walks every subStyle.values map in the styles tree and appends the
+	// font-table altName as a second font-family fallback. We do this in
+	// the renderer (rather than in the parser's parseFont) because the
+	// DocumentParser has no direct handle on the font-table part — the
+	// latter may load concurrently with document.xml. By the time render()
+	// starts, both parts are guaranteed loaded.
+	applyFontAltNamesToStyles(styles: IDomStyle[]) {
+		if (this.fontAltNames.size === 0) return;
+		for (const s of styles) {
+			for (const sub of (s.styles ?? [])) {
+				if (sub.values) this.applyFontAltNames(sub.values);
+			}
+		}
+	}
+
+	// Rewrites the `font-family` entry of a style values map so the
+	// primary typeface is followed by its w:altName fallback from the
+	// font-table. Both names come via encloseFontFamily (safe) or will be
+	// re-sanitised here via sanitizeFontFamily (a second pass is cheap).
+	// The altName itself is attacker-controlled DOCX data, so it goes
+	// through sanitizeFontFamily before being spliced into the chain.
+	applyFontAltNames(values: Record<string, string>) {
+		if (!values) return;
+		const existing = values["font-family"];
+		if (!existing) return;
+		// Peel the first name off the chain. encloseFontFamily may have
+		// wrapped it in single quotes; strip quotes before the altName
+		// lookup so "Cambria Math" matches whether or not it was quoted.
+		const first = existing.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+		const alt = this.fontAltNames.get(first);
+		if (!alt) return;
+		const encodedAlt = sanitizeFontFamily(alt);
+		// Skip if the chain already contains the altName (idempotent —
+		// lets applyFontAltNames be called more than once without
+		// duplicating entries).
+		if (existing.includes(encodedAlt)) return;
+		values["font-family"] = `${existing}, ${encodedAlt}`;
 	}
 
 	prodessNumberings(numberings: IDomNumbering[]) {
@@ -1083,7 +1142,8 @@ export class HtmlRenderer {
 	}
 
 	renderWrapper(children: HTMLElement[]) {
-		const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children }) as HTMLElement;
+		const wrapperChildren = [...this.renderProtectionBadge(), ...children];
+		const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children: wrapperChildren }) as HTMLElement;
 		// Cross-format shared class (see shared-classes.ts).
 		addSharedClass(wrapper, "wrapper");
 		// Accessibility: mark the docx-wrapper as a document landmark so
@@ -1091,6 +1151,32 @@ export class HtmlRenderer {
 		// region, matching Word's document-body semantic.
 		wrapper.setAttribute("role", "document");
 		return wrapper;
+	}
+
+	// Emits a small "Protected document" banner when the DOCX carries a
+	// w:documentProtection setting *and* the caller opted in via
+	// `showProtectionBadge`. We're always a read-only viewer, so this is
+	// purely informational — we never attempt to enforce edit protection.
+	// Enum values are allowlisted in parseDocumentProtection; the label
+	// string is hard-coded and never interpolates DOCX data.
+	renderProtectionBadge(): HTMLElement[] {
+		if (!this.options.showProtectionBadge) return [];
+		const protection = this.document?.settingsPart?.settings?.documentProtection;
+		if (!protection) return [];
+
+		const labels: Record<string, string> = {
+			readOnly: 'Protected document (read-only)',
+			trackedChanges: 'Protected document (tracked changes required)',
+			comments: 'Protected document (comments only)',
+			forms: 'Protected document (form fields only)',
+			none: 'Protected document',
+		};
+		const label = labels[protection.edit ?? 'none'] ?? 'Protected document';
+		const badge = this.h({ tagName: "div", className: `${this.className}-protected-badge`, children: [label] }) as HTMLElement;
+		badge.setAttribute("role", "status");
+		if (protection.edit) badge.dataset.protectionEdit = protection.edit;
+		if (protection.enforcement) badge.dataset.protectionEnforced = "1";
+		return [badge];
 	}
 
 	renderWrapperWithSidebar(sectionElements: HTMLElement[]) {
@@ -1116,7 +1202,7 @@ export class HtmlRenderer {
 		const wrapper = this.h({
 			tagName: "div",
 			className: `${c}-wrapper`,
-			children: [docContainer, this.sidebarContainer]
+			children: [...this.renderProtectionBadge(), docContainer, this.sidebarContainer]
 		}) as HTMLElement;
 		// Same a11y landmark as the non-sidebar wrapper above.
 		wrapper.setAttribute("role", "document");
@@ -1359,6 +1445,39 @@ section.${c}>ol>li::before {
     line-height: 0;
     vertical-align: super;
     top: 0.35em;
+}
+/* OLE placeholder — legacy w:object embeds (Equation.3, Excel.Sheet.12,
+ * Package, ...) surface as a labelled inline span. Hard-coded label set
+ * lives in renderOleObject; the attribute selector here is safe because
+ * data-progid is only populated from that allowlist. */
+.${c}-ole-placeholder {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 1px;
+    border: 1px dashed #9aa0a6;
+    background: #f4f5f7;
+    color: #5f6368;
+    font-size: 0.85em;
+    font-style: italic;
+    border-radius: 2px;
+    white-space: nowrap;
+    vertical-align: baseline;
+}
+/* Protection badge — rendered only when the caller opts in via
+ * Options.showProtectionBadge and the DOCX carries w:documentProtection.
+ * The label is hard-coded (see renderProtectionBadge) so the CSS here is
+ * purely cosmetic and safe to emit unconditionally. */
+.${c}-protected-badge {
+    align-self: stretch;
+    margin: 0 0 12px 0;
+    padding: 6px 12px;
+    background: #fff6d6;
+    color: #5a4400;
+    border: 1px solid #e4c66f;
+    border-radius: 3px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 12px;
+    text-align: center;
 }
 `;
 
@@ -1864,6 +1983,9 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 
 			case DomType.VmlElement:
 				return this.renderVmlElement(elem as VmlElement);
+
+			case DomType.OleObject:
+				return this.renderOleObject(elem as WmlOleObject);
 	
 			case DomType.MmlMath:
 				return this.renderContainerNS(elem, ns.mathML, "math", { xmlns: ns.mathML });
@@ -3335,7 +3457,14 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 
 		let children = this.renderElements(elem.children);
 
-		if (elem.verticalAlign) {
+		// Only wrap for actual superscript / subscript runs. Word also uses
+		// w:vertAlign="baseline" as an explicit *reset* (e.g. a nested run
+		// overriding an ancestor style that set superscript); those must
+		// stay un-wrapped. parseFont's valueOfVertAlign already maps
+		// baseline → null when asTagName=true, but we gate explicitly here
+		// in case a future code-path sets verticalAlign to a value other
+		// than "sub" / "sup".
+		if (elem.verticalAlign === "sub" || elem.verticalAlign === "sup") {
 			// Reuse the already-rendered children — rendering them a second
 			// time is wasteful and, for stateful render methods, actively
 			// wrong. Example: renderFootnoteReference increments a
@@ -3894,6 +4023,52 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 
 	renderVmlPicture(elem: OpenXmlElement) {
 		return this.renderContainer(elem, "div");
+	}
+
+	// Common OLE ProgID → human label map. Any ProgID not in this table
+	// renders with the generic "Embedded object" label and an empty
+	// data-progid. This is deliberate: the ProgID is attacker-controlled,
+	// so we refuse to surface arbitrary values even via setAttribute (they
+	// can reach CSS attribute selectors and make authoring fragile).
+	private static readonly OLE_PROGID_LABELS: Record<string, string> = {
+		'Equation.3': 'Equation',
+		'Equation.2': 'Equation',
+		'Excel.Sheet.12': 'Excel spreadsheet',
+		'Excel.Sheet.8': 'Excel spreadsheet',
+		'Excel.SheetBinaryMacroEnabled.12': 'Excel spreadsheet',
+		'Excel.SheetMacroEnabled.12': 'Excel spreadsheet',
+		'Excel.Chart.8': 'Excel chart',
+		'PowerPoint.Show.12': 'PowerPoint slide',
+		'PowerPoint.Show.8': 'PowerPoint slide',
+		'Word.Document.12': 'Word document',
+		'Word.Document.8': 'Word document',
+		'Package': 'Embedded file',
+		'AcroExch.Document': 'PDF document',
+		'AcroExch.Document.DC': 'PDF document',
+		'Visio.Drawing.15': 'Visio drawing',
+		'Visio.Drawing.11': 'Visio drawing',
+	};
+
+	renderOleObject(elem: WmlOleObject): HTMLElement {
+		const progId = elem.progId;
+		const allowed = progId && Object.prototype.hasOwnProperty.call(HtmlRenderer.OLE_PROGID_LABELS, progId);
+		const label = allowed ? HtmlRenderer.OLE_PROGID_LABELS[progId] : 'Embedded object';
+
+		const span = this.h({
+			tagName: "span",
+			className: `${this.className}-ole-placeholder`,
+			children: [label],
+		}) as HTMLElement;
+
+		// data-progid exposes only allowlisted ProgIDs. Unknown values emit
+		// an empty string — safer than echoing an attacker-controlled token
+		// into the DOM even via setAttribute (attribute selectors in user
+		// CSS could otherwise be trivially spoofed). See CLAUDE.md Security.
+		span.dataset.progid = allowed ? progId : '';
+		span.setAttribute("title", `Embedded object: ${label}`);
+		span.setAttribute("role", "img");
+		span.setAttribute("aria-label", label);
+		return span;
 	}
 
 	renderVmlElement(elem: VmlElement): SVGElement {

@@ -8,6 +8,18 @@ export interface WmlSettings {
 	endnoteProps: NoteProperties;
 	autoHyphenation: boolean;
 	evenAndOddHeaders: boolean;
+	// Presence of w:documentProtection means the author set a protection
+	// policy. All string attrs are DOCX-derived and therefore attacker
+	// controlled — the renderer must never interpolate them into CSS or
+	// innerHTML. We allowlist `edit` against a fixed set.
+	documentProtection?: DocumentProtection;
+}
+
+export interface DocumentProtection {
+	// ST_DocProtect: readOnly | trackedChanges | comments | forms | none.
+	edit?: 'readOnly' | 'trackedChanges' | 'comments' | 'forms' | 'none';
+	enforcement: boolean;
+	formatting: boolean;
 }
 
 export interface NoteProperties {
@@ -27,10 +39,25 @@ export function parseSettings(elem: Element, xml: XmlParser) {
 			// `w:evenAndOddHeaders` is a toggle element — presence means "on"
 			// unless `w:val="false"` is explicit. Default when absent: false.
 			case "evenAndOddHeaders": result.evenAndOddHeaders = xml.boolAttr(el, "val", true); break;
+			case "documentProtection": result.documentProtection = parseDocumentProtection(el, xml); break;
 		}
 	}
 
     return result;
+}
+
+// w:documentProtection carries edit/enforcement metadata for a protected
+// document. All values reach the DOM only as sanitised attribute strings
+// or allowlisted enum checks — never innerHTML, never className.
+const ALLOWED_EDIT = new Set(['readOnly', 'trackedChanges', 'comments', 'forms', 'none']);
+
+export function parseDocumentProtection(elem: Element, xml: XmlParser): DocumentProtection {
+	const editAttr = xml.attr(elem, "edit");
+	return {
+		edit: ALLOWED_EDIT.has(editAttr) ? editAttr as DocumentProtection["edit"] : undefined,
+		enforcement: xml.boolAttr(elem, "enforcement", false),
+		formatting: xml.boolAttr(elem, "formatting", false),
+	};
 }
 
 export function parseNoteProperties(elem: Element, xml: XmlParser) {
