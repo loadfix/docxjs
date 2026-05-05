@@ -27,7 +27,7 @@ import { BaseHeaderFooterPart } from './header-footer/parts';
 import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentRangeEnd, WmlCommentReference } from './comments/elements';
-import { WmlFieldChar, WmlFieldSimple, WmlInstructionText } from './document/fields';
+import { WmlFieldChar, WmlFieldSimple, WmlInstructionText, FormFieldData } from './document/fields';
 import { parseFieldInstruction, ParsedFieldInstruction } from './fields/instruction';
 import { cx, h, ns } from './html';
 import { DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt } from './document/drawing';
@@ -69,6 +69,101 @@ export function isSafeHyperlinkHref(raw: string | null | undefined): boolean {
 		// Non-URL strings that aren't fragments are almost always relative
 		// paths like `foo/bar.html`. Treat as safe — no scheme, no sink.
 		return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+	}
+}
+
+// XPath expressions used by <w:dataBinding> in content controls are
+// DOCX-attacker-controlled. Evaluating them with document.evaluate is safe
+// when scoped to a CustomXmlPart's XML document (no scripts can run in a
+// plain XML DOM parsed from a zipped part). This allowlist is a
+// belt-and-braces defence: reject anything that mentions the rendered HTML
+// `document` or `window` identifiers, shell-out-style extension function
+// prefixes, or processing-instruction/comment lookups we don't need.
+// Accepted expressions look like `/ns:root/ns:person/ns:name`,
+// `/ns0:x[1]`, `//@attr`, etc. — the subset Word actually produces for
+// custom-XML bindings.
+//
+// Exported for unit testing.
+export function isSafeCustomXmlXPath(xp: string): boolean {
+	if (typeof xp !== 'string') return false;
+	if (xp.length === 0 || xp.length > 2000) return false;
+	// Reject identifiers that have no business appearing in a document-
+	// internal XPath. `document(…)`, `window`, `eval`, Function.call,
+	// extension-function namespaces — none of these are used by Word.
+	if (/\b(document|window|eval|Function|require|import)\b/i.test(xp)) return false;
+	// Reject semicolons and braces — they aren't valid in XPath 1.0 and
+	// their presence hints at embedded expressions in a different language.
+	if (/[;{}]/.test(xp)) return false;
+	// Accept characters that legitimately appear in XPath 1.0: letters,
+	// digits, `_`, `-`, `.`, `:`, `/`, `[`, `]`, `(`, `)`, `=`, `*`, `|`,
+	// `,`, `!`, `<`, `>`, `@`, whitespace, and the quote characters used
+	// around string literals.
+	return /^[\w\s\-./:[\]()=*|,!<>@"'$+]+$/.test(xp);
+}
+
+// Evaluate `xpath` against `xmlDoc` using `hostDoc.evaluate` if available,
+// falling back to a manual walk for the simplest `/ns0:a/ns0:b` path
+// expressions so the glossary/data-bound pipeline still works in jsdom
+// when the host document has no XPath support. Returns the first matching
+// node's text, empty string if the XPath evaluated but matched nothing,
+// or null on any error.
+//
+// Exported for unit testing.
+export function safeEvaluateXPath(hostDoc: any, xmlDoc: any, xpath: string): string | null {
+	try {
+		if (hostDoc?.evaluate) {
+			// Build a namespace resolver that maps every prefix to the
+			// document-element's namespaceURI. This covers the single-
+			// namespace case (the vast majority of custom XML parts).
+			const rootNs = xmlDoc?.documentElement?.namespaceURI ?? null;
+			const resolver = rootNs ? (_: string) => rootNs : null;
+			const FIRST_ORDERED_NODE_TYPE = 9;
+			const res = hostDoc.evaluate(
+				xpath,
+				xmlDoc,
+				resolver,
+				FIRST_ORDERED_NODE_TYPE,
+				null
+			);
+			const node = res?.singleNodeValue;
+			if (node == null) return '';
+			return node.textContent ?? '';
+		}
+	} catch {
+		// Fall through to the manual walker.
+	}
+	// Minimal fallback: `/root/child/child[…]` with optional `nsX:` prefixes
+	// on each step. Predicates are ignored (return the first match at each
+	// step). Good enough for Word's typical bindings; anything richer
+	// needs a real XPath engine and returns null here.
+	try {
+		const steps = xpath.split('/').filter(s => s.length > 0);
+		let current: any = xmlDoc?.documentElement;
+		if (!current) return null;
+		// If the first step matches the root element's localName, advance
+		// past it; otherwise we were given a relative path starting with
+		// the root's first child.
+		const first = steps[0]?.replace(/\[.*\]$/, '').split(':').pop();
+		if (first && first === current.localName) {
+			steps.shift();
+		}
+		for (const step of steps) {
+			const localName = step.replace(/\[.*\]$/, '').split(':').pop();
+			if (!localName) return null;
+			let next: any = null;
+			for (let i = 0; i < current.childNodes.length; i++) {
+				const c = current.childNodes[i];
+				if (c.nodeType === 1 && c.localName === localName) {
+					next = c;
+					break;
+				}
+			}
+			if (!next) return '';
+			current = next;
+		}
+		return current.textContent ?? '';
+	} catch {
+		return null;
 	}
 }
 
@@ -1046,7 +1141,28 @@ export class HtmlRenderer {
 		// assistive tech announces the body as a single coherent reading
 		// region, matching Word's document-body semantic.
 		wrapper.setAttribute("role", "document");
+		// Optional doc-props metadata (opt-in via Options.emitDocumentProps).
+		this.applyDocumentPropsDataset(wrapper);
 		return wrapper;
+	}
+
+	// Emit the parsed docProps/core.xml metadata as `data-doc-*` attributes
+	// when the caller opts in. Every value reaches the DOM via dataset,
+	// which is browser-encoded — safe for DOCX-attacker-controlled strings.
+	// Empty/missing fields are omitted rather than written as empty strings
+	// so consumers can use presence checks (`'docTitle' in wrapper.dataset`).
+	private applyDocumentPropsDataset(wrapper: HTMLElement): void {
+		if (!this.options.emitDocumentProps) return;
+		const core = this.document?.corePropsPart?.props;
+		if (!core) return;
+		if (core.title) wrapper.dataset.docTitle = core.title;
+		if (core.subject) wrapper.dataset.docSubject = core.subject;
+		if (core.creator) wrapper.dataset.docAuthor = core.creator;
+		if (core.lastModifiedBy) wrapper.dataset.docLastModifiedBy = core.lastModifiedBy;
+		if (core.description) wrapper.dataset.docDescription = core.description;
+		if (core.keywords) wrapper.dataset.docKeywords = core.keywords;
+		if (core.created) wrapper.dataset.docCreated = core.created;
+		if (core.modified) wrapper.dataset.docModified = core.modified;
 	}
 
 	renderWrapperWithSidebar(sectionElements: HTMLElement[]) {
@@ -1079,6 +1195,9 @@ export class HtmlRenderer {
 
 		// Cross-format shared class (see shared-classes.ts).
 		addSharedClass(wrapper, "wrapper");
+
+		// Opt-in doc-props metadata, same surface as the non-sidebar path.
+		this.applyDocumentPropsDataset(wrapper);
 
 		this.later(() => {
 			this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
@@ -2136,7 +2255,24 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 			j++;
 		}
 
-		const wrapped = this.wrapFieldResult(rendered, parsed);
+		// Legacy form fields (FORMTEXT / FORMCHECKBOX / FORMDROPDOWN)
+		// carry a <w:ffData> child on the begin run. Pull it off the begin
+		// run so wrapFieldResult can render the form control without
+		// needing another walk of elems.
+		const beginRun = elems[group.beginIdx];
+		let ffData: FormFieldData | undefined;
+		if (beginRun && beginRun.type === DomType.Run && beginRun.children) {
+			for (const c of beginRun.children) {
+				if (c.type === DomType.ComplexField) {
+					const fc = c as WmlFieldChar;
+					if (fc.charType === 'begin' && fc.ffData) {
+						ffData = fc.ffData;
+						break;
+					}
+				}
+			}
+		}
+		const wrapped = this.wrapFieldResult(rendered, parsed, ffData);
 		if (unterminated) {
 			// Marker comment for debugging. Hard-coded string — no DOCX
 			// interpolation into the comment body.
@@ -2148,6 +2284,9 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 	renderSimpleField(elem: WmlFieldSimple): Node | Node[] {
 		const parsed = parseFieldInstruction(elem.instruction);
 		const children = this.renderElements(elem.children) ?? [];
+		// <w:fldSimple> carries the instruction on an attribute, not a
+		// fldChar — so there's no ffData to pass through here. Legacy form
+		// fields always ship as complex fields in the wild.
 		return this.wrapFieldResult(children, parsed);
 	}
 
@@ -2160,13 +2299,14 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 	// USERINITIALS render the cached result verbatim (Word already resolved
 	// the value; the structure is inside the cached nodes). All other codes
 	// also render as-is.
-	private wrapFieldResult(children: Node[], parsed: ParsedFieldInstruction): Node[] {
-		if (!children || children.length === 0) return children ?? [];
+	private wrapFieldResult(children: Node[], parsed: ParsedFieldInstruction, ffData?: FormFieldData): Node[] {
 		const code = parsed.code;
 		if (code === 'HYPERLINK') {
+			if (!children || children.length === 0) return children ?? [];
 			return this.wrapHyperlinkFieldResult(children, parsed);
 		}
 		if (code === 'REF' || code === 'PAGEREF') {
+			if (!children || children.length === 0) return children ?? [];
 			const anchor = parsed.args[0] ?? '';
 			if (!anchor) return children;
 			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
@@ -2181,6 +2321,21 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 			children.forEach(c => a.appendChild(c));
 			return [a];
 		}
+		// Legacy (pre-SDT) form fields. The field code is the first token
+		// of the instruction (Word case-insensitive). ffData carries the
+		// typed control description; when it's missing (producer omitted
+		// the <w:ffData> child) we fall back to rendering the cached
+		// result verbatim so no information is lost.
+		if (code === 'FORMTEXT') {
+			return this.renderLegacyFormTextField(children, ffData);
+		}
+		if (code === 'FORMCHECKBOX') {
+			return this.renderLegacyFormCheckboxField(ffData);
+		}
+		if (code === 'FORMDROPDOWN') {
+			return this.renderLegacyFormDropdownField(children, ffData);
+		}
+		if (!children || children.length === 0) return children ?? [];
 		// STYLEREF, SYMBOL, TOC, QUOTE, USERNAME, USERINITIALS plus PAGE,
 		// NUMPAGES, DATE, TIME, AUTHOR, FILENAME, SEQ, LISTNUM, MERGEFIELD,
 		// IF, ASK, FILLIN, INCLUDETEXT and any code we don't recognise —
@@ -2188,6 +2343,81 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 		// has already computed and serialised into the result runs; the
 		// renderer simply preserves the computed text / structure.
 		return children;
+	}
+
+	// FORMTEXT — disabled <input type="text"> populated from the cached
+	// result runs (the typed-in value Word last saved). maxLength comes
+	// from the parsed <w:textInput><w:maxLength w:val="…"/> when present.
+	// All values reach the DOM via setAttribute — safe for DOCX strings.
+	private renderLegacyFormTextField(children: Node[], ffData?: FormFieldData): Node[] {
+		const value = children
+			.map(n => (n instanceof Node ? (n.textContent ?? '') : String(n)))
+			.join('');
+		const input = this.h({ tagName: "input" }) as HTMLInputElement;
+		input.setAttribute("type", "text");
+		input.setAttribute("disabled", "");
+		input.setAttribute("value", value);
+		if (ffData?.maxLength != null && Number.isFinite(ffData.maxLength) && ffData.maxLength > 0) {
+			// Clamp to a sane upper bound — already validated in the
+			// parser, but defence-in-depth here in case ffData comes from
+			// another path.
+			input.setAttribute("maxlength", String(Math.min(10000, ffData.maxLength)));
+		}
+		input.dataset.field = 'FORMTEXT';
+		input.classList.add(`${this.className}-field-formtext`);
+		return [input];
+	}
+
+	// FORMCHECKBOX — disabled <input type="checkbox">. The current checked
+	// state comes from <w:ffData><w:checkBox><w:checked/> (or w:default).
+	// The cached result runs are a glyph and carry no useful information.
+	private renderLegacyFormCheckboxField(ffData?: FormFieldData): Node[] {
+		const box = this.h({ tagName: "input" }) as HTMLInputElement;
+		box.setAttribute("type", "checkbox");
+		box.setAttribute("disabled", "");
+		if (ffData?.checked) box.setAttribute("checked", "");
+		box.dataset.field = 'FORMCHECKBOX';
+		box.classList.add(`${this.className}-field-formcheckbox`);
+		return [box];
+	}
+
+	// FORMDROPDOWN — disabled <select> populated from ffData.ddItems.
+	// The currently-selected entry is either ffData.ddDefault's index or
+	// whatever text the cached result runs render to. DOCX-derived
+	// strings reach the DOM via setAttribute + textContent only.
+	private renderLegacyFormDropdownField(children: Node[], ffData?: FormFieldData): Node[] {
+		const select = this.h({ tagName: "select" }) as HTMLSelectElement;
+		select.setAttribute("disabled", "");
+		select.dataset.field = 'FORMDROPDOWN';
+		select.classList.add(`${this.className}-field-formdropdown`);
+		const items = ffData?.ddItems ?? [];
+		const selectedText = children
+			.map(n => (n instanceof Node ? (n.textContent ?? '') : String(n)))
+			.join('')
+			.trim();
+		items.forEach((item, idx) => {
+			const option = this.h({ tagName: "option" }) as HTMLOptionElement;
+			option.setAttribute("value", item);
+			option.textContent = item;
+			if (
+				(ffData?.ddDefault != null && ffData.ddDefault === idx) ||
+				(ffData?.ddDefault == null && item === selectedText)
+			) {
+				option.setAttribute("selected", "");
+			}
+			select.appendChild(option);
+		});
+		// If there are no items defined, fall back to a single disabled
+		// option reflecting the cached-result value so the control still
+		// has a visible label.
+		if (items.length === 0 && selectedText) {
+			const option = this.h({ tagName: "option" }) as HTMLOptionElement;
+			option.setAttribute("value", selectedText);
+			option.textContent = selectedText;
+			option.setAttribute("selected", "");
+			select.appendChild(option);
+		}
+		return [select];
 	}
 
 	// HYPERLINK field — external URL, internal anchor (\l), optional tooltip
@@ -2532,12 +2762,27 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 	renderSdt(elem: WmlSdt) {
 		const control = elem.sdtControl;
 
+		// Data-bound SDT: when <w:sdtPr><w:dataBinding w:xpath=… w:storeItemID=…/>
+		// points at a custom XML part we loaded, evaluate the XPath against
+		// that part's document and use the result text in place of the
+		// sdtContent placeholder. Any failure — no matching part, unsafe
+		// XPath, evaluation error, empty result — falls back to the cached
+		// sdtContent rendering so no information is lost.
+		const boundText = this.resolveSdtDataBinding(elem);
+
 		// Checkbox: emit a disabled <input type="checkbox"> in place of the
 		// sdtContent glyph run. The w:sdtContent for a checkbox just holds
 		// the ☑ / ☐ character — replacing it with a real checkbox is a
 		// more useful read-only rendering.
 		let children: Node[];
-		if (control?.type === "checkbox") {
+		if (boundText != null) {
+			// Substitute the resolved value as plain text. textContent is
+			// the safe sink for DOCX-derived strings — no innerHTML.
+			const span = this.h({ tagName: "span" }) as HTMLElement;
+			span.textContent = boundText;
+			span.dataset.sdtBound = "1";
+			children = [span];
+		} else if (control?.type === "checkbox") {
 			const box = this.h({ tagName: "input" }) as HTMLInputElement;
 			box.setAttribute("type", "checkbox");
 			box.setAttribute("disabled", "");
@@ -2604,7 +2849,53 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
 		}
 		return span;
 	}
-	
+
+	// Resolve an <w:sdt> dataBinding against the document's custom XML
+	// parts. Returns the text value of the first matching node, or null
+	// when the binding can't be resolved (missing part, unsafe XPath,
+	// evaluation error, no match, not in a browser/jsdom environment).
+	//
+	// Security: the XPath expression is DOCX-attacker-controlled. We:
+	//   1. Only evaluate against the CustomXmlPart's XML document — never
+	//      the rendered HTML document.
+	//   2. Allowlist the XPath string to reject anything that looks like
+	//      it's trying to reach outside the document tree (e.g. the
+	//      `document`/`window` identifiers used by XSLT extension attacks).
+	//   3. Catch any thrown error silently and fall through.
+	private resolveSdtDataBinding(elem: WmlSdt): string | null {
+		const binding = elem.dataBinding;
+		if (!binding?.xpath) return null;
+		if (!this.document) return null;
+		if (!isSafeCustomXmlXPath(binding.xpath)) return null;
+		const storeItemID = binding.storeItemID;
+		// Try the matching part first; fall back to any part if no
+		// storeItemID is given. Word rarely emits a dataBinding without
+		// storeItemID, but some older producers do.
+		const parts: any[] = [];
+		if (storeItemID) {
+			const part = this.document.findCustomXmlByStoreItemId?.(storeItemID);
+			if (part) parts.push(part);
+		} else {
+			for (const p of this.document.customXmlParts ?? []) {
+				if (p.xmlDoc) parts.push(p);
+			}
+		}
+		if (parts.length === 0) return null;
+		const evalDoc = typeof document !== 'undefined' ? document : null;
+		// Prefix mappings aren't implemented in v1 — document.evaluate
+		// accepts a namespace resolver, but the prefixMappings syntax
+		// (space-separated xmlns:prefix="uri" pairs) needs a dedicated
+		// parser. For the common case of an unprefixed XPath against a
+		// default-namespaced part, try a resolver that returns the
+		// document element's namespace for every prefix.
+		for (const part of parts) {
+			if (!part.xmlDoc) continue;
+			const result = safeEvaluateXPath(evalDoc, part.xmlDoc, binding.xpath);
+			if (result != null && result !== '') return result;
+		}
+		return null;
+	}
+
 	renderCommentRangeStart(commentStart: WmlCommentRangeStart) {
 		if (!this.options.renderComments) {
 			// Even when full comment rendering is off, emit a minimal zero-

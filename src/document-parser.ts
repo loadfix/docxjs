@@ -660,9 +660,10 @@ export class DocumentParser {
 		// w:sdtPr holds the content-control metadata. w:alias is the visible
 		// label ("Publication Date", etc.); w:tag is the programmatic id.
 		// When either is present — or a typed form control (checkbox,
-		// dropdown, date, picture, gallery) is detected — we wrap the
-		// content so the renderer can emit an a11y group and/or form
-		// control. Otherwise we unwrap as before.
+		// dropdown, date, picture, gallery) is detected, or a data binding
+		// points at a custom XML part — we wrap the content so the renderer
+		// can emit an a11y group and/or form control. Otherwise we unwrap
+		// as before.
 		const sdtPr = xml.element(node, "sdtPr");
 		if (sdtPr) {
 			const aliasEl = xml.element(sdtPr, "alias");
@@ -670,16 +671,100 @@ export class DocumentParser {
 			const alias = aliasEl ? xml.attr(aliasEl, "val") : null;
 			const tag = tagEl ? xml.attr(tagEl, "val") : null;
 			const control = this.parseSdtControl(sdtPr);
-			if (alias || tag || control) {
+			// w:dataBinding — references a custom XML part by storeItemID
+			// with an XPath into its document. html-renderer.ts resolves
+			// the reference against document.customXmlParts and substitutes
+			// the result. Falls back to sdtContent when evaluation fails.
+			const dataBindingEl = xml.element(sdtPr, "dataBinding");
+			let dataBinding = null as null | { xpath: string; storeItemID?: string; prefixMappings?: string };
+			if (dataBindingEl) {
+				const xpath = xml.attr(dataBindingEl, "xpath");
+				if (xpath) {
+					dataBinding = { xpath };
+					const storeItemID = xml.attr(dataBindingEl, "storeItemID");
+					if (storeItemID) dataBinding.storeItemID = storeItemID;
+					const prefixMappings = xml.attr(dataBindingEl, "prefixMappings");
+					if (prefixMappings) dataBinding.prefixMappings = prefixMappings;
+				}
+			}
+			if (alias || tag || control || dataBinding) {
 				const wrapper: WmlSdt = { type: DomType.Sdt, children };
 				if (alias) wrapper.sdtAlias = alias;
 				if (tag) wrapper.sdtTag = tag;
 				if (control) wrapper.sdtControl = control;
+				if (dataBinding) wrapper.dataBinding = dataBinding;
 				return [wrapper];
 			}
 		}
 
 		return children;
+	}
+
+	// Parse <w:ffData> — legacy form-field descriptor on a <w:fldChar
+	// fldCharType="begin"/>. See ECMA-376 Part 1 §17.16.18.
+	// Only the three common control types (text / checkbox / dropdown) are
+	// extracted; other ffData children (w:name, w:enabled, w:helpText, …)
+	// are ignored. Returned strings are DOCX-attacker-controlled.
+	private parseFfData(ffData: Element): import('./document/fields').FormFieldData {
+		const result: import('./document/fields').FormFieldData = {};
+		const textInput = xml.element(ffData, "textInput");
+		if (textInput) {
+			result.formFieldType = 'text';
+			const defaultEl = xml.element(textInput, "default");
+			if (defaultEl) {
+				const v = xml.attr(defaultEl, "val");
+				if (v != null) result.defaultText = v;
+			}
+			const maxLengthEl = xml.element(textInput, "maxLength");
+			if (maxLengthEl) {
+				const v = xml.intAttr(maxLengthEl, "val");
+				if (v != null && Number.isFinite(v) && v > 0 && v <= 10000) {
+					result.maxLength = v;
+				}
+			}
+			return result;
+		}
+		const checkBox = xml.element(ffData, "checkBox");
+		if (checkBox) {
+			result.formFieldType = 'checkbox';
+			// <w:checked/> present = checked; otherwise fall back to
+			// <w:default w:val="1"/> for the checkbox initial state.
+			const checkedEl = xml.element(checkBox, "checked");
+			if (checkedEl) {
+				// Some producers write <w:checked w:val="1"/>, others
+				// write just <w:checked/> (which means true).
+				const v = xml.attr(checkedEl, "val");
+				result.checked = v == null ? true : (v === "1" || v === "true");
+			} else {
+				const defaultEl = xml.element(checkBox, "default");
+				if (defaultEl) {
+					const v = xml.attr(defaultEl, "val");
+					result.checked = v === "1" || v === "true";
+				} else {
+					result.checked = false;
+				}
+			}
+			return result;
+		}
+		const ddList = xml.element(ffData, "ddList");
+		if (ddList) {
+			result.formFieldType = 'dropdown';
+			const items: string[] = [];
+			for (const entry of xml.elements(ddList, "listEntry")) {
+				const v = xml.attr(entry, "val");
+				if (v != null) items.push(v);
+			}
+			result.ddItems = items;
+			const defaultEl = xml.element(ddList, "default");
+			if (defaultEl) {
+				const idx = xml.intAttr(defaultEl, "val");
+				if (idx != null && idx >= 0 && idx < items.length) {
+					result.ddDefault = idx;
+				}
+			}
+			return result;
+		}
+		return result;
 	}
 
 	// Inspect w:sdtPr for a typed content-control marker. Matches are by
@@ -1055,12 +1140,25 @@ export class DocumentParser {
 
 				case "fldChar":
 					result.fieldRun = true;
-					result.children.push(<WmlFieldChar>{
+					const charType = xml.attr(c, "fldCharType");
+					const fldChar: WmlFieldChar = {
 						type: DomType.ComplexField,
-						charType: xml.attr(c, "fldCharType"),
+						charType,
 						lock: xml.boolAttr(c, "lock", false),
 						dirty: xml.boolAttr(c, "dirty", false)
-					});
+					};
+					// Legacy form fields (FORMTEXT / FORMCHECKBOX / FORMDROPDOWN)
+					// carry a <w:ffData> child on the begin run that describes
+					// the form control. html-renderer.ts picks this up via the
+					// grouped complex field to render a disabled <input> /
+					// <select>. Only parsed on "begin" runs.
+					if (charType === "begin") {
+						const ffData = xml.element(c, "ffData");
+						if (ffData) {
+							fldChar.ffData = this.parseFfData(ffData);
+						}
+					}
+					result.children.push(fldChar);
 					break;
 
 				case "noBreakHyphen":
