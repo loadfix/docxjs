@@ -3249,6 +3249,16 @@ section.${c}>ol>li::before {
 		// document order inside <tbody> where they would otherwise land.
 		const headerRendered: HTMLElement[] = [];
 		const bodyRendered: Node[] = [];
+		// Fall back on tblLook/@w:firstRow when no explicit <w:tblHeader/> is
+		// present on any row: it tells us the table style treats row 0 as a
+		// header, which is enough to emit <thead> for accessibility.
+		const anyRowExplicitHeader = (elem.children ?? []).some(
+			(c) => c.type === DomType.Row
+				&& (c as WmlTableRow).isHeader !== undefined
+				&& (c as WmlTableRow).isHeader !== false
+		);
+		const promoteFirstRow = !!elem.firstRowIsHeader && !anyRowExplicitHeader;
+		let firstRowPromoted = false;
 		for (const child of (elem.children ?? [])) {
 			const rendered = this.renderElement(child as any);
 			if (rendered == null) continue;
@@ -3258,9 +3268,14 @@ section.${c}>ol>li::before {
 			// `null` (boolAttr with no default) and "missing element" as
 			// `undefined`, so treat anything that isn't explicit-false and
 			// isn't missing as a header row.
-			const isHeaderRow = child.type === DomType.Row
+			let isHeaderRow = child.type === DomType.Row
 				&& (child as WmlTableRow).isHeader !== undefined
 				&& (child as WmlTableRow).isHeader !== false;
+			if (!isHeaderRow && promoteFirstRow && !firstRowPromoted
+				&& child.type === DomType.Row) {
+				isHeaderRow = true;
+				firstRowPromoted = true;
+			}
 			if (isHeaderRow) {
 				if (Array.isArray(rendered)) {
 					for (const node of rendered) if (node instanceof HTMLElement) headerRendered.push(node);

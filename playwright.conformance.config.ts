@@ -20,7 +20,7 @@ export default defineConfig({
     retries: 0,
     reporter: 'list',
     use: {
-        baseURL: 'http://localhost:8765',
+        baseURL: `http://localhost:${process.env.PORT || 8765}`,
         trace: 'on-first-retry',
         screenshot: 'only-on-failure',
         // Matches the interop config; a stable viewport size keeps the
@@ -38,7 +38,7 @@ export default defineConfig({
     ],
     webServer: {
         command: 'node scripts/dev-server.mjs',
-        url: 'http://localhost:8765/tests/harness.html',
+        url: `http://localhost:${process.env.PORT || 8765}/tests/harness.html`,
         reuseExistingServer: !process.env.CI,
         timeout: 30_000,
     },
