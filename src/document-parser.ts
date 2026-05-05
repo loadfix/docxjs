@@ -1368,8 +1368,13 @@ export class DocumentParser {
 	}
 
 	parseDrawingWrapper(node: Element): OpenXmlElement {
-		var result = <OpenXmlElement>{ type: DomType.Drawing, children: [], cssStyle: {} };
+		var result = <OpenXmlElement>{ type: DomType.Drawing, children: [], cssStyle: {}, props: {} };
 		var isAnchor = node.localName == "anchor";
+		// Surface the anchor/inline distinction on the parsed element so
+		// renderDrawing can project it as a data-* hook. Responsive CSS
+		// targets floating anchors under @media (max-width: 768px); non-
+		// responsive consumers simply ignore the attribute.
+		(result.props ??= {}).isAnchor = isAnchor;
 
 		// DrawingML stores offsets in English Metric Units: 914400 EMU = 1 inch = 96 CSS pixels.
 		// For dist*/wrapPolygon we want CSS pixels, so divide by 9525.

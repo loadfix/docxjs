@@ -4091,8 +4091,9 @@
             }
         }
         parseDrawingWrapper(node) {
-            var result = { type: DomType.Drawing, children: [], cssStyle: {} };
+            var result = { type: DomType.Drawing, children: [], cssStyle: {}, props: {} };
             var isAnchor = node.localName == "anchor";
+            (result.props ?? (result.props = {})).isAnchor = isAnchor;
             const EMU_PER_PX = 9525;
             const WRAP_TEXT_ALLOWED = new Set(["bothSides", "left", "right", "largest"]);
             const RELATIVE_FROM_ALLOWED = new Set([
@@ -8311,7 +8312,7 @@
                     style.paddingBottom = props.pageMargins.bottom;
                 }
                 if (props.pageSize) {
-                    if (!this.options.ignoreWidth)
+                    if (!this.options.ignoreWidth && !this.options.responsive)
                         style.width = props.pageSize.width;
                     if (!this.options.ignoreHeight)
                         style.minHeight = props.pageSize.height;
@@ -8799,6 +8800,20 @@ section.${c}>ol>li::before {
             }
             if (this.showChanges) {
                 styleText += this.changesStyles();
+            }
+            if (this.options.responsive) {
+                styleText += `
+.${c}-wrapper { padding: 8px; }
+section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.${c} img { max-width: 100%; height: auto; }
+.${c} table { max-width: 100%; table-layout: auto; }
+@media (max-width: 768px) {
+  .${c}-wrapper { padding: 4px; background: #fff; }
+  .${c}-wrapper>section.${c} { box-shadow: none; margin-bottom: 12px; }
+  section.${c} { padding-left: 12px !important; padding-right: 12px !important; }
+  .${c} [data-drawing-anchor="true"] { float: none !important; display: block !important; position: static !important; width: auto !important; max-width: 100%; margin: 0.5em 0 !important; }
+}
+`;
             }
             return [
                 this.h({ tagName: "#comment", children: ["docxjs library predefined styles"] }),
@@ -9619,6 +9634,9 @@ section.${c}>ol>li::before {
             if (!parsed["position"] && !parsed["float"])
                 result.style.position = "relative";
             result.style.textIndent = "0px";
+            if (elem.props?.isAnchor) {
+                result.setAttribute("data-drawing-anchor", "true");
+            }
             return result;
         }
         emuToPx(emu) {
@@ -11174,6 +11192,7 @@ section.${c}>ol>li::before {
         renderChanges: false,
         renderComments: false,
         experimentalPageBreaks: false,
+        responsive: false,
         comments: {
             sidebar: true,
             highlight: true,

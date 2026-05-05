@@ -670,7 +670,12 @@ export class HtmlRenderer {
 			}
 
 			if (props.pageSize) {
-				if (!this.options.ignoreWidth)
+				// Responsive mode: drop the fixed pixel width on each page
+				// <section> in favour of the fluid .${c}-page-fluid rule
+				// emitted from renderDefaultStyle(). Height stays as a
+				// min-height so content on short pages still fills the page
+				// body — the CSS max-height cap protects tall pages.
+				if (!this.options.ignoreWidth && !this.options.responsive)
 					style.width = props.pageSize.width;
 				if (!this.options.ignoreHeight)
 					style.minHeight = props.pageSize.height;
@@ -1329,6 +1334,38 @@ section.${c}>ol>li::before {
 
 		if (this.showChanges) {
 			styleText += this.changesStyles();
+		}
+
+		if (this.options.responsive) {
+			// Fluid page box. `max-width: 100%` lets narrow viewports shrink
+			// the page width; `width: auto` and `min-width: 0` override any
+			// residual inline sizing. The wrapper's 30px side padding still
+			// applies from the default wrapperStyle above.
+			//
+			// Images inside the document flow become responsive via the
+			// max-width/height:auto idiom — otherwise a 600px inline image
+			// would punch out of a 375px phone viewport. We keep the rule
+			// scoped to flow content only (.${c} img) so absolutely-
+			// positioned shapes laid out by parseDrawingWrapper are not
+			// disturbed — those honor DOCX coordinates and need fixed size.
+			//
+			// Floating anchors (wp:anchor) are marked with
+			// data-drawing-anchor="true" by parseDrawingWrapper when
+			// responsive: true; the @media block demotes them to block-
+			// display at <=768px so body text isn't squeezed into a
+			// single-character column on a phone.
+			styleText += `
+.${c}-wrapper { padding: 8px; }
+section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.${c} img { max-width: 100%; height: auto; }
+.${c} table { max-width: 100%; table-layout: auto; }
+@media (max-width: 768px) {
+  .${c}-wrapper { padding: 4px; background: #fff; }
+  .${c}-wrapper>section.${c} { box-shadow: none; margin-bottom: 12px; }
+  section.${c} { padding-left: 12px !important; padding-right: 12px !important; }
+  .${c} [data-drawing-anchor="true"] { float: none !important; display: block !important; position: static !important; width: auto !important; max-width: 100%; margin: 0.5em 0 !important; }
+}
+`;
 		}
 
 		return [
@@ -2642,6 +2679,13 @@ section.${c}>ol>li::before {
 		if (!parsed["position"] && !parsed["float"])
 			result.style.position = "relative";
 		result.style.textIndent = "0px";
+
+		// Surface wp:anchor-vs-inline as a data attribute so responsive CSS
+		// can demote anchor floats to block layout on narrow viewports.
+		// See Options.responsive / renderDefaultStyle's @media block.
+		if (elem.props?.isAnchor) {
+			result.setAttribute("data-drawing-anchor", "true");
+		}
 
 		return result;
 	}
