@@ -87,7 +87,24 @@ export var autos = {
 	highlight: "transparent"
 };
 
-const supportedNamespaceURIs = [];
+// AlternateContent <mc:Choice Requires="..."> namespaces whose content we
+// can render. If the `Requires` attribute on a Choice resolves to one of
+// these, we pick the Choice; otherwise we fall back to <mc:Fallback>.
+// See checkAlternateContent. Before this list was populated, every
+// AlternateContent fell through to its Fallback — which for a modern
+// <wps:wsp> text-box means the legacy VML <w:pict> rendered as a raw
+// <foreignObject> in an <svg> wrapper, bypassing the full drawing
+// pipeline and the paragraph sanitisation that runs on <wps:txbx>
+// content. This was the root cause of issue #76 (first-page header /
+// footer text-boxes rendering at unexpected sizes because the VML
+// Fallback carries absolute inch/pt values but no <wps:bodyPr>-driven
+// auto-fit metadata).
+const supportedNamespaceURIs = [
+	"http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+	"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+	"http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
+	"http://schemas.microsoft.com/office/word/2010/wordml",
+];
 
 // Walks up parentNode links looking for an Element with a matching
 // localName. Stops at the document root. Used by parseSmartArtReference
