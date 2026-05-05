@@ -25,7 +25,13 @@ export default args => {
 	const config = {
 		input: 'src/docx-preview.ts',
 		output: [umdOutput],
-		plugins: [typescript()]
+		// `inlineSources: true` makes TypeScript embed source text in the emitted
+		// sourcemap (`sourcesContent`) rather than just listing paths. Without it,
+		// downstream bundlers (webpack, rollup, parcel) fail to resolve sources on
+		// consumer machines because the `../src/*.ts` paths don't exist there.
+		// See issue #183. Applies to every output (UMD dev/min, ES dev/min) since
+		// the TypeScript plugin runs once at the input stage.
+		plugins: [typescript({ sourceMap: true, inlineSources: true })]
 	}
 
 	if (args.environment == 'BUILD:production')

@@ -9,6 +9,11 @@ export interface CorePropsDeclaration {
     language: string,
     lastModifiedBy: string,
     revision: number,
+    // ISO-8601 timestamps from dcterms:created / dcterms:modified. These are
+    // parsed as plain strings (not Date objects) — the renderer puts them in
+    // a data-* attribute verbatim when Options.emitDocumentProps is on.
+    created?: string,
+    modified?: string,
 }
 
 export function parseCoreProps(root: Element, xmlParser: XmlParser): CorePropsDeclaration {
@@ -24,6 +29,10 @@ export function parseCoreProps(root: Element, xmlParser: XmlParser): CorePropsDe
             case "language": result.language = el.textContent; break;
             case "lastModifiedBy": result.lastModifiedBy = el.textContent; break;
             case "revision": el.textContent && (result.revision = parseInt(el.textContent)); break;
+            // dcterms:created / dcterms:modified — namespaced children on the
+            // core-properties root. localName is "created" / "modified".
+            case "created": result.created = el.textContent; break;
+            case "modified": result.modified = el.textContent; break;
         }
     }
 

@@ -3,7 +3,7 @@ import {
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlAltChunk, Revision, FormattingRevision, WmlSdt, SdtControl, SdtCheckboxControl,
-	WmlRuby, WmlFitText, WmlBidiOverride
+	WmlRuby, WmlFitText, WmlBidiOverride, WmlOleObject
 } from './document/dom';
 import {
 	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt,
@@ -87,7 +87,24 @@ export var autos = {
 	highlight: "transparent"
 };
 
-const supportedNamespaceURIs = [];
+// AlternateContent <mc:Choice Requires="..."> namespaces whose content we
+// can render. If the `Requires` attribute on a Choice resolves to one of
+// these, we pick the Choice; otherwise we fall back to <mc:Fallback>.
+// See checkAlternateContent. Before this list was populated, every
+// AlternateContent fell through to its Fallback — which for a modern
+// <wps:wsp> text-box means the legacy VML <w:pict> rendered as a raw
+// <foreignObject> in an <svg> wrapper, bypassing the full drawing
+// pipeline and the paragraph sanitisation that runs on <wps:txbx>
+// content. This was the root cause of issue #76 (first-page header /
+// footer text-boxes rendering at unexpected sizes because the VML
+// Fallback carries absolute inch/pt values but no <wps:bodyPr>-driven
+// auto-fit metadata).
+const supportedNamespaceURIs = [
+	"http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+	"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+	"http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
+	"http://schemas.microsoft.com/office/word/2010/wordml",
+];
 
 // Walks up parentNode links looking for an Element with a matching
 // localName. Stops at the document root. Used by parseSmartArtReference
@@ -660,9 +677,10 @@ export class DocumentParser {
 		// w:sdtPr holds the content-control metadata. w:alias is the visible
 		// label ("Publication Date", etc.); w:tag is the programmatic id.
 		// When either is present — or a typed form control (checkbox,
-		// dropdown, date, picture, gallery) is detected — we wrap the
-		// content so the renderer can emit an a11y group and/or form
-		// control. Otherwise we unwrap as before.
+		// dropdown, date, picture, gallery) is detected, or a data binding
+		// points at a custom XML part — we wrap the content so the renderer
+		// can emit an a11y group and/or form control. Otherwise we unwrap
+		// as before.
 		const sdtPr = xml.element(node, "sdtPr");
 		if (sdtPr) {
 			const aliasEl = xml.element(sdtPr, "alias");
@@ -670,16 +688,100 @@ export class DocumentParser {
 			const alias = aliasEl ? xml.attr(aliasEl, "val") : null;
 			const tag = tagEl ? xml.attr(tagEl, "val") : null;
 			const control = this.parseSdtControl(sdtPr);
-			if (alias || tag || control) {
+			// w:dataBinding — references a custom XML part by storeItemID
+			// with an XPath into its document. html-renderer.ts resolves
+			// the reference against document.customXmlParts and substitutes
+			// the result. Falls back to sdtContent when evaluation fails.
+			const dataBindingEl = xml.element(sdtPr, "dataBinding");
+			let dataBinding = null as null | { xpath: string; storeItemID?: string; prefixMappings?: string };
+			if (dataBindingEl) {
+				const xpath = xml.attr(dataBindingEl, "xpath");
+				if (xpath) {
+					dataBinding = { xpath };
+					const storeItemID = xml.attr(dataBindingEl, "storeItemID");
+					if (storeItemID) dataBinding.storeItemID = storeItemID;
+					const prefixMappings = xml.attr(dataBindingEl, "prefixMappings");
+					if (prefixMappings) dataBinding.prefixMappings = prefixMappings;
+				}
+			}
+			if (alias || tag || control || dataBinding) {
 				const wrapper: WmlSdt = { type: DomType.Sdt, children };
 				if (alias) wrapper.sdtAlias = alias;
 				if (tag) wrapper.sdtTag = tag;
 				if (control) wrapper.sdtControl = control;
+				if (dataBinding) wrapper.dataBinding = dataBinding;
 				return [wrapper];
 			}
 		}
 
 		return children;
+	}
+
+	// Parse <w:ffData> — legacy form-field descriptor on a <w:fldChar
+	// fldCharType="begin"/>. See ECMA-376 Part 1 §17.16.18.
+	// Only the three common control types (text / checkbox / dropdown) are
+	// extracted; other ffData children (w:name, w:enabled, w:helpText, …)
+	// are ignored. Returned strings are DOCX-attacker-controlled.
+	private parseFfData(ffData: Element): import('./document/fields').FormFieldData {
+		const result: import('./document/fields').FormFieldData = {};
+		const textInput = xml.element(ffData, "textInput");
+		if (textInput) {
+			result.formFieldType = 'text';
+			const defaultEl = xml.element(textInput, "default");
+			if (defaultEl) {
+				const v = xml.attr(defaultEl, "val");
+				if (v != null) result.defaultText = v;
+			}
+			const maxLengthEl = xml.element(textInput, "maxLength");
+			if (maxLengthEl) {
+				const v = xml.intAttr(maxLengthEl, "val");
+				if (v != null && Number.isFinite(v) && v > 0 && v <= 10000) {
+					result.maxLength = v;
+				}
+			}
+			return result;
+		}
+		const checkBox = xml.element(ffData, "checkBox");
+		if (checkBox) {
+			result.formFieldType = 'checkbox';
+			// <w:checked/> present = checked; otherwise fall back to
+			// <w:default w:val="1"/> for the checkbox initial state.
+			const checkedEl = xml.element(checkBox, "checked");
+			if (checkedEl) {
+				// Some producers write <w:checked w:val="1"/>, others
+				// write just <w:checked/> (which means true).
+				const v = xml.attr(checkedEl, "val");
+				result.checked = v == null ? true : (v === "1" || v === "true");
+			} else {
+				const defaultEl = xml.element(checkBox, "default");
+				if (defaultEl) {
+					const v = xml.attr(defaultEl, "val");
+					result.checked = v === "1" || v === "true";
+				} else {
+					result.checked = false;
+				}
+			}
+			return result;
+		}
+		const ddList = xml.element(ffData, "ddList");
+		if (ddList) {
+			result.formFieldType = 'dropdown';
+			const items: string[] = [];
+			for (const entry of xml.elements(ddList, "listEntry")) {
+				const v = xml.attr(entry, "val");
+				if (v != null) items.push(v);
+			}
+			result.ddItems = items;
+			const defaultEl = xml.element(ddList, "default");
+			if (defaultEl) {
+				const idx = xml.intAttr(defaultEl, "val");
+				if (idx != null && idx >= 0 && idx < items.length) {
+					result.ddDefault = idx;
+				}
+			}
+			return result;
+		}
+		return result;
 	}
 
 	// Inspect w:sdtPr for a typed content-control marker. Matches are by
@@ -1055,12 +1157,25 @@ export class DocumentParser {
 
 				case "fldChar":
 					result.fieldRun = true;
-					result.children.push(<WmlFieldChar>{
+					const charType = xml.attr(c, "fldCharType");
+					const fldChar: WmlFieldChar = {
 						type: DomType.ComplexField,
-						charType: xml.attr(c, "fldCharType"),
+						charType,
 						lock: xml.boolAttr(c, "lock", false),
 						dirty: xml.boolAttr(c, "dirty", false)
-					});
+					};
+					// Legacy form fields (FORMTEXT / FORMCHECKBOX / FORMDROPDOWN)
+					// carry a <w:ffData> child on the begin run that describes
+					// the form control. html-renderer.ts picks this up via the
+					// grouped complex field to render a disabled <input> /
+					// <select>. Only parsed on "begin" runs.
+					if (charType === "begin") {
+						const ffData = xml.element(c, "ffData");
+						if (ffData) {
+							fldChar.ffData = this.parseFfData(ffData);
+						}
+					}
+					result.children.push(fldChar);
 					break;
 
 				case "noBreakHyphen":
@@ -1128,6 +1243,20 @@ export class DocumentParser {
 				case "pict":
 					result.children.push(this.parseVmlPicture(c));
 					break;
+
+				case "object": {
+					// w:object wraps a legacy OLE embed. An inner
+					// <o:OLEObject> carries the ProgID and shape-link
+					// metadata; we emit a DomType.OleObject placeholder
+					// so the reader at least sees *something* where an
+					// Equation.3 / Excel.Sheet.12 / Package would have
+					// rendered inside Word. We intentionally ignore the
+					// companion <v:shape> preview here — rendering both
+					// produced a ghostly double placeholder in practice.
+					const ole = this.parseOleObject(c);
+					if (ole) result.children.push(ole);
+					break;
+				}
 
 				case "ruby":
 					result.children.push(this.parseRuby(c, result));
@@ -1257,6 +1386,16 @@ export class DocumentParser {
 			} else if (el.localName == "r") {
 				var run = this.parseRun(el);
 				run.type = DomType.MmlRun;
+				// Upstream #161: OMML equation arrays (m:eqArr) use a literal
+				// '&' inside m:r/m:t as a column-alignment separator. It's a
+				// layout marker, not a visible character — Word renders it as
+				// column alignment, but docxjs has no alignment engine for
+				// eqArr, so the raw '&' leaks into the output (e.g. "-x, &x<0"
+				// appears between curly/square-bracket delimiters). Strip the
+				// alignment marker from text children of math runs; any real
+				// '&' the author wanted to display would be authored as a w:sym
+				// or equivalent, not bare text inside m:t.
+				this.stripMathAlignmentMarkers(run);
 				result.children.push(run);
 			} else if (el.localName == propsTag) {
 				result.props = this.parseMathProperies(el);
@@ -1264,6 +1403,18 @@ export class DocumentParser {
 		}
 
 		return result;
+	}
+
+	private stripMathAlignmentMarkers(run: OpenXmlElement) {
+		if (!run.children) return;
+		for (const child of run.children) {
+			if (child.type === DomType.Text || child.type === DomType.DeletedText) {
+				const t = (child as WmlText).text;
+				if (t && t.indexOf('&') >= 0) {
+					(child as WmlText).text = t.replace(/&/g, '');
+				}
+			}
+		}
 	}
 
 	parseMathProperies(elem: Element): Record<string, any> {
@@ -1338,6 +1489,28 @@ export class DocumentParser {
 		}
 
 		return result;
+	}
+
+	// <w:object><o:OLEObject Type="Embed" ProgID="Equation.3" ShapeID="_x0000_i1026"
+	//   DrawAspect="Content" ObjectID="_1234567890" r:id="rId6"/>
+	// We don't decode the embedded payload — just surface ProgID / ShapeID /
+	// Type for the renderer. All three are attacker-controlled DOCX strings;
+	// the renderer must only expose them via an allowlist (ProgID) or
+	// setAttribute (ShapeID / Type), never innerHTML or className.
+	parseOleObject(elem: Element): WmlOleObject | null {
+		for (const c of xml.elements(elem)) {
+			if (c.localName !== "OLEObject") continue;
+			return <WmlOleObject>{
+				type: DomType.OleObject,
+				progId: xml.attr(c, "ProgID"),
+				shapeId: xml.attr(c, "ShapeID"),
+				objectType: xml.attr(c, "Type"),
+			};
+		}
+		// w:object without an embedded <o:OLEObject> (rare but seen in the
+		// wild when the embed was stripped by another toolchain). Still
+		// emit a placeholder so the reader sees something was there.
+		return <WmlOleObject>{ type: DomType.OleObject };
 	}
 
 	checkAlternateContent(elem: Element): Element {
@@ -3170,16 +3343,32 @@ export class DocumentParser {
 
 	parseIndentation(node: Element, style: Record<string, string>) {
 		var firstLine = xml.lengthAttr(node, "firstLine");
+		// w:firstLineChars — first-line indent expressed as 1/100ths of a
+		// character width. Since we don't know the exact font metrics at
+		// parse time, an `em`-based text-indent approximates it. When
+		// w:firstLineChars is present it takes precedence over w:firstLine
+		// (upstream #195) — Word prefers the char-count form when both are
+		// supplied on the same paragraph.
+		var firstLineChars = xml.intAttr(node, "firstLineChars", null);
 		var hanging = xml.lengthAttr(node, "hanging");
+		var hangingChars = xml.intAttr(node, "hangingChars", null);
 		var left = xml.lengthAttr(node, "left");
+		var leftChars = xml.intAttr(node, "leftChars", null);
 		var start = xml.lengthAttr(node, "start");
+		var startChars = xml.intAttr(node, "startChars", null);
 		var right = xml.lengthAttr(node, "right");
+		var rightChars = xml.intAttr(node, "rightChars", null);
 		var end = xml.lengthAttr(node, "end");
+		var endChars = xml.intAttr(node, "endChars", null);
 
 		if (firstLine) style["text-indent"] = firstLine;
+		if (firstLineChars != null) style["text-indent"] = `${firstLineChars / 100}em`;
 		if (hanging) style["text-indent"] = `-${hanging}`;
+		if (hangingChars != null) style["text-indent"] = `-${hangingChars / 100}em`;
 		if (left || start) style["margin-inline-start"] = left || start;
+		if (leftChars != null || startChars != null) style["margin-inline-start"] = `${(leftChars ?? startChars) / 100}em`;
 		if (right || end) style["margin-inline-end"] = right || end;
+		if (rightChars != null || endChars != null) style["margin-inline-end"] = `${(rightChars ?? endChars) / 100}em`;
 	}
 
 	parseSpacing(node: Element, style: Record<string, string>) {
@@ -3441,7 +3630,8 @@ class values {
 	}
 
 	static valueOfBorder(c: Element) {
-		var type = values.parseBorderType(xml.attr(c, "val"));
+		const rawVal = xml.attr(c, "val");
+		var type = values.parseBorderType(rawVal);
 
 		if (type == "none")
 			return "none";
@@ -3458,7 +3648,63 @@ class values {
 		// as computed border-top-width=0.
 		const resolvedColor = (color == null || color == "auto") ? autos.borderColor : color;
 
+		// w:pBdr "art" borders (apples, stars, balloons3Colors, ...) are
+		// named decorative bitmap patterns with no CSS equivalent. ST_Border
+		// w:sz for art borders is a point-valued pattern size, not a CSS
+		// border-width, so feeding it into the shorthand produces absurd
+		// widths (a size-8 "apples" border comes through as 8pt). v1 falls
+		// back to a fixed 2pt solid edge in the declared colour — the reader
+		// sees *a* border, just not the decorative pattern. Full art-image
+		// support would require generating an SVG tile per name and pointing
+		// border-image-source at it. See ECMA-376 §17.18.2 ST_Border.
+		if (values.isArtBorder(rawVal)) {
+			return `2pt solid ${resolvedColor}`;
+		}
+
 		return `${size} ${type} ${resolvedColor}`;
+	}
+
+	// Allowlist of art-border ST_Border values. Kept explicit (rather than
+	// computed as "anything parseBorderType defaulted") so that a future
+	// straight-border name we forget to add doesn't silently collapse to
+	// the 2pt fallback. Names taken from ECMA-376 §17.18.2.
+	private static readonly ART_BORDER_VALS: ReadonlySet<string> = new Set([
+		'apples', 'archedScallops', 'babyPants', 'babyRattle', 'balloons3Colors',
+		'balloonsHotAir', 'basicBlackDashes', 'basicBlackDots', 'basicBlackSquares',
+		'basicThinLines', 'basicWhiteDashes', 'basicWhiteDots', 'basicWhiteSquares',
+		'basicWideInline', 'basicWideMidline', 'basicWideOutline', 'bats', 'birds',
+		'birdsFlight', 'cabins', 'cakeSlice', 'candyCorn', 'celticKnotwork',
+		'certificateBanner', 'chainLink', 'champagneBottle', 'checkedBarBlack',
+		'checkedBarColor', 'checkered', 'christmasTree', 'circlesLines', 'circlesRectangles',
+		'classicalWave', 'clocks', 'compass', 'confetti', 'confettiGrays', 'confettiOutline',
+		'confettiStreamers', 'confettiWhite', 'cornerTriangles', 'couponCutoutDashes',
+		'couponCutoutDots', 'crazyMaze', 'creaturesButterfly', 'creaturesFish',
+		'creaturesInsects', 'creaturesLadyBug', 'crossStitch', 'cup', 'decoArch',
+		'decoArchColor', 'decoBlocks', 'diamondsGray', 'doubleD', 'doubleDiamonds',
+		'earth1', 'earth2', 'eclipsingSquares1', 'eclipsingSquares2', 'eggsBlack',
+		'fans', 'film', 'firecrackers', 'flowersBlockPrint', 'flowersDaisies',
+		'flowersModern1', 'flowersModern2', 'flowersPansy', 'flowersRedRose',
+		'flowersRoses', 'flowersTeacup', 'flowersTiny', 'gems', 'gingerbreadMan',
+		'gradient', 'handmade1', 'handmade2', 'heartBalloon', 'heartGray', 'hearts',
+		'heebieJeebies', 'holly', 'houseFunky', 'hypnotic', 'iceCreamCones',
+		'lightBulb', 'lightning1', 'lightning2', 'mapPins', 'mapleLeaf', 'mapleMuffins',
+		'marquee', 'marqueeToothed', 'moons', 'mosaic', 'musicNotes', 'northwest',
+		'ovals', 'packages', 'palmsBlack', 'palmsColor', 'paperClips', 'papyrus',
+		'partyFavor', 'partyGlass', 'pencils', 'people', 'peopleHats', 'peopleWaving',
+		'pinkFlowers', 'pumpkin1', 'pushPinNote1', 'pushPinNote2', 'pyramids',
+		'pyramidsAbove', 'quadrants', 'rings', 'safari', 'sawtooth', 'sawtoothGray',
+		'scaredCat', 'seattle', 'shadowedSquares', 'sharksTeeth', 'shorebirdTracks',
+		'skyrocket', 'snowflakeFancy', 'snowflakes', 'sombrero', 'southwest', 'stars',
+		'stars3d', 'starsBlack', 'starsShadowed', 'starsTop', 'sun', 'swirligig',
+		'tornPaper', 'tornPaperBlack', 'trees', 'triangleParty', 'triangles',
+		'tribal1', 'tribal2', 'tribal3', 'tribal4', 'tribal5', 'tribal6',
+		'twistedLines1', 'twistedLines2', 'vine', 'waveline', 'weavingAngles',
+		'weavingBraid', 'weavingRibbon', 'weavingStrips', 'whiteFlowers', 'woodwork',
+		'xIllusions', 'zanyTriangles', 'zigZag', 'zigZagStitch'
+	]);
+
+	static isArtBorder(val: string): boolean {
+		return !!val && values.ART_BORDER_VALS.has(val);
 	}
 
 	// Companion to `valueOfBorder` for the `$themeColor-<prop>` sideband.
