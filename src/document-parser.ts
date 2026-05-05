@@ -2516,6 +2516,15 @@ export class DocumentParser {
 
 				case "tblLook":
 					table.className = values.classNameOftblLook(c);
+					// When tblLook signals @w:firstRow, the table style treats the
+					// first row as a header — surface that to the renderer so it
+					// can emit <thead> semantics for screen readers.
+					{
+						const val = xml.hexAttr(c, "val", 0);
+						if (xml.boolAttr(c, "firstRow") || (val & 0x0020)) {
+							table.firstRowIsHeader = true;
+						}
+					}
 					break;
 
 				case "tblpPr":
@@ -2979,7 +2988,16 @@ export class DocumentParser {
 					break;
 
 				case "lang":
-					style["$lang"] = xml.attr(c, "val");
+					// w:lang has three per-script slots: @w:val (ASCII/Latin/default),
+					// @w:eastAsia (CJK), @w:bidi (complex-script / RTL). Any present
+					// slot is a valid BCP-47 hint — surface whichever is set, with
+					// @w:val taking priority when multiple slots are present.
+					{
+						const langVal = xml.attr(c, "val")
+							|| xml.attr(c, "eastAsia")
+							|| xml.attr(c, "bidi");
+						if (langVal) style["$lang"] = langVal;
+					}
 					break;
 
 				case "rtl":

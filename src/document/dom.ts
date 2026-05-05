@@ -274,6 +274,11 @@ export interface WmlTable extends OpenXmlElement {
 
 	colBandSize?: number;
 	rowBandSize?: number;
+
+	// Set when w:tblPr/w:tblLook has @w:firstRow="1" (or val bit 0x0020). The
+	// first row is styled as a header by the table style; renderers should
+	// also surface header semantics (<thead>) for accessibility.
+	firstRowIsHeader?: boolean;
 }
 
 export interface WmlTableRow extends OpenXmlElement {

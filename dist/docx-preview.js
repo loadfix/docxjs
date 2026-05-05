@@ -4981,6 +4981,12 @@
                         break;
                     case "tblLook":
                         table.className = values.classNameOftblLook(c);
+                        {
+                            const val = globalXmlParser.hexAttr(c, "val", 0);
+                            if (globalXmlParser.boolAttr(c, "firstRow") || (val & 0x0020)) {
+                                table.firstRowIsHeader = true;
+                            }
+                        }
                         break;
                     case "tblpPr":
                         this.parseTablePosition(c, table);
@@ -5322,7 +5328,13 @@
                         style["hyphens"] = globalXmlParser.boolAttr(c, "val", true) ? "none" : "auto";
                         break;
                     case "lang":
-                        style["$lang"] = globalXmlParser.attr(c, "val");
+                        {
+                            const langVal = globalXmlParser.attr(c, "val")
+                                || globalXmlParser.attr(c, "eastAsia")
+                                || globalXmlParser.attr(c, "bidi");
+                            if (langVal)
+                                style["$lang"] = langVal;
+                        }
                         break;
                     case "rtl":
                     case "bidi":
@@ -10001,13 +10013,23 @@ section.${c}>ol>li::before {
                 children.push(this.renderTableColumns(elem.columns));
             const headerRendered = [];
             const bodyRendered = [];
+            const anyRowExplicitHeader = (elem.children ?? []).some((c) => c.type === DomType.Row
+                && c.isHeader !== undefined
+                && c.isHeader !== false);
+            const promoteFirstRow = !!elem.firstRowIsHeader && !anyRowExplicitHeader;
+            let firstRowPromoted = false;
             for (const child of (elem.children ?? [])) {
                 const rendered = this.renderElement(child);
                 if (rendered == null)
                     continue;
-                const isHeaderRow = child.type === DomType.Row
+                let isHeaderRow = child.type === DomType.Row
                     && child.isHeader !== undefined
                     && child.isHeader !== false;
+                if (!isHeaderRow && promoteFirstRow && !firstRowPromoted
+                    && child.type === DomType.Row) {
+                    isHeaderRow = true;
+                    firstRowPromoted = true;
+                }
                 if (isHeaderRow) {
                     if (Array.isArray(rendered)) {
                         for (const node of rendered)
