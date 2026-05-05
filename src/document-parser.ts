@@ -2647,7 +2647,13 @@ export class DocumentParser {
 					break;
 
 				case "tblHeader":
-					row.isHeader = xml.boolAttr(c, "val");
+					// `<w:tblHeader/>` is a presence-only boolean — the default
+					// when w:val is absent is true. Passing null here caused
+					// header rows authored without `w:val` to land as non-header,
+					// so `<thead>` was never emitted and the
+					// `table-with-header-row` conformance selector came up
+					// empty.
+					row.isHeader = xml.boolAttr(c, "val", true);
 					break;
 
 				case "cantSplit":
@@ -3418,16 +3424,16 @@ class values {
 		var color = xmlUtil.colorAttr(c, "color");
 		var size = xml.lengthAttr(c, "sz", LengthUsage.Border);
 
-		// A border element with no `w:color` (and no `w:themeColor`) means
-		// "use the default foreground" — same as `auto`. Without this
-		// fallback the composite string becomes "<size> <type> null", which
-		// browsers reject as invalid CSS and the whole declaration is
-		// dropped — the failure mode the corpus's border-around-paragraph
-		// fixture hits.
-		if (color == null || color == "auto")
-			color = autos.borderColor;
+		// Missing or "auto" @w:color falls back to the document's default
+		// border colour (black). Previously a missing color interpolated as
+		// the literal string "null" inside the CSS shorthand, which browsers
+		// silently reject — so the whole border shorthand was dropped and
+		// paragraphs authored with `<w:top w:val="single" w:sz="8"/>` (the
+		// common pattern; see the `border-around-paragraph` fixture) rendered
+		// as computed border-top-width=0.
+		const resolvedColor = (color == null || color == "auto") ? autos.borderColor : color;
 
-		return `${size} ${type} ${color}`;
+		return `${size} ${type} ${resolvedColor}`;
 	}
 
 	// Companion to `valueOfBorder` for the `$themeColor-<prop>` sideband.

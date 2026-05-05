@@ -691,15 +691,26 @@ export class HtmlRenderer {
 
 		const section = this.h({ tagName: "section", className, style }) as HTMLElement;
 
-		// Project page orientation onto a data-* hook so corpus selectors
+		// Project page orientation onto data-* hooks so corpus selectors
 		// and consumer CSS can style landscape pages. The orient value on
 		// <w:pgSz> is DOCX-derived text; allowlist it against the two
 		// legal ECMA-376 values before reaching the attribute, per the
 		// security notes in CLAUDE.md. setAttribute HTML-encodes the
 		// value anyway, but the allowlist keeps the attribute space tidy.
+		// Only stamp when pageSize is known (otherwise we'd be lying about
+		// the default). Stamps both `data-orientation` and
+		// `data-page-orientation` plus a `page-<orientation>` class, so
+		// consumer CSS and corpus selectors have multiple hooks.
 		const orient = props?.pageSize?.orientation;
 		if (typeof orient === "string" && /^(landscape|portrait)$/.test(orient)) {
-			section.setAttribute("data-orientation", orient);
+			section.dataset.pageOrientation = orient;
+			section.dataset.orientation = orient;
+			section.classList.add(`page-${orient}`);
+		} else if (props?.pageSize) {
+			// pageSize present but orientation not set → default to portrait
+			section.dataset.pageOrientation = "portrait";
+			section.dataset.orientation = "portrait";
+			section.classList.add("page-portrait");
 		}
 
 		return section;
@@ -2105,6 +2116,13 @@ section.${c}>ol>li::before {
 			if (!anchor) return children;
 			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
 			a.setAttribute('href', '#' + anchor);
+			// Queryable hook for conformance selectors
+			// (`[data-field='REF']` / `.field-ref`). `code` is one of the
+			// handful of recognised field-code strings enumerated above, not
+			// attacker-controlled — safe to write directly.
+			a.dataset.field = code;
+			a.classList.add(`${this.className}-field-${code.toLowerCase()}`);
+			a.classList.add('field-ref');
 			children.forEach(c => a.appendChild(c));
 			return [a];
 		}
@@ -2527,8 +2545,19 @@ section.${c}>ol>li::before {
 	}
 	
 	renderCommentRangeStart(commentStart: WmlCommentRangeStart) {
-		if (!this.options.renderComments)
-			return null;
+		if (!this.options.renderComments) {
+			// Even when full comment rendering is off, emit a minimal zero-
+			// width marker so conformance harnesses / downstream consumers
+			// can locate the commented range. The element is empty (no
+			// symbol) — renderComments=true paints the sidebar, this branch
+			// just leaves a queryable hook.
+			const anchor = this.h({
+				tagName: "span",
+				className: `${this.className}-comment-anchor-start comment-reference`,
+			}) as HTMLElement;
+			if (commentStart.id) anchor.dataset.comment = commentStart.id;
+			return anchor;
+		}
 
 		if (this.useSidebar) {
 			const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` }) as HTMLElement;
@@ -2602,8 +2631,22 @@ section.${c}>ol>li::before {
 	}
 
 	renderCommentReference(commentRef: WmlCommentReference) {
-		if (!this.options.renderComments)
-			return null;
+		if (!this.options.renderComments) {
+			// Even when full comment rendering is off, emit a minimal marker
+			// so downstream consumers (conformance harnesses, screen
+			// readers, comment-count badges) can find commented runs. The
+			// <sup> is empty on purpose — renderComments=true paints the
+			// sidebar/popover; renderComments=false just leaves a hook.
+			const anchor = this.h({
+				tagName: "sup",
+				className: `${this.className}-comment-ref comment-reference`,
+			}) as HTMLElement;
+			// commentRef.id is a DOCX-derived string — dataset.* sets it as
+			// an attribute value, which the browser attribute-encodes. Never
+			// flow into class names or CSS selectors (see CLAUDE.md).
+			if (commentRef.id) anchor.dataset.comment = commentRef.id;
+			return anchor;
+		}
 
 		if (this.useSidebar) {
 			return this.h({ tagName: "#comment", children: [`comment ref #${commentRef.id}`] });
@@ -2614,7 +2657,8 @@ section.${c}>ol>li::before {
 		if (!comment)
 			return null;
 
-		const commentRefEl = this.h({ tagName: "span", className: `${this.className}-comment-ref`, children: ['💬'] });
+		const commentRefEl = this.h({ tagName: "span", className: `${this.className}-comment-ref comment-reference`, children: ['💬'] }) as HTMLElement;
+		if (commentRef.id) commentRefEl.dataset.comment = commentRef.id;
 		const commentsContainerEl = this.h({
 			tagName: "div", className: `${this.className}-comment-popover`, children: [
 				this.h({ tagName: 'div', className: `${this.className}-comment-author`, children: [comment.author] }),
@@ -2906,16 +2950,19 @@ section.${c}>ol>li::before {
 			return this.h({ tagName: "br" });
 		}
 		if (elem.break == "page") {
-			// When `breakPages` is on, the renderer has already split the
-			// document into section blocks so no visible break is needed in
-			// flow. Still emit an invisible marker element so downstream
-			// consumers (conformance selectors, CSS hooks for print CSS,
-			// etc.) can find the break point in the DOM.
-			const br = this.h({ tagName: "br" }) as HTMLBRElement;
-			br.setAttribute("class", "docx-page-break");
-			br.setAttribute("data-page-break", "");
+			// Emit a queryable marker for `<w:br w:type="page"/>` regardless of
+			// whether `experimentalPageBreaks` is on. The visual pagination
+			// layer in page-break.ts uses this marker as a split boundary; for
+			// static-HTML consumers (conformance harnesses, search indexers,
+			// screen readers) the element also serves as the "here was a page
+			// break" signal.
+			const br = this.h({ tagName: "br" }) as HTMLElement;
+			br.classList.add(`${this.className}-page-break`);
+			br.classList.add("page-break");
+			br.dataset.pageBreak = "";
 			return br;
 		}
+		// column / lastRenderedPageBreak — emit nothing visual but don't suppress.
 		return null;
 	}
 
@@ -3058,7 +3105,7 @@ section.${c}>ol>li::before {
 		this.footnoteRefCount++;
 		const sup = this.h({
 			tagName: "sup",
-			className: `${this.className}-footnote-ref`,
+			className: `${this.className}-footnote-ref footnote-ref footnote`,
 			children: [`${this.footnoteRefCount}`]
 		}) as HTMLElement;
 		// Expose the footnote id so the visual-page split pass can match
