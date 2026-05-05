@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>docxjs — responsive render option demo</title>
+    <script src="../node_modules/jszip/dist/jszip.js"></script>
+    <script src="../dist/docx-preview.js"></script>
+    <style>
+        :root { font-family: system-ui, sans-serif; }
+        body { margin: 0; padding: 16px; background: #f5f5f5; color: #222; }
+        h1 { margin: 0 0 4px; font-size: 1.4rem; }
+        p.lead { margin: 0 0 16px; color: #555; }
+        .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .controls label { font-size: 0.9rem; }
+        .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .pane {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 12px;
+            min-width: 0;  /* allow the pane to shrink inside the grid */
+        }
+        .pane h2 { font-size: 1rem; margin: 0 0 8px; color: #333; }
+        .pane .viewport {
+            border: 1px dashed #bbb;
+            border-radius: 4px;
+            overflow-x: auto;  /* default mode: horizontal scroll visible on a narrow pane */
+            max-height: 70vh;
+        }
+        /* Simulated phone-width viewport for the responsive pane so the
+           reader can see the difference without physically resizing the
+           browser window. Leave the default pane alone — it's meant to
+           overflow horizontally. */
+        .pane.responsive .viewport { width: 375px; margin: 0 auto; resize: horizontal; }
+        @media (max-width: 900px) {
+            .panes { grid-template-columns: 1fr; }
+            .pane.responsive .viewport { width: auto; }
+        }
+        .note { font-size: 0.8rem; color: #666; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    <h1>docxjs responsive mode</h1>
+    <p class="lead">
+        Left: default (<code>responsive: false</code>) — each page renders at its pixel width; on a narrow viewport the body overflows horizontally.
+        Right: <code>responsive: true</code> — the page <code>&lt;section&gt;</code> becomes fluid (<code>max-width: 100%</code>) and images resize with the container.
+    </p>
+
+    <div class="controls">
+        <label>Document: <input type="file" id="picker" accept=".docx" /></label>
+        <button id="sample">Use bundled sample</button>
+    </div>
+
+    <div class="panes">
+        <div class="pane default">
+            <h2>Default: <code>responsive: false</code></h2>
+            <div class="viewport" id="default-out"></div>
+            <p class="note">Shown in a 100%-wide pane; on a phone the page overflows.</p>
+        </div>
+        <div class="pane responsive">
+            <h2>Responsive: <code>responsive: true</code></h2>
+            <div class="viewport" id="responsive-out"></div>
+            <p class="note">Wrapped in a 375px container — drag the corner to resize. The section auto-fits.</p>
+        </div>
+    </div>
+
+    <script>
+        const defaultOut = document.getElementById('default-out');
+        const responsiveOut = document.getElementById('responsive-out');
+
+        async function renderBoth(blob) {
+            // Render twice — once per option — so the reader can compare
+            // output side by side in the same page.
+            await Promise.all([
+                window.docx.renderAsync(blob, defaultOut),
+                window.docx.renderAsync(blob, responsiveOut, undefined, { responsive: true }),
+            ]);
+        }
+
+        document.getElementById('picker').addEventListener('change', async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            await renderBoth(file);
+        });
+
+        document.getElementById('sample').addEventListener('click', async () => {
+            // The render-test fixture is the smallest committed .docx in
+            // the repo; good enough to show the width difference.
+            const blob = await fetch('../tests/render-test/text/document.docx').then(r => r.blob());
+            await renderBoth(blob);
+        });
+    </script>
+</body>
+</html>

@@ -92,6 +92,18 @@ export interface Options {
      * behaviour for existing consumers. See #22.
      */
     experimentalPageBreaks?: boolean;
+    /**
+     * Responsive / mobile rendering. When `true`, the renderer swaps the
+     * fixed page-width layout (`width: <pgSz.width>` on each <section>) for
+     * a fluid `max-width: 100%` box, adds `max-width: 100%; height: auto` to
+     * embedded images, and (under `@media (max-width: 768px)`) demotes
+     * wp:anchor floats to block-level so they no longer squeeze flowing
+     * text in a phone-width viewport.
+     *
+     * Default `false` — existing consumers keep pixel-perfect page layout
+     * and byte-stable snapshots.
+     */
+    responsive?: boolean;
     comments: CommentsOptions;
     changes: ChangesOptions;
     h: typeof h;
@@ -117,6 +129,7 @@ export const defaultOptions: Options = {
 	renderChanges: false,
     renderComments: false,
     experimentalPageBreaks: false,
+    responsive: false,
     comments: {
         sidebar: true,
         highlight: true,
