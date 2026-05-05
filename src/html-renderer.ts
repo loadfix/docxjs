@@ -689,7 +689,20 @@ export class HtmlRenderer {
 			}
 		}
 
-		return this.h({ tagName: "section", className, style }) as HTMLElement;
+		const section = this.h({ tagName: "section", className, style }) as HTMLElement;
+
+		// Project page orientation onto a data-* hook so corpus selectors
+		// and consumer CSS can style landscape pages. The orient value on
+		// <w:pgSz> is DOCX-derived text; allowlist it against the two
+		// legal ECMA-376 values before reaching the attribute, per the
+		// security notes in CLAUDE.md. setAttribute HTML-encodes the
+		// value anyway, but the allowlist keeps the attribute space tidy.
+		const orient = props?.pageSize?.orientation;
+		if (typeof orient === "string" && /^(landscape|portrait)$/.test(orient)) {
+			section.setAttribute("data-orientation", orient);
+		}
+
+		return section;
 	}
 
 	/**
@@ -1621,6 +1634,9 @@ section.${c}>ol>li::before {
 				const id = notes[i]?.id;
 				if (node && typeof (node as HTMLElement).setAttribute === 'function' && id) {
 					(node as HTMLElement).setAttribute('data-footnote-id', id);
+					// Unprefixed alias mirrors renderFootnoteReference —
+					// see that method for the rationale.
+					(node as HTMLElement).setAttribute('data-footnote', '');
 				}
 			}
 			return this.h({ tagName: "ol", children: renderedChildren });
@@ -2517,6 +2533,11 @@ section.${c}>ol>li::before {
 		if (this.useSidebar) {
 			const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` }) as HTMLElement;
 			anchor.dataset.commentId = commentStart.id;
+			// Unprefixed alias so the OOXML conformance corpus selector
+			// (`[data-comment]`) finds the hook. Empty-string value — no
+			// DOCX-derived content flows into this attribute, so it
+			// adds no new sink (see CLAUDE.md security constraints).
+			anchor.dataset.comment = '';
 
 			if (!this.commentAnchorElements[commentStart.id]) {
 				this.commentAnchorElements[commentStart.id] = [];
@@ -2561,6 +2582,9 @@ section.${c}>ol>li::before {
 		if (this.useSidebar) {
 			const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-end` }) as HTMLElement;
 			anchor.dataset.commentId = commentEnd.id;
+			// Unprefixed alias mirrors renderCommentRangeStart — see that
+			// method for the rationale.
+			anchor.dataset.comment = '';
 
 			if (this.useHighlight) {
 				const rng = this.commentMap[commentEnd.id];
@@ -2878,7 +2902,21 @@ section.${c}>ol>li::before {
 	}
 
 	renderBreak(elem: WmlBreak) {
-		return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
+		if (elem.break == "textWrapping") {
+			return this.h({ tagName: "br" });
+		}
+		if (elem.break == "page") {
+			// When `breakPages` is on, the renderer has already split the
+			// document into section blocks so no visible break is needed in
+			// flow. Still emit an invisible marker element so downstream
+			// consumers (conformance selectors, CSS hooks for print CSS,
+			// etc.) can find the break point in the DOM.
+			const br = this.h({ tagName: "br" }) as HTMLBRElement;
+			br.setAttribute("class", "docx-page-break");
+			br.setAttribute("data-page-break", "");
+			return br;
+		}
+		return null;
 	}
 
 	renderInserted(elem: OpenXmlElement): Node | Node[] {
@@ -3030,6 +3068,11 @@ section.${c}>ol>li::before {
 		// browser attribute-encodes. Never interpolate it into a class or
 		// CSS selector (see CLAUDE.md security constraints).
 		if (elem.id) sup.dataset.footnoteId = elem.id;
+		// Unprefixed alias so the OOXML conformance corpus selector
+		// (`[data-footnote]`) finds the hook. Empty-string value — no
+		// DOCX-derived content flows into this attribute, so it adds
+		// no new sink (see CLAUDE.md security constraints).
+		sup.dataset.footnote = '';
 		return sup;
 	}
 
@@ -3157,17 +3200,41 @@ section.${c}>ol>li::before {
 		// pagination helper (splitTableAtRowBoundary) can clone them
 		// onto every sub-page. Non-row siblings (e.g. bookmarks) stay in
 		// document order inside <tbody> where they would otherwise land.
-		const headerRendered: Node[] = [];
+		const headerRendered: HTMLElement[] = [];
 		const bodyRendered: Node[] = [];
 		for (const child of (elem.children ?? [])) {
 			const rendered = this.renderElement(child as any);
 			if (rendered == null) continue;
-			const bucket = (child.type === DomType.Row && (child as WmlTableRow).isHeader) ? headerRendered : bodyRendered;
-			if (Array.isArray(rendered)) bucket.push(...rendered);
-			else bucket.push(rendered);
+			// Per ECMA-376 §17.4.50, <w:tblHeader/> without a w:val attribute
+			// implies the header flag is set; only an explicit val of
+			// 0/false/off disables it. The parser records "presence-only" as
+			// `null` (boolAttr with no default) and "missing element" as
+			// `undefined`, so treat anything that isn't explicit-false and
+			// isn't missing as a header row.
+			const isHeaderRow = child.type === DomType.Row
+				&& (child as WmlTableRow).isHeader !== undefined
+				&& (child as WmlTableRow).isHeader !== false;
+			if (isHeaderRow) {
+				if (Array.isArray(rendered)) {
+					for (const node of rendered) if (node instanceof HTMLElement) headerRendered.push(node);
+				} else if (rendered instanceof HTMLElement) {
+					headerRendered.push(rendered);
+				}
+			} else {
+				if (Array.isArray(rendered)) bodyRendered.push(...rendered);
+				else bodyRendered.push(rendered);
+			}
 		}
 
 		if (headerRendered.length > 0) {
+			// Also project the header flag onto the rendered <tr>s as a
+			// data-* hook so corpus selectors that target tr-level header
+			// rows (rather than thead > tr) find their marker. The value
+			// is a constant, so there's no DOCX-derived content reaching
+			// the attribute.
+			for (const tr of headerRendered) {
+				if (tr.tagName === "TR") tr.setAttribute("data-header", "true");
+			}
 			children.push(this.h({ tagName: "thead", children: headerRendered }));
 		}
 		if (bodyRendered.length > 0) {
@@ -3216,7 +3283,10 @@ section.${c}>ol>li::before {
 		}
 
 		const prevHeader = this.currentRowIsHeader;
-		this.currentRowIsHeader = elem.isHeader === true;
+		// Match the same ECMA-376 §17.4.50 semantics used when bucketing
+		// rows into <thead>: presence-only <w:tblHeader/> (parsed as
+		// `null`) counts as set; only explicit-false disables it.
+		this.currentRowIsHeader = elem.isHeader !== undefined && elem.isHeader !== false;
 		const renderedCells = this.renderElements(cellChildren);
 		this.currentRowIsHeader = prevHeader;
 		children.push(...renderedCells);
