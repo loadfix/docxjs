@@ -39,6 +39,9 @@
         RelationshipTypes["DiagramQuickStyle"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle";
         RelationshipTypes["DiagramColors"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors";
         RelationshipTypes["DiagramDrawing"] = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing";
+        RelationshipTypes["GlossaryDocument"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument";
+        RelationshipTypes["CustomXml"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml";
+        RelationshipTypes["CustomXmlProps"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps";
     })(RelationshipTypes || (RelationshipTypes = {}));
     function parseRelationships(root, xml) {
         return xml.elements(root).map(e => ({
@@ -887,6 +890,7 @@
         DomType["Chart"] = "chart";
         DomType["ChartEx"] = "chartEx";
         DomType["SmartArt"] = "smartArt";
+        DomType["OleObject"] = "oleObject";
     })(DomType || (DomType = {}));
     class OpenXmlElementBase {
         constructor() {
@@ -1003,6 +1007,12 @@
                     break;
                 case "revision":
                     el.textContent && (result.revision = parseInt(el.textContent));
+                    break;
+                case "created":
+                    result.created = el.textContent;
+                    break;
+                case "modified":
+                    result.modified = el.textContent;
                     break;
             }
         }
@@ -1139,9 +1149,21 @@
                 case "evenAndOddHeaders":
                     result.evenAndOddHeaders = xml.boolAttr(el, "val", true);
                     break;
+                case "documentProtection":
+                    result.documentProtection = parseDocumentProtection(el, xml);
+                    break;
             }
         }
         return result;
+    }
+    const ALLOWED_EDIT = new Set(['readOnly', 'trackedChanges', 'comments', 'forms', 'none']);
+    function parseDocumentProtection(elem, xml) {
+        const editAttr = xml.attr(elem, "edit");
+        return {
+            edit: ALLOWED_EDIT.has(editAttr) ? editAttr : undefined,
+            enforcement: xml.boolAttr(elem, "enforcement", false),
+            formatting: xml.boolAttr(elem, "formatting", false),
+        };
     }
     function parseNoteProperties(elem, xml) {
         var result = {
@@ -2344,17 +2366,54 @@
         return ext === 'wmf' || ext === 'emf' ? ext : null;
     }
 
+    class GlossaryDocumentPart extends Part {
+        constructor(pkg, path, parser) {
+            super(pkg, path);
+            this._documentParser = parser;
+        }
+        parseXml(root) {
+            this.body = this._documentParser.parseDocumentFile(root);
+        }
+    }
+    class CustomXmlPart extends Part {
+        async load() {
+            this.rels = await this._package.loadRelationships(this.path);
+            const xmlText = await this._package.load(this.path);
+            if (xmlText) {
+                try {
+                    this.xmlDoc = this._package.parseXmlDocument(xmlText);
+                }
+                catch {
+                    this.xmlDoc = null;
+                }
+            }
+        }
+        setItemId(id) {
+            this.itemId = id ?? null;
+        }
+    }
+    class CustomXmlPropsPart extends Part {
+        parseXml(root) {
+            const attrs = Array.from(root.attributes ?? []);
+            const idAttr = attrs.find(a => a.localName === "itemID");
+            this.itemId = idAttr?.value ?? null;
+        }
+    }
     const topLevelRels = [
         { type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
         { type: RelationshipTypes.ExtendedProperties, target: "docProps/app.xml" },
         { type: RelationshipTypes.CoreProperties, target: "docProps/core.xml" },
         { type: RelationshipTypes.CustomProperties, target: "docProps/custom.xml" },
     ];
+    [
+        { type: RelationshipTypes.GlossaryDocument, target: "glossary/document.xml" },
+    ];
     class WordDocument {
         constructor() {
             this.parts = [];
             this.partsMap = {};
             this.contentTypes = [];
+            this.customXmlParts = [];
         }
         static async load(blob, parser, options) {
             var d = new WordDocument();
@@ -2367,11 +2426,37 @@
                 const r = d.rels.find(x => x.type === rel.type) ?? rel;
                 return d.loadRelationshipPart(r.target, r.type);
             }));
+            for (const part of d.customXmlParts) {
+                const propsRel = part.rels?.find(r => r.type === RelationshipTypes.CustomXmlProps);
+                if (!propsRel)
+                    continue;
+                const [partFolder] = splitPath(part.path);
+                const propsPath = resolvePath(propsRel.target, partFolder);
+                const propsPart = d.partsMap[propsPath];
+                if (propsPart?.itemId) {
+                    part.setItemId(propsPart.itemId);
+                }
+            }
             if (d.commentsPart) {
                 const extComments = d.commentsExtendedPart?.comments ?? [];
                 d.commentsPart.buildThreading(extComments);
             }
             return d;
+        }
+        findCustomXmlByStoreItemId(storeItemID) {
+            if (!storeItemID)
+                return null;
+            const norm = normalizeGuid(storeItemID);
+            for (const part of this.customXmlParts) {
+                if (!part.xmlDoc)
+                    continue;
+                if (normalizeGuid(part.itemId) === norm)
+                    return part;
+            }
+            return null;
+        }
+        get glossaryDocument() {
+            return this.glossaryDocumentPart?.body;
         }
         save(type = "blob") {
             return this._package.save(type);
@@ -2449,6 +2534,18 @@
                 case RelationshipTypes.DiagramDrawing:
                     part = new DiagramDrawingPart(this._package, path);
                     break;
+                case RelationshipTypes.GlossaryDocument:
+                    this.glossaryDocumentPart = part = new GlossaryDocumentPart(this._package, path, this._parser);
+                    break;
+                case RelationshipTypes.CustomXml: {
+                    const xmlPart = new CustomXmlPart(this._package, path);
+                    this.customXmlParts.push(xmlPart);
+                    part = xmlPart;
+                    break;
+                }
+                case RelationshipTypes.CustomXmlProps:
+                    part = new CustomXmlPropsPart(this._package, path);
+                    break;
             }
             if (part == null)
                 return Promise.resolve(null);
@@ -2518,6 +2615,11 @@
             const [folder] = splitPath(part.path);
             return rel ? resolvePath(rel.target, folder) : null;
         }
+    }
+    function normalizeGuid(s) {
+        if (!s)
+            return null;
+        return s.replace(/[{}]/g, '').toUpperCase();
     }
     function deobfuscate(data, guidKey) {
         const len = 16;
@@ -3034,7 +3136,12 @@
         borderColor: "black",
         highlight: "transparent"
     };
-    const supportedNamespaceURIs = [];
+    const supportedNamespaceURIs = [
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
+        "http://schemas.microsoft.com/office/word/2010/wordml",
+    ];
     function findAncestorByLocalName(start, localName) {
         let n = start ? start.parentNode : null;
         while (n && n.nodeType === 1) {
@@ -3525,7 +3632,21 @@
                 const alias = aliasEl ? globalXmlParser.attr(aliasEl, "val") : null;
                 const tag = tagEl ? globalXmlParser.attr(tagEl, "val") : null;
                 const control = this.parseSdtControl(sdtPr);
-                if (alias || tag || control) {
+                const dataBindingEl = globalXmlParser.element(sdtPr, "dataBinding");
+                let dataBinding = null;
+                if (dataBindingEl) {
+                    const xpath = globalXmlParser.attr(dataBindingEl, "xpath");
+                    if (xpath) {
+                        dataBinding = { xpath };
+                        const storeItemID = globalXmlParser.attr(dataBindingEl, "storeItemID");
+                        if (storeItemID)
+                            dataBinding.storeItemID = storeItemID;
+                        const prefixMappings = globalXmlParser.attr(dataBindingEl, "prefixMappings");
+                        if (prefixMappings)
+                            dataBinding.prefixMappings = prefixMappings;
+                    }
+                }
+                if (alias || tag || control || dataBinding) {
                     const wrapper = { type: DomType.Sdt, children };
                     if (alias)
                         wrapper.sdtAlias = alias;
@@ -3533,10 +3654,73 @@
                         wrapper.sdtTag = tag;
                     if (control)
                         wrapper.sdtControl = control;
+                    if (dataBinding)
+                        wrapper.dataBinding = dataBinding;
                     return [wrapper];
                 }
             }
             return children;
+        }
+        parseFfData(ffData) {
+            const result = {};
+            const textInput = globalXmlParser.element(ffData, "textInput");
+            if (textInput) {
+                result.formFieldType = 'text';
+                const defaultEl = globalXmlParser.element(textInput, "default");
+                if (defaultEl) {
+                    const v = globalXmlParser.attr(defaultEl, "val");
+                    if (v != null)
+                        result.defaultText = v;
+                }
+                const maxLengthEl = globalXmlParser.element(textInput, "maxLength");
+                if (maxLengthEl) {
+                    const v = globalXmlParser.intAttr(maxLengthEl, "val");
+                    if (v != null && Number.isFinite(v) && v > 0 && v <= 10000) {
+                        result.maxLength = v;
+                    }
+                }
+                return result;
+            }
+            const checkBox = globalXmlParser.element(ffData, "checkBox");
+            if (checkBox) {
+                result.formFieldType = 'checkbox';
+                const checkedEl = globalXmlParser.element(checkBox, "checked");
+                if (checkedEl) {
+                    const v = globalXmlParser.attr(checkedEl, "val");
+                    result.checked = v == null ? true : (v === "1" || v === "true");
+                }
+                else {
+                    const defaultEl = globalXmlParser.element(checkBox, "default");
+                    if (defaultEl) {
+                        const v = globalXmlParser.attr(defaultEl, "val");
+                        result.checked = v === "1" || v === "true";
+                    }
+                    else {
+                        result.checked = false;
+                    }
+                }
+                return result;
+            }
+            const ddList = globalXmlParser.element(ffData, "ddList");
+            if (ddList) {
+                result.formFieldType = 'dropdown';
+                const items = [];
+                for (const entry of globalXmlParser.elements(ddList, "listEntry")) {
+                    const v = globalXmlParser.attr(entry, "val");
+                    if (v != null)
+                        items.push(v);
+                }
+                result.ddItems = items;
+                const defaultEl = globalXmlParser.element(ddList, "default");
+                if (defaultEl) {
+                    const idx = globalXmlParser.intAttr(defaultEl, "val");
+                    if (idx != null && idx >= 0 && idx < items.length) {
+                        result.ddDefault = idx;
+                    }
+                }
+                return result;
+            }
+            return result;
         }
         parseSdtControl(sdtPr) {
             for (const el of globalXmlParser.elements(sdtPr)) {
@@ -3826,12 +4010,20 @@
                         break;
                     case "fldChar":
                         result.fieldRun = true;
-                        result.children.push({
+                        const charType = globalXmlParser.attr(c, "fldCharType");
+                        const fldChar = {
                             type: DomType.ComplexField,
-                            charType: globalXmlParser.attr(c, "fldCharType"),
+                            charType,
                             lock: globalXmlParser.boolAttr(c, "lock", false),
                             dirty: globalXmlParser.boolAttr(c, "dirty", false)
-                        });
+                        };
+                        if (charType === "begin") {
+                            const ffData = globalXmlParser.element(c, "ffData");
+                            if (ffData) {
+                                fldChar.ffData = this.parseFfData(ffData);
+                            }
+                        }
+                        result.children.push(fldChar);
                         break;
                     case "noBreakHyphen":
                         result.children.push({ type: DomType.NoBreakHyphen });
@@ -3885,6 +4077,12 @@
                     case "pict":
                         result.children.push(this.parseVmlPicture(c));
                         break;
+                    case "object": {
+                        const ole = this.parseOleObject(c);
+                        if (ole)
+                            result.children.push(ole);
+                        break;
+                    }
                     case "ruby":
                         result.children.push(this.parseRuby(c, result));
                         break;
@@ -3992,6 +4190,7 @@
                 else if (el.localName == "r") {
                     var run = this.parseRun(el);
                     run.type = DomType.MmlRun;
+                    this.stripMathAlignmentMarkers(run);
                     result.children.push(run);
                 }
                 else if (el.localName == propsTag) {
@@ -3999,6 +4198,18 @@
                 }
             }
             return result;
+        }
+        stripMathAlignmentMarkers(run) {
+            if (!run.children)
+                return;
+            for (const child of run.children) {
+                if (child.type === DomType.Text || child.type === DomType.DeletedText) {
+                    const t = child.text;
+                    if (t && t.indexOf('&') >= 0) {
+                        child.text = t.replace(/&/g, '');
+                    }
+                }
+            }
         }
         parseMathProperies(elem) {
             const result = {};
@@ -4068,6 +4279,19 @@
                 child && result.children.push(child);
             }
             return result;
+        }
+        parseOleObject(elem) {
+            for (const c of globalXmlParser.elements(elem)) {
+                if (c.localName !== "OLEObject")
+                    continue;
+                return {
+                    type: DomType.OleObject,
+                    progId: globalXmlParser.attr(c, "ProgID"),
+                    shapeId: globalXmlParser.attr(c, "ShapeID"),
+                    objectType: globalXmlParser.attr(c, "Type"),
+                };
+            }
+            return { type: DomType.OleObject };
         }
         checkAlternateContent(elem) {
             if (elem.localName != 'AlternateContent')
@@ -5451,19 +5675,33 @@
         }
         parseIndentation(node, style) {
             var firstLine = globalXmlParser.lengthAttr(node, "firstLine");
+            var firstLineChars = globalXmlParser.intAttr(node, "firstLineChars", null);
             var hanging = globalXmlParser.lengthAttr(node, "hanging");
+            var hangingChars = globalXmlParser.intAttr(node, "hangingChars", null);
             var left = globalXmlParser.lengthAttr(node, "left");
+            var leftChars = globalXmlParser.intAttr(node, "leftChars", null);
             var start = globalXmlParser.lengthAttr(node, "start");
+            var startChars = globalXmlParser.intAttr(node, "startChars", null);
             var right = globalXmlParser.lengthAttr(node, "right");
+            var rightChars = globalXmlParser.intAttr(node, "rightChars", null);
             var end = globalXmlParser.lengthAttr(node, "end");
+            var endChars = globalXmlParser.intAttr(node, "endChars", null);
             if (firstLine)
                 style["text-indent"] = firstLine;
+            if (firstLineChars != null)
+                style["text-indent"] = `${firstLineChars / 100}em`;
             if (hanging)
                 style["text-indent"] = `-${hanging}`;
+            if (hangingChars != null)
+                style["text-indent"] = `-${hangingChars / 100}em`;
             if (left || start)
                 style["margin-inline-start"] = left || start;
+            if (leftChars != null || startChars != null)
+                style["margin-inline-start"] = `${(leftChars ?? startChars) / 100}em`;
             if (right || end)
                 style["margin-inline-end"] = right || end;
+            if (rightChars != null || endChars != null)
+                style["margin-inline-end"] = `${(rightChars ?? endChars) / 100}em`;
         }
         parseSpacing(node, style) {
             var before = globalXmlParser.lengthAttr(node, "before");
@@ -5651,13 +5889,20 @@
             }
         }
         static valueOfBorder(c) {
-            var type = values.parseBorderType(globalXmlParser.attr(c, "val"));
+            const rawVal = globalXmlParser.attr(c, "val");
+            var type = values.parseBorderType(rawVal);
             if (type == "none")
                 return "none";
             var color = xmlUtil.colorAttr(c, "color");
             var size = globalXmlParser.lengthAttr(c, "sz", LengthUsage.Border);
             const resolvedColor = (color == null || color == "auto") ? autos.borderColor : color;
+            if (values.isArtBorder(rawVal)) {
+                return `2pt solid ${resolvedColor}`;
+            }
             return `${size} ${type} ${resolvedColor}`;
+        }
+        static isArtBorder(val) {
+            return !!val && values.ART_BORDER_VALS.has(val);
         }
         static themeRefOfBorder(c) {
             if (values.parseBorderType(globalXmlParser.attr(c, "val")) == "none")
@@ -5763,6 +6008,40 @@
             return className.trim();
         }
     }
+    values.ART_BORDER_VALS = new Set([
+        'apples', 'archedScallops', 'babyPants', 'babyRattle', 'balloons3Colors',
+        'balloonsHotAir', 'basicBlackDashes', 'basicBlackDots', 'basicBlackSquares',
+        'basicThinLines', 'basicWhiteDashes', 'basicWhiteDots', 'basicWhiteSquares',
+        'basicWideInline', 'basicWideMidline', 'basicWideOutline', 'bats', 'birds',
+        'birdsFlight', 'cabins', 'cakeSlice', 'candyCorn', 'celticKnotwork',
+        'certificateBanner', 'chainLink', 'champagneBottle', 'checkedBarBlack',
+        'checkedBarColor', 'checkered', 'christmasTree', 'circlesLines', 'circlesRectangles',
+        'classicalWave', 'clocks', 'compass', 'confetti', 'confettiGrays', 'confettiOutline',
+        'confettiStreamers', 'confettiWhite', 'cornerTriangles', 'couponCutoutDashes',
+        'couponCutoutDots', 'crazyMaze', 'creaturesButterfly', 'creaturesFish',
+        'creaturesInsects', 'creaturesLadyBug', 'crossStitch', 'cup', 'decoArch',
+        'decoArchColor', 'decoBlocks', 'diamondsGray', 'doubleD', 'doubleDiamonds',
+        'earth1', 'earth2', 'eclipsingSquares1', 'eclipsingSquares2', 'eggsBlack',
+        'fans', 'film', 'firecrackers', 'flowersBlockPrint', 'flowersDaisies',
+        'flowersModern1', 'flowersModern2', 'flowersPansy', 'flowersRedRose',
+        'flowersRoses', 'flowersTeacup', 'flowersTiny', 'gems', 'gingerbreadMan',
+        'gradient', 'handmade1', 'handmade2', 'heartBalloon', 'heartGray', 'hearts',
+        'heebieJeebies', 'holly', 'houseFunky', 'hypnotic', 'iceCreamCones',
+        'lightBulb', 'lightning1', 'lightning2', 'mapPins', 'mapleLeaf', 'mapleMuffins',
+        'marquee', 'marqueeToothed', 'moons', 'mosaic', 'musicNotes', 'northwest',
+        'ovals', 'packages', 'palmsBlack', 'palmsColor', 'paperClips', 'papyrus',
+        'partyFavor', 'partyGlass', 'pencils', 'people', 'peopleHats', 'peopleWaving',
+        'pinkFlowers', 'pumpkin1', 'pushPinNote1', 'pushPinNote2', 'pyramids',
+        'pyramidsAbove', 'quadrants', 'rings', 'safari', 'sawtooth', 'sawtoothGray',
+        'scaredCat', 'seattle', 'shadowedSquares', 'sharksTeeth', 'shorebirdTracks',
+        'skyrocket', 'snowflakeFancy', 'snowflakes', 'sombrero', 'southwest', 'stars',
+        'stars3d', 'starsBlack', 'starsShadowed', 'starsTop', 'sun', 'swirligig',
+        'tornPaper', 'tornPaperBlack', 'trees', 'triangleParty', 'triangles',
+        'tribal1', 'tribal2', 'tribal3', 'tribal4', 'tribal5', 'tribal6',
+        'twistedLines1', 'twistedLines2', 'vine', 'waveline', 'weavingAngles',
+        'weavingBraid', 'weavingRibbon', 'weavingStrips', 'whiteFlowers', 'woodwork',
+        'xIllusions', 'zanyTriangles', 'zigZag', 'zigZagStitch'
+    ]);
 
     const defaultTab = { pos: 0, leader: "none", style: "left" };
     const maxTabs = 50;
@@ -7951,6 +8230,17 @@
     }
 
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
+    function generateRenderSessionId() {
+        try {
+            const bytes = new Uint8Array(3);
+            if (typeof globalThis.crypto?.getRandomValues === 'function') {
+                globalThis.crypto.getRandomValues(bytes);
+                return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('').slice(0, 5);
+            }
+        }
+        catch { }
+        return Math.floor(Math.random() * 0xfffff).toString(16).padStart(5, '0');
+    }
     function isSafeHyperlinkHref(raw) {
         if (raw == null)
             return true;
@@ -7967,6 +8257,63 @@
         }
         catch {
             return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+        }
+    }
+    function isSafeCustomXmlXPath(xp) {
+        if (typeof xp !== 'string')
+            return false;
+        if (xp.length === 0 || xp.length > 2000)
+            return false;
+        if (/\b(document|window|eval|Function|require|import)\b/i.test(xp))
+            return false;
+        if (/[;{}]/.test(xp))
+            return false;
+        return /^[\w\s\-./:[\]()=*|,!<>@"'$+]+$/.test(xp);
+    }
+    function safeEvaluateXPath(hostDoc, xmlDoc, xpath) {
+        try {
+            if (hostDoc?.evaluate) {
+                const rootNs = xmlDoc?.documentElement?.namespaceURI ?? null;
+                const resolver = rootNs ? (_) => rootNs : null;
+                const FIRST_ORDERED_NODE_TYPE = 9;
+                const res = hostDoc.evaluate(xpath, xmlDoc, resolver, FIRST_ORDERED_NODE_TYPE, null);
+                const node = res?.singleNodeValue;
+                if (node == null)
+                    return '';
+                return node.textContent ?? '';
+            }
+        }
+        catch {
+        }
+        try {
+            const steps = xpath.split('/').filter(s => s.length > 0);
+            let current = xmlDoc?.documentElement;
+            if (!current)
+                return null;
+            const first = steps[0]?.replace(/\[.*\]$/, '').split(':').pop();
+            if (first && first === current.localName) {
+                steps.shift();
+            }
+            for (const step of steps) {
+                const localName = step.replace(/\[.*\]$/, '').split(':').pop();
+                if (!localName)
+                    return null;
+                let next = null;
+                for (let i = 0; i < current.childNodes.length; i++) {
+                    const c = current.childNodes[i];
+                    if (c.nodeType === 1 && c.localName === localName) {
+                        next = c;
+                        break;
+                    }
+                }
+                if (!next)
+                    return '';
+                current = next;
+            }
+            return current.textContent ?? '';
+        }
+        catch {
+            return null;
         }
     }
     function complexFieldCharType(elem) {
@@ -8086,6 +8433,7 @@
         constructor() {
             this.className = "docx";
             this.styleMap = {};
+            this.fontAltNames = new Map();
             this.currentPart = null;
             this.tableVerticalMerges = [];
             this.currentVerticalMerge = null;
@@ -8094,7 +8442,9 @@
             this.tableBandSizes = [];
             this.currentTableBandSizes = { col: 1, row: 1 };
             this.currentRowIsHeader = false;
+            this.currentSectProps = null;
             this._shapeIdCounter = 0;
+            this.renderSessionId = '';
             this.footnoteMap = {};
             this.endnoteMap = {};
             this.currentEndnoteIds = [];
@@ -8134,6 +8484,7 @@
             this.className = options.className;
             this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
             this.h = options.h ?? h;
+            this.renderSessionId = generateRenderSessionId();
             this.styleMap = null;
             this.tasks = [];
             this.commentAnchorElements = {};
@@ -8149,12 +8500,21 @@
             if (this.options.renderComments && this.useHighlight && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
             }
+            this.fontAltNames = new Map();
+            if (document.fontTablePart?.fonts) {
+                for (const f of document.fontTablePart.fonts) {
+                    if (f.name && f.altName) {
+                        this.fontAltNames.set(f.name, f.altName);
+                    }
+                }
+            }
             const result = [...this.renderDefaultStyle()];
             if (document.themePart) {
                 result.push(...this.renderTheme(document.themePart));
             }
             if (document.stylesPart != null) {
                 this.styleMap = this.processStyles(document.stylesPart.styles);
+                this.applyFontAltNamesToStyles(document.stylesPart.styles);
                 result.push(...this.renderStyles(document.stylesPart.styles));
             }
             if (document.numberingPart) {
@@ -8280,6 +8640,31 @@
                 style.cssName = this.processStyleName(style.id);
             }
             return stylesMap;
+        }
+        applyFontAltNamesToStyles(styles) {
+            if (this.fontAltNames.size === 0)
+                return;
+            for (const s of styles) {
+                for (const sub of (s.styles ?? [])) {
+                    if (sub.values)
+                        this.applyFontAltNames(sub.values);
+                }
+            }
+        }
+        applyFontAltNames(values) {
+            if (!values)
+                return;
+            const existing = values["font-family"];
+            if (!existing)
+                return;
+            const first = existing.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+            const alt = this.fontAltNames.get(first);
+            if (!alt)
+                return;
+            const encodedAlt = sanitizeFontFamily(alt);
+            if (existing.includes(encodedAlt))
+                return;
+            values["font-family"] = `${existing}, ${encodedAlt}`;
         }
         prodessNumberings(numberings) {
             for (let num of numberings.filter(n => n.pStyleName)) {
@@ -8451,10 +8836,12 @@
                 this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props, result.length, prevProps != props, pageElement);
                 for (const sect of pages[i]) {
                     var contentElement = this.createSectionContent(sect.sectProps);
+                    this.currentSectProps = sect.sectProps;
                     this.renderElements(sect.elements, contentElement);
                     pageElement.appendChild(contentElement);
                     props = sect.sectProps;
                 }
+                this.currentSectProps = null;
                 if (this.options.renderFootnotes) {
                     const notes = this.renderNotes(this.currentFootnoteIds, this.footnoteMap);
                     notes && pageElement.appendChild(notes);
@@ -8586,10 +8973,57 @@
             return result.filter(x => x.length > 0);
         }
         renderWrapper(children) {
-            const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+            const wrapperChildren = [...this.renderProtectionBadge(), ...children];
+            const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children: wrapperChildren });
             addSharedClass(wrapper, "wrapper");
             wrapper.setAttribute("role", "document");
+            this.applyDocumentPropsDataset(wrapper);
             return wrapper;
+        }
+        renderProtectionBadge() {
+            if (!this.options.showProtectionBadge)
+                return [];
+            const protection = this.document?.settingsPart?.settings?.documentProtection;
+            if (!protection)
+                return [];
+            const labels = {
+                readOnly: 'Protected document (read-only)',
+                trackedChanges: 'Protected document (tracked changes required)',
+                comments: 'Protected document (comments only)',
+                forms: 'Protected document (form fields only)',
+                none: 'Protected document',
+            };
+            const label = labels[protection.edit ?? 'none'] ?? 'Protected document';
+            const badge = this.h({ tagName: "div", className: `${this.className}-protected-badge`, children: [label] });
+            badge.setAttribute("role", "status");
+            if (protection.edit)
+                badge.dataset.protectionEdit = protection.edit;
+            if (protection.enforcement)
+                badge.dataset.protectionEnforced = "1";
+            return [badge];
+        }
+        applyDocumentPropsDataset(wrapper) {
+            if (!this.options.emitDocumentProps)
+                return;
+            const core = this.document?.corePropsPart?.props;
+            if (!core)
+                return;
+            if (core.title)
+                wrapper.dataset.docTitle = core.title;
+            if (core.subject)
+                wrapper.dataset.docSubject = core.subject;
+            if (core.creator)
+                wrapper.dataset.docAuthor = core.creator;
+            if (core.lastModifiedBy)
+                wrapper.dataset.docLastModifiedBy = core.lastModifiedBy;
+            if (core.description)
+                wrapper.dataset.docDescription = core.description;
+            if (core.keywords)
+                wrapper.dataset.docKeywords = core.keywords;
+            if (core.created)
+                wrapper.dataset.docCreated = core.created;
+            if (core.modified)
+                wrapper.dataset.docModified = core.modified;
         }
         renderWrapperWithSidebar(sectionElements) {
             const c = this.className;
@@ -8608,10 +9042,11 @@
             const wrapper = this.h({
                 tagName: "div",
                 className: `${c}-wrapper`,
-                children: [docContainer, this.sidebarContainer]
+                children: [...this.renderProtectionBadge(), docContainer, this.sidebarContainer]
             });
             wrapper.setAttribute("role", "document");
             addSharedClass(wrapper, "wrapper");
+            this.applyDocumentPropsDataset(wrapper);
             this.later(() => {
                 this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
             });
@@ -8794,6 +9229,39 @@ section.${c}>ol>li::before {
     line-height: 0;
     vertical-align: super;
     top: 0.35em;
+}
+/* OLE placeholder — legacy w:object embeds (Equation.3, Excel.Sheet.12,
+ * Package, ...) surface as a labelled inline span. Hard-coded label set
+ * lives in renderOleObject; the attribute selector here is safe because
+ * data-progid is only populated from that allowlist. */
+.${c}-ole-placeholder {
+    display: inline-block;
+    padding: 1px 6px;
+    margin: 0 1px;
+    border: 1px dashed #9aa0a6;
+    background: #f4f5f7;
+    color: #5f6368;
+    font-size: 0.85em;
+    font-style: italic;
+    border-radius: 2px;
+    white-space: nowrap;
+    vertical-align: baseline;
+}
+/* Protection badge — rendered only when the caller opts in via
+ * Options.showProtectionBadge and the DOCX carries w:documentProtection.
+ * The label is hard-coded (see renderProtectionBadge) so the CSS here is
+ * purely cosmetic and safe to emit unconditionally. */
+.${c}-protected-badge {
+    align-self: stretch;
+    margin: 0 0 12px 0;
+    padding: 6px 12px;
+    background: #fff6d6;
+    color: #5a4400;
+    border: 1px solid #e4c66f;
+    border-radius: 3px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 12px;
+    text-align: center;
 }
 `;
             if (this.options.renderComments) {
@@ -8995,6 +9463,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                         selector += ` ${subStyle.target}`;
                     if (defautStyles[style.target] == style)
                         selector = `.${this.className} ${style.target}, ` + selector;
+                    this.applyThemeColorSideband(subStyle.values);
                     styleText += this.styleToString(selector, subStyle.values);
                 }
             }
@@ -9094,6 +9563,8 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                     return this.renderVmlPicture(elem);
                 case DomType.VmlElement:
                     return this.renderVmlElement(elem);
+                case DomType.OleObject:
+                    return this.renderOleObject(elem);
                 case DomType.MmlMath:
                     return this.renderContainerNS(elem, ns.mathML, "math", { xmlns: ns.mathML });
                 case DomType.MmlMathParagraph:
@@ -9297,7 +9768,20 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                 }
                 j++;
             }
-            const wrapped = this.wrapFieldResult(rendered, parsed);
+            const beginRun = elems[group.beginIdx];
+            let ffData;
+            if (beginRun && beginRun.type === DomType.Run && beginRun.children) {
+                for (const c of beginRun.children) {
+                    if (c.type === DomType.ComplexField) {
+                        const fc = c;
+                        if (fc.charType === 'begin' && fc.ffData) {
+                            ffData = fc.ffData;
+                            break;
+                        }
+                    }
+                }
+            }
+            const wrapped = this.wrapFieldResult(rendered, parsed, ffData);
             if (unterminated) {
                 return [this.h({ tagName: '#comment', children: ['docxjs: unterminated field'] }), ...wrapped];
             }
@@ -9308,14 +9792,16 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             const children = this.renderElements(elem.children) ?? [];
             return this.wrapFieldResult(children, parsed);
         }
-        wrapFieldResult(children, parsed) {
-            if (!children || children.length === 0)
-                return children ?? [];
+        wrapFieldResult(children, parsed, ffData) {
             const code = parsed.code;
             if (code === 'HYPERLINK') {
+                if (!children || children.length === 0)
+                    return children ?? [];
                 return this.wrapHyperlinkFieldResult(children, parsed);
             }
             if (code === 'REF' || code === 'PAGEREF') {
+                if (!children || children.length === 0)
+                    return children ?? [];
                 const anchor = parsed.args[0] ?? '';
                 if (!anchor)
                     return children;
@@ -9327,7 +9813,72 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                 children.forEach(c => a.appendChild(c));
                 return [a];
             }
+            if (code === 'FORMTEXT') {
+                return this.renderLegacyFormTextField(children, ffData);
+            }
+            if (code === 'FORMCHECKBOX') {
+                return this.renderLegacyFormCheckboxField(ffData);
+            }
+            if (code === 'FORMDROPDOWN') {
+                return this.renderLegacyFormDropdownField(children, ffData);
+            }
+            if (!children || children.length === 0)
+                return children ?? [];
             return children;
+        }
+        renderLegacyFormTextField(children, ffData) {
+            const value = children
+                .map(n => (n instanceof Node ? (n.textContent ?? '') : String(n)))
+                .join('');
+            const input = this.h({ tagName: "input" });
+            input.setAttribute("type", "text");
+            input.setAttribute("disabled", "");
+            input.setAttribute("value", value);
+            if (ffData?.maxLength != null && Number.isFinite(ffData.maxLength) && ffData.maxLength > 0) {
+                input.setAttribute("maxlength", String(Math.min(10000, ffData.maxLength)));
+            }
+            input.dataset.field = 'FORMTEXT';
+            input.classList.add(`${this.className}-field-formtext`);
+            return [input];
+        }
+        renderLegacyFormCheckboxField(ffData) {
+            const box = this.h({ tagName: "input" });
+            box.setAttribute("type", "checkbox");
+            box.setAttribute("disabled", "");
+            if (ffData?.checked)
+                box.setAttribute("checked", "");
+            box.dataset.field = 'FORMCHECKBOX';
+            box.classList.add(`${this.className}-field-formcheckbox`);
+            return [box];
+        }
+        renderLegacyFormDropdownField(children, ffData) {
+            const select = this.h({ tagName: "select" });
+            select.setAttribute("disabled", "");
+            select.dataset.field = 'FORMDROPDOWN';
+            select.classList.add(`${this.className}-field-formdropdown`);
+            const items = ffData?.ddItems ?? [];
+            const selectedText = children
+                .map(n => (n instanceof Node ? (n.textContent ?? '') : String(n)))
+                .join('')
+                .trim();
+            items.forEach((item, idx) => {
+                const option = this.h({ tagName: "option" });
+                option.setAttribute("value", item);
+                option.textContent = item;
+                if ((ffData?.ddDefault != null && ffData.ddDefault === idx) ||
+                    (ffData?.ddDefault == null && item === selectedText)) {
+                    option.setAttribute("selected", "");
+                }
+                select.appendChild(option);
+            });
+            if (items.length === 0 && selectedText) {
+                const option = this.h({ tagName: "option" });
+                option.setAttribute("value", selectedText);
+                option.textContent = selectedText;
+                option.setAttribute("selected", "");
+                select.appendChild(option);
+            }
+            return [select];
         }
         wrapHyperlinkFieldResult(children, parsed) {
             const switchesLower = parsed.switches.map(s => s.toLowerCase());
@@ -9384,7 +9935,33 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             }
             const isHeadingTag = /^H[1-6]$/.test(result.tagName);
             addSharedClass(result, isHeadingTag ? "heading" : "paragraph");
+            if (!this.paragraphHasVisibleContent(result)) {
+                result.appendChild(this.h({ tagName: "br" }));
+            }
             return result;
+        }
+        paragraphHasVisibleContent(p) {
+            const atomic = new Set(["BR", "IMG", "SVG", "MATH", "VIDEO", "CANVAS", "IFRAME", "OBJECT", "EMBED", "INPUT"]);
+            const walk = (node) => {
+                if (node.nodeType === 3) {
+                    return (node.nodeValue ?? "").length > 0;
+                }
+                if (node.nodeType === 1) {
+                    const el = node;
+                    if (atomic.has(el.tagName))
+                        return true;
+                    for (const child of Array.from(el.childNodes)) {
+                        if (walk(child))
+                            return true;
+                    }
+                }
+                return false;
+            };
+            for (const child of Array.from(p.childNodes)) {
+                if (walk(child))
+                    return true;
+            }
+            return false;
         }
         applyParagraphBreakControls(elem) {
             const css = elem.cssStyle ?? (elem.cssStyle = {});
@@ -9539,8 +10116,15 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
         }
         renderSdt(elem) {
             const control = elem.sdtControl;
+            const boundText = this.resolveSdtDataBinding(elem);
             let children;
-            if (control?.type === "checkbox") {
+            if (boundText != null) {
+                const span = this.h({ tagName: "span" });
+                span.textContent = boundText;
+                span.dataset.sdtBound = "1";
+                children = [span];
+            }
+            else if (control?.type === "checkbox") {
                 const box = this.h({ tagName: "input" });
                 box.setAttribute("type", "checkbox");
                 box.setAttribute("disabled", "");
@@ -9594,6 +10178,39 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                 span.dataset.sdtType = control.type;
             }
             return span;
+        }
+        resolveSdtDataBinding(elem) {
+            const binding = elem.dataBinding;
+            if (!binding?.xpath)
+                return null;
+            if (!this.document)
+                return null;
+            if (!isSafeCustomXmlXPath(binding.xpath))
+                return null;
+            const storeItemID = binding.storeItemID;
+            const parts = [];
+            if (storeItemID) {
+                const part = this.document.findCustomXmlByStoreItemId?.(storeItemID);
+                if (part)
+                    parts.push(part);
+            }
+            else {
+                for (const p of this.document.customXmlParts ?? []) {
+                    if (p.xmlDoc)
+                        parts.push(p);
+                }
+            }
+            if (parts.length === 0)
+                return null;
+            const evalDoc = typeof document !== 'undefined' ? document : null;
+            for (const part of parts) {
+                if (!part.xmlDoc)
+                    continue;
+                const result = safeEvaluateXPath(evalDoc, part.xmlDoc, binding.xpath);
+                if (result != null && result !== '')
+                    return result;
+            }
+            return null;
         }
         renderCommentRangeStart(commentStart) {
             if (!this.options.renderComments) {
@@ -10012,7 +10629,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             return sup;
         }
         renderTab(elem) {
-            var tabSpan = this.h({ tagName: "span", children: ["\u2003"] });
+            var tabSpan = this.h({ tagName: "span", children: ["\u2003\u2003\u2003\u2003"] });
             if (this.options.experimental) {
                 tabSpan.className = this.tabStopClass();
                 var stops = findParent(elem, DomType.Paragraph)?.tabs;
@@ -10027,7 +10644,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             if (elem.fieldRun && !bypassFieldGuard)
                 return null;
             let children = this.renderElements(elem.children);
-            if (elem.verticalAlign) {
+            if (elem.verticalAlign === "sub" || elem.verticalAlign === "sup") {
                 children = [this.h({ tagName: elem.verticalAlign, children })];
             }
             const result = this.toHTML(elem, ns.html, "span", children);
@@ -10069,11 +10686,47 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                 summary: `${who}: ${changed}`,
             });
         }
+        availableContentWidthPt() {
+            const sect = this.currentSectProps;
+            if (!sect)
+                return null;
+            const pageW = sect.pageSize?.width;
+            const left = sect.pageMargins?.left;
+            const right = sect.pageMargins?.right;
+            if (!pageW || left == null || right == null)
+                return null;
+            if (!/pt\s*$/.test(pageW) || !/pt\s*$/.test(left) || !/pt\s*$/.test(right))
+                return null;
+            const w = parseFloat(pageW);
+            const l = parseFloat(left);
+            const r = parseFloat(right);
+            if (!Number.isFinite(w) || !Number.isFinite(l) || !Number.isFinite(r))
+                return null;
+            const avail = w - l - r;
+            return avail > 0 ? avail : null;
+        }
         renderTable(elem) {
+            const isNested = this.tableCellPositions.length > 0;
             this.tableCellPositions.push(this.currentCellPosition);
             this.tableVerticalMerges.push(this.currentVerticalMerge);
             this.currentVerticalMerge = {};
             this.currentCellPosition = { col: 0, row: 0 };
+            const availablePt = this.availableContentWidthPt();
+            if (elem.cssStyle && availablePt != null) {
+                const widthStr = elem.cssStyle["width"];
+                if (widthStr && /pt\s*$/.test(widthStr)) {
+                    const widthPt = parseFloat(widthStr);
+                    if (Number.isFinite(widthPt) && widthPt > availablePt) {
+                        elem.cssStyle["width"] = `${availablePt.toFixed(2)}pt`;
+                    }
+                }
+                if (elem.cssStyle["max-width"] == null) {
+                    elem.cssStyle["max-width"] = "100%";
+                }
+            }
+            else if (elem.cssStyle && elem.cssStyle["max-width"] == null) {
+                elem.cssStyle["max-width"] = "100%";
+            }
             this.tableBandSizes.push(this.currentTableBandSizes);
             this.currentTableBandSizes = {
                 col: Math.max(1, elem.colBandSize ?? 1),
@@ -10131,6 +10784,13 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             this.currentVerticalMerge = this.tableVerticalMerges.pop();
             this.currentCellPosition = this.tableCellPositions.pop();
             this.currentTableBandSizes = this.tableBandSizes.pop();
+            if (isNested && elem.cssStyle) {
+                const inherited = elem.cssStyle;
+                if (inherited["background-color"] == null)
+                    inherited["background-color"] = "transparent";
+                if (inherited["background-image"] == null)
+                    inherited["background-image"] = "none";
+            }
             const tableResult = this.toHTML(elem, ns.html, "table", children);
             addSharedClass(tableResult, "table");
             this.applyFirstRowHeaderA11y(tableResult, elem);
@@ -10357,6 +11017,21 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
         renderVmlPicture(elem) {
             return this.renderContainer(elem, "div");
         }
+        renderOleObject(elem) {
+            const progId = elem.progId;
+            const allowed = progId && Object.prototype.hasOwnProperty.call(HtmlRenderer.OLE_PROGID_LABELS, progId);
+            const label = allowed ? HtmlRenderer.OLE_PROGID_LABELS[progId] : 'Embedded object';
+            const span = this.h({
+                tagName: "span",
+                className: `${this.className}-ole-placeholder`,
+                children: [label],
+            });
+            span.dataset.progid = allowed ? progId : '';
+            span.setAttribute("title", `Embedded object: ${label}`);
+            span.setAttribute("role", "img");
+            span.setAttribute("aria-label", label);
+            return span;
+        }
         renderVmlElement(elem) {
             var container = this.h({ ns: ns.svg, tagName: "svg", style: elem.cssStyleText });
             const result = this.renderVmlChildElement(elem);
@@ -10553,7 +11228,9 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             return styleName && this.styleMap?.[styleName];
         }
         numberingClass(id, lvl) {
-            return `${this.className}-num-${id}-${lvl}`;
+            return this.renderSessionId
+                ? `${this.className}-num-${id}-${lvl}-${this.renderSessionId}`
+                : `${this.className}-num-${id}-${lvl}`;
         }
         tabStopClass() {
             return `${this.className}-tab-stop`;
@@ -10570,7 +11247,9 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             return result + "}\r\n";
         }
         numberingCounter(id, lvl) {
-            return `${this.className}-num-${id}-${lvl}`;
+            return this.renderSessionId
+                ? `${this.className}-num-${id}-${lvl}-${this.renderSessionId}`
+                : `${this.className}-num-${id}-${lvl}`;
         }
         levelTextToContent(text, suff, id, numformat, isLgl = false) {
             const suffMap = {
@@ -10799,6 +11478,24 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
         }
     }
     HtmlRenderer.CHANGE_PALETTE_SIZE = 8;
+    HtmlRenderer.OLE_PROGID_LABELS = {
+        'Equation.3': 'Equation',
+        'Equation.2': 'Equation',
+        'Excel.Sheet.12': 'Excel spreadsheet',
+        'Excel.Sheet.8': 'Excel spreadsheet',
+        'Excel.SheetBinaryMacroEnabled.12': 'Excel spreadsheet',
+        'Excel.SheetMacroEnabled.12': 'Excel spreadsheet',
+        'Excel.Chart.8': 'Excel chart',
+        'PowerPoint.Show.12': 'PowerPoint slide',
+        'PowerPoint.Show.8': 'PowerPoint slide',
+        'Word.Document.12': 'Word document',
+        'Word.Document.8': 'Word document',
+        'Package': 'Embedded file',
+        'AcroExch.Document': 'PDF document',
+        'AcroExch.Document.DC': 'PDF document',
+        'Visio.Drawing.15': 'Visio drawing',
+        'Visio.Drawing.11': 'Visio drawing',
+    };
     function findParent(elem, type) {
         var parent = elem.parent;
         while (parent != null && parent.type != type)
@@ -11302,8 +11999,10 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
         useBase64URL: false,
         renderChanges: false,
         renderComments: false,
+        showProtectionBadge: false,
         experimentalPageBreaks: false,
         responsive: false,
+        emitDocumentProps: false,
         comments: {
             sidebar: true,
             highlight: true,
@@ -11360,6 +12059,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
     exports.defaultOptions = defaultOptions;
     exports.escapeCssStringContent = escapeCssStringContent;
     exports.isSafeCssIdent = isSafeCssIdent;
+    exports.isSafeCustomXmlXPath = isSafeCustomXmlXPath;
     exports.isSafeHyperlinkHref = isSafeHyperlinkHref;
     exports.keyBy = keyBy;
     exports.layoutTreemap = layoutTreemap;
@@ -11369,6 +12069,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
     exports.renderAsync = renderAsync;
     exports.renderDocument = renderDocument;
     exports.renderThumbnails = renderThumbnails;
+    exports.safeEvaluateXPath = safeEvaluateXPath;
     exports.sanitizeCssColor = sanitizeCssColor;
     exports.sanitizeFontFamily = sanitizeFontFamily;
     exports.sanitizeVmlColor = sanitizeVmlColor;
