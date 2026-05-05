@@ -5701,6 +5701,7 @@
                 case "end":
                 case "right": return "right";
                 case "both": return "justify";
+                case "distribute": return "justify";
             }
             return type;
         }

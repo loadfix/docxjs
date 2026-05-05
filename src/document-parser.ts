@@ -3481,6 +3481,14 @@ class values {
 	static valueOfJc(c: Element) {
 		var type = xml.attr(c, "val");
 
+		// Map Word justification tokens (w:jc/@w:val) onto CSS text-align
+		// values. "both" and "distribute" both render as full
+		// justification: "both" justifies every line except the last, and
+		// "distribute" additionally justifies the final line by expanding
+		// inter-character spacing — CSS has no native "distribute"
+		// keyword, so "justify" is the closest renderable approximation.
+		// "start" and "end" collapse to physical "left"/"right" for
+		// backward compatibility with existing render-test snapshots.
 		switch (type) {
 			case "start":
 			case "left": return "left";
@@ -3488,6 +3496,7 @@ class values {
 			case "end":
 			case "right": return "right";
 			case "both": return "justify";
+			case "distribute": return "justify";
 		}
 
 		return type;
