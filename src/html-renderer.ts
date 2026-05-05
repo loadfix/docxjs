@@ -37,6 +37,7 @@ import { ChartExPart } from './charts/chartex-part';
 import { DiagramLayoutPart } from './smartart/smartart-parts';
 import { renderChart as renderChartSvg, renderSunburst as renderSunburstSvg, renderTreemap as renderTreemapSvg, renderWaterfall as renderWaterfallSvg, renderFunnel as renderFunnelSvg, renderHistogram as renderHistogramSvg, scheduleLegendOverflowAdjust } from './charts/render';
 import { parseThemeColorReference, resolveColour } from './drawing/theme';
+import { addSharedClass } from './shared-classes';
 
 // URL schemes safe to emit as the `href` of a rendered hyperlink in a
 // read-only document viewer. Anything outside this list (most importantly
@@ -691,6 +692,11 @@ export class HtmlRenderer {
 
 		const section = this.h({ tagName: "section", className, style }) as HTMLElement;
 
+		// Cross-format shared class (see shared-classes.ts). A DOCX page,
+		// a PPTX slide, and an XLSX sheet all carry `.oox-page` so a
+		// manifest can select "a rendered 'page' of any format" uniformly.
+		addSharedClass(section, "page");
+
 		// Project page orientation onto a data-* hook so corpus selectors
 		// and consumer CSS can style landscape pages. The orient value on
 		// <w:pgSz> is DOCX-derived text; allowlist it against the two
@@ -1017,7 +1023,15 @@ export class HtmlRenderer {
 	}
 
 	renderWrapper(children: HTMLElement[]) {
-		return this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+		const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children }) as HTMLElement;
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(wrapper, "wrapper");
+		// Accessibility: mark the docx-wrapper as a document landmark so
+		// assistive tech treats it as a coherent reading region. Matches
+		// Word's own "this is a document body" semantics; harmless for
+		// sighted users and free for screen-reader users.
+		wrapper.setAttribute("role", "document");
+		return wrapper;
 	}
 
 	renderWrapperWithSidebar(sectionElements: HTMLElement[]) {
@@ -1045,6 +1059,11 @@ export class HtmlRenderer {
 			className: `${c}-wrapper`,
 			children: [docContainer, this.sidebarContainer]
 		}) as HTMLElement;
+		// Same a11y landmark as the non-sidebar wrapper above.
+		wrapper.setAttribute("role", "document");
+
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(wrapper, "wrapper");
 
 		this.later(() => {
 			this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
@@ -2213,6 +2232,12 @@ section.${c}>ol>li::before {
 			result.dataset.paraId = elem.paraId;
 		}
 
+		// Cross-format shared class so manifest selectors can target "any
+		// paragraph, regardless of renderer" via `.oox-paragraph` (or
+		// `.oox-heading` when the tagName substitution produced an h1..h6).
+		const isHeadingTag = /^H[1-6]$/.test(result.tagName);
+		addSharedClass(result, isHeadingTag ? "heading" : "paragraph");
+
 		return result;
 	}
 
@@ -2722,6 +2747,9 @@ section.${c}>ol>li::before {
 			}));
 		}
 
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(result, "image");
+
 		return result;
 	}
 
@@ -3135,6 +3163,9 @@ section.${c}>ol>li::before {
 
 		this.applyFormattingRevision(result, elem);
 
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(result, "run");
+
 		return result;
 	}
 
@@ -3244,7 +3275,66 @@ section.${c}>ol>li::before {
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
 		this.currentTableBandSizes = this.tableBandSizes.pop();
-		return this.toHTML(elem, ns.html, "table", children);
+		const tableResult = this.toHTML(elem, ns.html, "table", children);
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(tableResult, "table");
+		// Accessibility: when tblLook signals a styled first row
+		// (className carries `first-row`) and no explicit <w:tblHeader/>
+		// flagged any row into <thead>, treat the first body row as a
+		// visual header for screen-reader purposes. Promote its single
+		// full-width cell (the common "banner header" shape) to
+		// scope="colgroup"; promote narrower first-row cells to
+		// scope="col". Leaves non-first-row cells and explicit <thead>
+		// rows alone.
+		this.applyFirstRowHeaderA11y(tableResult, elem);
+		return tableResult;
+	}
+
+	// Promote first-row data cells to carry `scope="col"`/`scope="colgroup"`
+	// when the table's tblLook marks the first row as styled (`first-row`
+	// class). This gives screen readers a column-header hook for tables
+	// that Word treats as "header via visual styling" rather than the more
+	// formal <w:tblHeader/> row flag (which we already route into <thead>
+	// with <th scope="col">). Non-destructive: only sets an attribute.
+	private applyFirstRowHeaderA11y(table: HTMLElement, elem: WmlTable) {
+		const hasFirstRowStyle = elem.className?.split(/\s+/).includes("first-row");
+		if (!hasFirstRowStyle) return;
+
+		// If <thead> is already populated we're in the tblHeader path; the
+		// cells there already got scope="col" in renderTableCell. Nothing
+		// to do — avoid double-marking and stay out of the way.
+		const thead = table.querySelector(":scope > thead");
+		if (thead && thead.querySelector("th, td")) return;
+
+		const tbody = table.querySelector(":scope > tbody") ?? table;
+		const firstRow = tbody.querySelector(":scope > tr");
+		if (!firstRow) return;
+
+		const cells = Array.from(firstRow.querySelectorAll(":scope > td, :scope > th"))
+			.filter(c => (c as HTMLElement).style.display !== "none");
+		if (cells.length === 0) return;
+
+		// Compute the total column count: the grid's <col> count if
+		// present, else the sum of this row's colspans (with vertically
+		// -merged-hidden cells already filtered out above).
+		const gridCols = table.querySelectorAll(":scope > colgroup > col").length
+			|| cells.reduce((n, c) => n + ((c as HTMLTableCellElement).colSpan || 1), 0);
+
+		// Single cell spans the whole row: banner header -> colgroup.
+		if (cells.length === 1) {
+			const only = cells[0] as HTMLTableCellElement;
+			if ((only.colSpan || 1) >= gridCols) {
+				only.setAttribute("scope", "colgroup");
+			} else {
+				only.setAttribute("scope", "col");
+			}
+			return;
+		}
+
+		// Multiple cells in the first row: each is a column header.
+		for (const cell of cells) {
+			(cell as HTMLTableCellElement).setAttribute("scope", "col");
+		}
 	}
 
 	renderTableColumns(columns: WmlTableColumn[]) {
@@ -3350,6 +3440,9 @@ section.${c}>ol>li::before {
 		}
 		this.applyFormattingRevision(tr, elem);
 
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(tr, "table-row");
+
 		return tr;
 	}
 
@@ -3447,6 +3540,9 @@ section.${c}>ol>li::before {
 		if (diagTlBr || diagTrBl) {
 			this.applyDiagonalBorders(result as HTMLTableCellElement, diagTlBr, diagTrBl);
 		}
+
+		// Cross-format shared class (see shared-classes.ts).
+		addSharedClass(result, "table-cell");
 
 		return result;
 	}

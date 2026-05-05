@@ -7921,6 +7921,23 @@
         return svg;
     }
 
+    const OOX_CLASSES = {
+        "wrapper": "oox-wrapper",
+        "page": "oox-page",
+        "paragraph": "oox-paragraph",
+        "run": "oox-run",
+        "heading": "oox-heading",
+        "table": "oox-table",
+        "table-row": "oox-table-row",
+        "table-cell": "oox-table-cell",
+        "image": "oox-image",
+    };
+    function addSharedClass(el, concept) {
+        if (!el)
+            return;
+        el.classList.add(OOX_CLASSES[concept]);
+    }
+
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
     function isSafeHyperlinkHref(raw) {
         if (raw == null)
@@ -8328,6 +8345,7 @@
                 }
             }
             const section = this.h({ tagName: "section", className, style });
+            addSharedClass(section, "page");
             const orient = props?.pageSize?.orientation;
             if (typeof orient === "string" && /^(landscape|portrait)$/.test(orient)) {
                 section.setAttribute("data-orientation", orient);
@@ -8549,7 +8567,10 @@
             return result.filter(x => x.length > 0);
         }
         renderWrapper(children) {
-            return this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+            const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+            addSharedClass(wrapper, "wrapper");
+            wrapper.setAttribute("role", "document");
+            return wrapper;
         }
         renderWrapperWithSidebar(sectionElements) {
             const c = this.className;
@@ -8570,6 +8591,8 @@
                 className: `${c}-wrapper`,
                 children: [docContainer, this.sidebarContainer]
             });
+            wrapper.setAttribute("role", "document");
+            addSharedClass(wrapper, "wrapper");
             this.later(() => {
                 this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
             });
@@ -9323,6 +9346,8 @@ section.${c}>ol>li::before {
             if (elem.paraId) {
                 result.dataset.paraId = elem.paraId;
             }
+            const isHeadingTag = /^H[1-6]$/.test(result.tagName);
+            addSharedClass(result, isHeadingTag ? "heading" : "paragraph");
             return result;
         }
         applyParagraphBreakControls(elem) {
@@ -9666,6 +9691,7 @@ section.${c}>ol>li::before {
                     result.src = x;
                 }));
             }
+            addSharedClass(result, "image");
             return result;
         }
         renderChart(elem) {
@@ -9952,6 +9978,7 @@ section.${c}>ol>li::before {
             if (elem.id)
                 result.id = elem.id;
             this.applyFormattingRevision(result, elem);
+            addSharedClass(result, "run");
             return result;
         }
         applyFormattingRevision(node, elem) {
@@ -10038,7 +10065,41 @@ section.${c}>ol>li::before {
             this.currentVerticalMerge = this.tableVerticalMerges.pop();
             this.currentCellPosition = this.tableCellPositions.pop();
             this.currentTableBandSizes = this.tableBandSizes.pop();
-            return this.toHTML(elem, ns.html, "table", children);
+            const tableResult = this.toHTML(elem, ns.html, "table", children);
+            addSharedClass(tableResult, "table");
+            this.applyFirstRowHeaderA11y(tableResult, elem);
+            return tableResult;
+        }
+        applyFirstRowHeaderA11y(table, elem) {
+            const hasFirstRowStyle = elem.className?.split(/\s+/).includes("first-row");
+            if (!hasFirstRowStyle)
+                return;
+            const thead = table.querySelector(":scope > thead");
+            if (thead && thead.querySelector("th, td"))
+                return;
+            const tbody = table.querySelector(":scope > tbody") ?? table;
+            const firstRow = tbody.querySelector(":scope > tr");
+            if (!firstRow)
+                return;
+            const cells = Array.from(firstRow.querySelectorAll(":scope > td, :scope > th"))
+                .filter(c => c.style.display !== "none");
+            if (cells.length === 0)
+                return;
+            const gridCols = table.querySelectorAll(":scope > colgroup > col").length
+                || cells.reduce((n, c) => n + (c.colSpan || 1), 0);
+            if (cells.length === 1) {
+                const only = cells[0];
+                if ((only.colSpan || 1) >= gridCols) {
+                    only.setAttribute("scope", "colgroup");
+                }
+                else {
+                    only.setAttribute("scope", "col");
+                }
+                return;
+            }
+            for (const cell of cells) {
+                cell.setAttribute("scope", "col");
+            }
         }
         renderTableColumns(columns) {
             const children = columns.map(x => this.h({ tagName: "col", style: { width: x.width } }));
@@ -10107,6 +10168,7 @@ section.${c}>ol>li::before {
                 this.applyRowRevision(tr, elem);
             }
             this.applyFormattingRevision(tr, elem);
+            addSharedClass(tr, "table-row");
             return tr;
         }
         applyRowRevision(tr, elem) {
@@ -10173,6 +10235,7 @@ section.${c}>ol>li::before {
             if (diagTlBr || diagTrBl) {
                 this.applyDiagonalBorders(result, diagTlBr, diagTrBl);
             }
+            addSharedClass(result, "table-cell");
             return result;
         }
         parseBorderStroke(border) {

@@ -30,7 +30,25 @@ test.describe('Render document', () => {
                 // @ts-ignore — `docx` is exposed as a UMD global by dist/docx-preview.js
                 await docx.renderAsync(docBlob, div);
 
-                const format = (text) => text.replace(/\t+|\s+/ig, ' ').replace(/></ig, '>\n<');
+                // Strip the cross-format `oox-*` shared classes before
+                // comparing to the golden HTML. Those classes are emitted
+                // in addition to the format-specific `docx_*` / `docx-*`
+                // classes (W9-F shared-CSS consistency work); the goldens
+                // predate them and remain the source of truth for the
+                // format-specific surface. A dedicated spec
+                // (shared-classes.spec.js) asserts the shared classes are
+                // present.
+                const stripOox = (html) => html
+                    // Drop any `oox-*` token (and the preceding space if it
+                    // was joining other classes in the same class= value).
+                    .replace(/\s*\boox-[\w-]+\b/g, '')
+                    // After strip, a lone `class=""` may be left on spans /
+                    // <p>s whose only class was the shared one. Remove the
+                    // attribute (and the preceding space) so the golden
+                    // HTML — which never had a class attribute there —
+                    // still matches.
+                    .replace(/\s+class=""/g, '');
+                const format = (text) => stripOox(text).replace(/\t+|\s+/ig, ' ').replace(/></ig, '>\n<');
                 const actual = format(div.innerHTML);
                 const expected = format(resultText);
 
