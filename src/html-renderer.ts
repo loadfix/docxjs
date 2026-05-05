@@ -1621,6 +1621,9 @@ section.${c}>ol>li::before {
 				const id = notes[i]?.id;
 				if (node && typeof (node as HTMLElement).setAttribute === 'function' && id) {
 					(node as HTMLElement).setAttribute('data-footnote-id', id);
+					// Unprefixed alias mirrors renderFootnoteReference —
+					// see that method for the rationale.
+					(node as HTMLElement).setAttribute('data-footnote', '');
 				}
 			}
 			return this.h({ tagName: "ol", children: renderedChildren });
@@ -2517,6 +2520,11 @@ section.${c}>ol>li::before {
 		if (this.useSidebar) {
 			const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` }) as HTMLElement;
 			anchor.dataset.commentId = commentStart.id;
+			// Unprefixed alias so the OOXML conformance corpus selector
+			// (`[data-comment]`) finds the hook. Empty-string value — no
+			// DOCX-derived content flows into this attribute, so it
+			// adds no new sink (see CLAUDE.md security constraints).
+			anchor.dataset.comment = '';
 
 			if (!this.commentAnchorElements[commentStart.id]) {
 				this.commentAnchorElements[commentStart.id] = [];
@@ -2561,6 +2569,9 @@ section.${c}>ol>li::before {
 		if (this.useSidebar) {
 			const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-end` }) as HTMLElement;
 			anchor.dataset.commentId = commentEnd.id;
+			// Unprefixed alias mirrors renderCommentRangeStart — see that
+			// method for the rationale.
+			anchor.dataset.comment = '';
 
 			if (this.useHighlight) {
 				const rng = this.commentMap[commentEnd.id];
@@ -3030,6 +3041,11 @@ section.${c}>ol>li::before {
 		// browser attribute-encodes. Never interpolate it into a class or
 		// CSS selector (see CLAUDE.md security constraints).
 		if (elem.id) sup.dataset.footnoteId = elem.id;
+		// Unprefixed alias so the OOXML conformance corpus selector
+		// (`[data-footnote]`) finds the hook. Empty-string value — no
+		// DOCX-derived content flows into this attribute, so it adds
+		// no new sink (see CLAUDE.md security constraints).
+		sup.dataset.footnote = '';
 		return sup;
 	}
 
