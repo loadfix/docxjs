@@ -1,3 +1,52 @@
+# Audit findings 2026-05-05
+
+A project audit was completed 2026-05-05. The following ten items
+capture the highest-leverage findings. They are ordered by payoff, not
+by effort.
+
+1. **Close the 43-gap conformance delta in one wave.** Current state is
+   263 / 306 passing. 40 of the 43 failures cluster into four missing
+   features:
+   - `table-style-builtin--*` × 15 — no built-in table-style class
+     lookup.
+   - `footnote-numbering-format--*` × 10 — non-decimal `w:numFmt` on
+     `footnotePr` is dropped.
+   - `paragraph-spacing--*` × 9 — the `w:spacing` before/after matrix is
+     not fully routed to the computed style.
+   - `vertical-alignment--{section,cell}--*` × 6 — `w:vAlign` dropped.
+   Plus 3 singleton regressions in `bold-text` / `italic-text` /
+   `underline-text` (likely a selector-specificity fix). All four
+   clusters land in `src/document-parser.ts` as wire-through patches.
+2. **Refresh 11 render-test golden files.** Listed in CHANGELOG under
+   "Known"; the `tests/render-test/<feature>/result.html` files have
+   drifted. Each diff is either "accept new behaviour" or "file bug".
+   Without fresh goldens the tests are dead weight.
+3. **Backfill CHANGELOG.md for waves 1–8.** Commits `cce5dc9` through
+   `26c54dd` carry the bulk of the fork-over-upstream value but have no
+   CHANGELOG entries. Only 0.4.0 is documented.
+4. **Consider a 1.0 release that promotes `experimentalPageBreaks` off
+   the flag.** The two upstream blockers (header/footer repeat, table
+   row splits) have shipped; `experimentalPageBreaks` is the #1
+   fork-vs-upstream selling point. A 1.0 release could flip the default
+   and give consumers a stable pin point.
+5. **Close GitHub issue #34** — footnote-per-page redistribution.
+6. **Close GitHub issue #36** — pagination fidelity drift (median +18 %,
+   3 pages lost on a 16-page doc).
+7. **Prune stale local fix branches.**
+   `fix/comment-footnote-data-hooks`, `fix/continuous-footnote-numbering`,
+   `fix/pbdr-rendering`, `fix/landscape-and-header-row-hooks`,
+   `chore/overnight-n2-conformance-todo` — all superseded by the
+   W1-F / W9-A / W9-D / W9-E / W9-F merges. Delete.
+8. **Bound `jszip` version.** Currently `jszip >=3.0.0` (unbounded
+   upper). Bound to `^3` to prevent hypothetical 4.x breakage.
+9. **Address 28 TypeScript `any` usages.** Not an epidemic but
+   concentrated in `html-renderer.ts` (11) and `document-parser.ts` (6).
+   Audit and tighten where feasible.
+10. **Tidy 43 `test-results/` dirs plus `playwright-report-interop/`.**
+    Local clutter, gitignored but worth a periodic sweep.
+
+---
+
 # Upstream issue triage
 
 Deep review of all 51 open issues + 4 open PRs on the upstream source repo
