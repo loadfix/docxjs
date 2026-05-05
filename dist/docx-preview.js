@@ -5076,7 +5076,7 @@
                         row.className = values.classNameOfCnfStyle(c);
                         break;
                     case "tblHeader":
-                        row.isHeader = globalXmlParser.boolAttr(c, "val");
+                        row.isHeader = globalXmlParser.boolAttr(c, "val", true);
                         break;
                     case "cantSplit":
                         row.cantSplit = globalXmlParser.boolAttr(c, "val", true);
@@ -5643,7 +5643,8 @@
                 return "none";
             var color = xmlUtil.colorAttr(c, "color");
             var size = globalXmlParser.lengthAttr(c, "sz", LengthUsage.Border);
-            return `${size} ${type} ${color == "auto" ? autos.borderColor : color}`;
+            const resolvedColor = (color == null || color == "auto") ? autos.borderColor : color;
+            return `${size} ${type} ${resolvedColor}`;
         }
         static themeRefOfBorder(c) {
             if (values.parseBorderType(globalXmlParser.attr(c, "val")) == "none")
@@ -8325,7 +8326,16 @@
                     }
                 }
             }
-            return this.h({ tagName: "section", className, style });
+            const el = this.h({ tagName: "section", className, style });
+            if (props?.pageSize) {
+                const orientation = props.pageSize.orientation === "landscape"
+                    ? "landscape"
+                    : "portrait";
+                el.dataset.pageOrientation = orientation;
+                el.dataset.orientation = orientation;
+                el.classList.add(`page-${orientation}`);
+            }
+            return el;
         }
         borderToCss(border) {
             if (!border || !border.type || border.type === "none" || border.type === "nil") {
@@ -9257,6 +9267,9 @@ section.${c}>ol>li::before {
                     return children;
                 const a = this.h({ tagName: "a" });
                 a.setAttribute('href', '#' + anchor);
+                a.dataset.field = code;
+                a.classList.add(`${this.className}-field-${code.toLowerCase()}`);
+                a.classList.add('field-ref');
                 children.forEach(c => a.appendChild(c));
                 return [a];
             }
@@ -9527,8 +9540,15 @@ section.${c}>ol>li::before {
             return span;
         }
         renderCommentRangeStart(commentStart) {
-            if (!this.options.renderComments)
-                return null;
+            if (!this.options.renderComments) {
+                const anchor = this.h({
+                    tagName: "span",
+                    className: `${this.className}-comment-anchor-start comment-reference`,
+                });
+                if (commentStart.id)
+                    anchor.dataset.comment = commentStart.id;
+                return anchor;
+            }
             if (this.useSidebar) {
                 const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` });
                 anchor.dataset.commentId = commentStart.id;
@@ -9579,15 +9599,24 @@ section.${c}>ol>li::before {
             return result;
         }
         renderCommentReference(commentRef) {
-            if (!this.options.renderComments)
-                return null;
+            if (!this.options.renderComments) {
+                const anchor = this.h({
+                    tagName: "sup",
+                    className: `${this.className}-comment-ref comment-reference`,
+                });
+                if (commentRef.id)
+                    anchor.dataset.comment = commentRef.id;
+                return anchor;
+            }
             if (this.useSidebar) {
                 return this.h({ tagName: "#comment", children: [`comment ref #${commentRef.id}`] });
             }
             var comment = this.document.commentsPart?.commentMap[commentRef.id];
             if (!comment)
                 return null;
-            const commentRefEl = this.h({ tagName: "span", className: `${this.className}-comment-ref`, children: ['💬'] });
+            const commentRefEl = this.h({ tagName: "span", className: `${this.className}-comment-ref comment-reference`, children: ['💬'] });
+            if (commentRef.id)
+                commentRefEl.dataset.comment = commentRef.id;
             const commentsContainerEl = this.h({
                 tagName: "div", className: `${this.className}-comment-popover`, children: [
                     this.h({ tagName: 'div', className: `${this.className}-comment-author`, children: [comment.author] }),
@@ -9764,7 +9793,17 @@ section.${c}>ol>li::before {
                 : null;
         }
         renderBreak(elem) {
-            return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
+            if (elem.break == "textWrapping") {
+                return this.h({ tagName: "br" });
+            }
+            if (elem.break == "page") {
+                const br = this.h({ tagName: "br" });
+                br.classList.add(`${this.className}-page-break`);
+                br.classList.add("page-break");
+                br.dataset.pageBreak = "";
+                return br;
+            }
+            return null;
         }
         renderInserted(elem) {
             if (this.showChanges && this.options.changes?.showInsertions !== false) {
@@ -9890,11 +9929,13 @@ section.${c}>ol>li::before {
             this.footnoteRefCount++;
             const sup = this.h({
                 tagName: "sup",
-                className: `${this.className}-footnote-ref`,
+                className: `${this.className}-footnote-ref footnote-ref footnote`,
                 children: [`${this.footnoteRefCount}`]
             });
-            if (elem.id)
+            if (elem.id) {
                 sup.dataset.footnoteId = elem.id;
+                sup.dataset.footnote = elem.id;
+            }
             return sup;
         }
         renderEndnoteReference(elem) {

@@ -689,7 +689,18 @@ export class HtmlRenderer {
 			}
 		}
 
-		return this.h({ tagName: "section", className, style }) as HTMLElement;
+		const el = this.h({ tagName: "section", className, style }) as HTMLElement;
+		// Orientation marker — see orientation resolution above. Only stamp
+		// when pageSize is known (otherwise we'd be lying about the default).
+		if (props?.pageSize) {
+			const orientation = props.pageSize.orientation === "landscape"
+				? "landscape"
+				: "portrait";
+			el.dataset.pageOrientation = orientation;
+			el.dataset.orientation = orientation;
+			el.classList.add(`page-${orientation}`);
+		}
+		return el;
 	}
 
 	/**
@@ -2089,6 +2100,13 @@ section.${c}>ol>li::before {
 			if (!anchor) return children;
 			const a = this.h({ tagName: "a" }) as HTMLAnchorElement;
 			a.setAttribute('href', '#' + anchor);
+			// Queryable hook for conformance selectors
+			// (`[data-field='REF']` / `.field-ref`). `code` is one of the
+			// handful of recognised field-code strings enumerated above, not
+			// attacker-controlled — safe to write directly.
+			a.dataset.field = code;
+			a.classList.add(`${this.className}-field-${code.toLowerCase()}`);
+			a.classList.add('field-ref');
 			children.forEach(c => a.appendChild(c));
 			return [a];
 		}
@@ -2511,8 +2529,19 @@ section.${c}>ol>li::before {
 	}
 	
 	renderCommentRangeStart(commentStart: WmlCommentRangeStart) {
-		if (!this.options.renderComments)
-			return null;
+		if (!this.options.renderComments) {
+			// Even when full comment rendering is off, emit a minimal zero-
+			// width marker so conformance harnesses / downstream consumers
+			// can locate the commented range. The element is empty (no
+			// symbol) — renderComments=true paints the sidebar, this branch
+			// just leaves a queryable hook.
+			const anchor = this.h({
+				tagName: "span",
+				className: `${this.className}-comment-anchor-start comment-reference`,
+			}) as HTMLElement;
+			if (commentStart.id) anchor.dataset.comment = commentStart.id;
+			return anchor;
+		}
 
 		if (this.useSidebar) {
 			const anchor = this.h({ tagName: "span", className: `${this.className}-comment-anchor-start` }) as HTMLElement;
@@ -2578,8 +2607,22 @@ section.${c}>ol>li::before {
 	}
 
 	renderCommentReference(commentRef: WmlCommentReference) {
-		if (!this.options.renderComments)
-			return null;
+		if (!this.options.renderComments) {
+			// Even when full comment rendering is off, emit a minimal marker
+			// so downstream consumers (conformance harnesses, screen
+			// readers, comment-count badges) can find commented runs. The
+			// <sup> is empty on purpose — renderComments=true paints the
+			// sidebar/popover; renderComments=false just leaves a hook.
+			const anchor = this.h({
+				tagName: "sup",
+				className: `${this.className}-comment-ref comment-reference`,
+			}) as HTMLElement;
+			// commentRef.id is a DOCX-derived string — dataset.* sets it as
+			// an attribute value, which the browser attribute-encodes. Never
+			// flow into class names or CSS selectors (see CLAUDE.md).
+			if (commentRef.id) anchor.dataset.comment = commentRef.id;
+			return anchor;
+		}
 
 		if (this.useSidebar) {
 			return this.h({ tagName: "#comment", children: [`comment ref #${commentRef.id}`] });
@@ -2590,7 +2633,8 @@ section.${c}>ol>li::before {
 		if (!comment)
 			return null;
 
-		const commentRefEl = this.h({ tagName: "span", className: `${this.className}-comment-ref`, children: ['💬'] });
+		const commentRefEl = this.h({ tagName: "span", className: `${this.className}-comment-ref comment-reference`, children: ['💬'] }) as HTMLElement;
+		if (commentRef.id) commentRefEl.dataset.comment = commentRef.id;
 		const commentsContainerEl = this.h({
 			tagName: "div", className: `${this.className}-comment-popover`, children: [
 				this.h({ tagName: 'div', className: `${this.className}-comment-author`, children: [comment.author] }),
@@ -2878,7 +2922,24 @@ section.${c}>ol>li::before {
 	}
 
 	renderBreak(elem: WmlBreak) {
-		return elem.break == "textWrapping" ? this.h({ tagName: "br" }) : null;
+		if (elem.break == "textWrapping") {
+			return this.h({ tagName: "br" });
+		}
+		if (elem.break == "page") {
+			// Emit a queryable marker for `<w:br w:type="page"/>` regardless of
+			// whether `experimentalPageBreaks` is on. The visual pagination
+			// layer in page-break.ts uses this marker as a split boundary; for
+			// static-HTML consumers (conformance harnesses, search indexers,
+			// screen readers) the element also serves as the "here was a page
+			// break" signal.
+			const br = this.h({ tagName: "br" }) as HTMLElement;
+			br.classList.add(`${this.className}-page-break`);
+			br.classList.add("page-break");
+			br.dataset.pageBreak = "";
+			return br;
+		}
+		// column / lastRenderedPageBreak — emit nothing visual but don't suppress.
+		return null;
 	}
 
 	renderInserted(elem: OpenXmlElement): Node | Node[] {
@@ -3020,7 +3081,7 @@ section.${c}>ol>li::before {
 		this.footnoteRefCount++;
 		const sup = this.h({
 			tagName: "sup",
-			className: `${this.className}-footnote-ref`,
+			className: `${this.className}-footnote-ref footnote-ref footnote`,
 			children: [`${this.footnoteRefCount}`]
 		}) as HTMLElement;
 		// Expose the footnote id so the visual-page split pass can match
@@ -3029,7 +3090,10 @@ section.${c}>ol>li::before {
 		// untrusted — `dataset.*` sets it as an attribute value, which the
 		// browser attribute-encodes. Never interpolate it into a class or
 		// CSS selector (see CLAUDE.md security constraints).
-		if (elem.id) sup.dataset.footnoteId = elem.id;
+		if (elem.id) {
+			sup.dataset.footnoteId = elem.id;
+			sup.dataset.footnote = elem.id;
+		}
 		return sup;
 	}
 

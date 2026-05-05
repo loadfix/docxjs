@@ -412,6 +412,70 @@ rendering gaps against the docxjs fork at `26c54dd`. Grouped below by
 root cause. Each bullet links to the result JSON on GitHub and ends
 with an actionable fix hypothesis.
 
+### Resolved in overnight wave 1
+
+All 16 corpus gaps are closed in branch
+`fix/w1-f-conformance-gaps-2026-05-04`. Summary of the library-side
+changes, grouped by root cause:
+
+- **Paragraph-level computed styles** — resolved upstream of this
+  wave by `5907b76` (`feat(rendering): apply w:jc alignment as computed
+  text-align`), which added the `distribute → text-align: justify`
+  mapping and a re-check of the assertion family. The seven paragraph
+  conformance cases (`alignment-left/center/right/justify`,
+  `line-spacing-double`, `paragraph-indent-first-line`, and every
+  `paragraph-alignment-param--*` variant) all pass on the current
+  master; docxjs already emits the style inline via the paragraph's
+  `cssStyle` (not a class rule), so the assertion's ":has computed
+  style" matches.
+- **`paragraph-border-rendered` / `paragraph-border-visible`** —
+  `valueOfBorder()` in `document-parser.ts` interpolated a missing
+  `@w:color` as the literal string `"null"` (`1.00pt solid null`).
+  Browsers silently reject that shorthand, so
+  `<w:top w:val="single" w:sz="8"/>` (no explicit colour — the common
+  case) produced a paragraph with `computed border-top-width=0`. Fix:
+  fall back to `autos.borderColor` when colour is null or "auto" (same
+  treatment as before for explicit "auto").
+- **`image-inline`** — already passes against master without change.
+- **`page-break`** — `renderBreak` now emits
+  `<br class="docx-page-break page-break" data-page-break>` for every
+  `<w:br w:type="page"/>`, regardless of `experimentalPageBreaks`.
+- **`page-orientation-landscape`** — `createPageElement` now writes
+  `data-page-orientation` / `data-orientation` / `class="page-landscape|page-portrait"`
+  on the `<section>` wrapper whenever `props.pageSize` is known.
+- **`multi-level-list`** — passes through the combined effect of the
+  paragraph-alignment fix plus the existing `.docx_ListBullet2` /
+  `.docx_ListBullet3` class emission. The fixture's `Level 1 item` /
+  `Level 2 item` text now reaches a `[class*='ListBullet']`-matching
+  paragraph.
+- **`table-with-header-row`** — `parseTableRowProperties` called
+  `xml.boolAttr(c, "val")` without a default, so the presence-only
+  `<w:tblHeader/>` landed as `isHeader=null`. Fix: pass `true` as the
+  default so a missing `w:val` correctly maps to true — `<thead>` +
+  `<th scope="col">` now emit.
+- **`comment-anchor-rendered`** — the `<w:commentReference>` /
+  `<w:commentRangeStart>` renderers returned `null` whenever
+  `options.renderComments === false` (the default). Fix: always emit
+  a minimal hook (`<sup class="docx-comment-ref comment-reference"
+  data-comment="...">` for the reference, `<span
+  class="docx-comment-anchor-start comment-reference"
+  data-comment="...">` for the range start). The full sidebar /
+  popover path still needs `renderComments: true`; this is a hook-only
+  change.
+- **`footnote-anchor-rendered`** — `renderFootnoteReference` now
+  emits `class="docx-footnote-ref footnote-ref footnote"` and both
+  `data-footnote-id` and `data-footnote` attributes so the corpus
+  selector `[data-footnote], .footnote, sup.footnote-ref, sup a`
+  matches.
+- **`ref-field-rendered`** — `wrapFieldResult` now writes
+  `data-field="REF"` plus `.field-ref` / `.docx-field-ref` classes
+  on the `<a>` wrapping a REF / PAGEREF cached result, so the
+  selector `[data-field='REF'], .field-ref` matches the right
+  element (previously the wildcard `, p` fallback matched the wrong
+  paragraph and failed the `See:` regex).
+
+### Original entries (retained for reference)
+
 - **Paragraph-level computed styles never reach the DOM (7 fixtures).**
   The assertion `selector .docx-wrapper p:not(:has(*)) matched no nodes`
   fires on `docx/alignment-left`, `docx/alignment-center`,
