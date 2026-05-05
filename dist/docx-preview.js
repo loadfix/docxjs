@@ -7933,6 +7933,23 @@
         return svg;
     }
 
+    const OOX_CLASSES = {
+        "wrapper": "oox-wrapper",
+        "page": "oox-page",
+        "paragraph": "oox-paragraph",
+        "run": "oox-run",
+        "heading": "oox-heading",
+        "table": "oox-table",
+        "table-row": "oox-table-row",
+        "table-cell": "oox-table-cell",
+        "image": "oox-image",
+    };
+    function addSharedClass(el, concept) {
+        if (!el)
+            return;
+        el.classList.add(OOX_CLASSES[concept]);
+    }
+
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'ftp:', 'ftps:']);
     function isSafeHyperlinkHref(raw) {
         if (raw == null)
@@ -8340,6 +8357,7 @@
                 }
             }
             const section = this.h({ tagName: "section", className, style });
+            addSharedClass(section, "page");
             const orient = props?.pageSize?.orientation;
             if (typeof orient === "string" && /^(landscape|portrait)$/.test(orient)) {
                 section.dataset.pageOrientation = orient;
@@ -8569,6 +8587,7 @@
         }
         renderWrapper(children) {
             const wrapper = this.h({ tagName: "div", className: `${this.className}-wrapper`, children });
+            addSharedClass(wrapper, "wrapper");
             wrapper.setAttribute("role", "document");
             return wrapper;
         }
@@ -8592,6 +8611,7 @@
                 children: [docContainer, this.sidebarContainer]
             });
             wrapper.setAttribute("role", "document");
+            addSharedClass(wrapper, "wrapper");
             this.later(() => {
                 this.setupSidebarScrollSync(docContainer, contentArea, wrapper);
             });
@@ -9362,6 +9382,8 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             if (elem.paraId) {
                 result.dataset.paraId = elem.paraId;
             }
+            const isHeadingTag = /^H[1-6]$/.test(result.tagName);
+            addSharedClass(result, isHeadingTag ? "heading" : "paragraph");
             return result;
         }
         applyParagraphBreakControls(elem) {
@@ -9724,6 +9746,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                     result.src = x;
                 }));
             }
+            addSharedClass(result, "image");
             return result;
         }
         renderChart(elem) {
@@ -10011,6 +10034,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             if (elem.id)
                 result.id = elem.id;
             this.applyFormattingRevision(result, elem);
+            addSharedClass(result, "run");
             return result;
         }
         applyFormattingRevision(node, elem) {
@@ -10108,6 +10132,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             this.currentCellPosition = this.tableCellPositions.pop();
             this.currentTableBandSizes = this.tableBandSizes.pop();
             const tableResult = this.toHTML(elem, ns.html, "table", children);
+            addSharedClass(tableResult, "table");
             this.applyFirstRowHeaderA11y(tableResult, elem);
             return tableResult;
         }
@@ -10209,6 +10234,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                 this.applyRowRevision(tr, elem);
             }
             this.applyFormattingRevision(tr, elem);
+            addSharedClass(tr, "table-row");
             return tr;
         }
         applyRowRevision(tr, elem) {
@@ -10275,6 +10301,7 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
             if (diagTlBr || diagTrBl) {
                 this.applyDiagonalBorders(result, diagTlBr, diagTrBl);
             }
+            addSharedClass(result, "table-cell");
             return result;
         }
         parseBorderStroke(border) {
