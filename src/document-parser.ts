@@ -3,7 +3,7 @@ import {
 	WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell,
 	WmlTableRow, NumberingPicBullet, WmlText, WmlSymbol, WmlBreak, WmlNoteReference,
 	WmlAltChunk, Revision, FormattingRevision, WmlSdt, SdtControl, SdtCheckboxControl,
-	WmlRuby, WmlFitText, WmlBidiOverride
+	WmlRuby, WmlFitText, WmlBidiOverride, WmlOleObject
 } from './document/dom';
 import {
 	DrawingShape, DrawingGroup, DrawingChart, DrawingChartEx, DrawingSmartArt,
@@ -1129,6 +1129,20 @@ export class DocumentParser {
 					result.children.push(this.parseVmlPicture(c));
 					break;
 
+				case "object": {
+					// w:object wraps a legacy OLE embed. An inner
+					// <o:OLEObject> carries the ProgID and shape-link
+					// metadata; we emit a DomType.OleObject placeholder
+					// so the reader at least sees *something* where an
+					// Equation.3 / Excel.Sheet.12 / Package would have
+					// rendered inside Word. We intentionally ignore the
+					// companion <v:shape> preview here — rendering both
+					// produced a ghostly double placeholder in practice.
+					const ole = this.parseOleObject(c);
+					if (ole) result.children.push(ole);
+					break;
+				}
+
 				case "ruby":
 					result.children.push(this.parseRuby(c, result));
 					break;
@@ -1338,6 +1352,28 @@ export class DocumentParser {
 		}
 
 		return result;
+	}
+
+	// <w:object><o:OLEObject Type="Embed" ProgID="Equation.3" ShapeID="_x0000_i1026"
+	//   DrawAspect="Content" ObjectID="_1234567890" r:id="rId6"/>
+	// We don't decode the embedded payload — just surface ProgID / ShapeID /
+	// Type for the renderer. All three are attacker-controlled DOCX strings;
+	// the renderer must only expose them via an allowlist (ProgID) or
+	// setAttribute (ShapeID / Type), never innerHTML or className.
+	parseOleObject(elem: Element): WmlOleObject | null {
+		for (const c of xml.elements(elem)) {
+			if (c.localName !== "OLEObject") continue;
+			return <WmlOleObject>{
+				type: DomType.OleObject,
+				progId: xml.attr(c, "ProgID"),
+				shapeId: xml.attr(c, "ShapeID"),
+				objectType: xml.attr(c, "Type"),
+			};
+		}
+		// w:object without an embedded <o:OLEObject> (rare but seen in the
+		// wild when the embed was stripped by another toolchain). Still
+		// emit a placeholder so the reader sees something was there.
+		return <WmlOleObject>{ type: DomType.OleObject };
 	}
 
 	checkAlternateContent(elem: Element): Element {
@@ -3441,7 +3477,8 @@ class values {
 	}
 
 	static valueOfBorder(c: Element) {
-		var type = values.parseBorderType(xml.attr(c, "val"));
+		const rawVal = xml.attr(c, "val");
+		var type = values.parseBorderType(rawVal);
 
 		if (type == "none")
 			return "none";
@@ -3458,7 +3495,63 @@ class values {
 		// as computed border-top-width=0.
 		const resolvedColor = (color == null || color == "auto") ? autos.borderColor : color;
 
+		// w:pBdr "art" borders (apples, stars, balloons3Colors, ...) are
+		// named decorative bitmap patterns with no CSS equivalent. ST_Border
+		// w:sz for art borders is a point-valued pattern size, not a CSS
+		// border-width, so feeding it into the shorthand produces absurd
+		// widths (a size-8 "apples" border comes through as 8pt). v1 falls
+		// back to a fixed 2pt solid edge in the declared colour — the reader
+		// sees *a* border, just not the decorative pattern. Full art-image
+		// support would require generating an SVG tile per name and pointing
+		// border-image-source at it. See ECMA-376 §17.18.2 ST_Border.
+		if (values.isArtBorder(rawVal)) {
+			return `2pt solid ${resolvedColor}`;
+		}
+
 		return `${size} ${type} ${resolvedColor}`;
+	}
+
+	// Allowlist of art-border ST_Border values. Kept explicit (rather than
+	// computed as "anything parseBorderType defaulted") so that a future
+	// straight-border name we forget to add doesn't silently collapse to
+	// the 2pt fallback. Names taken from ECMA-376 §17.18.2.
+	private static readonly ART_BORDER_VALS: ReadonlySet<string> = new Set([
+		'apples', 'archedScallops', 'babyPants', 'babyRattle', 'balloons3Colors',
+		'balloonsHotAir', 'basicBlackDashes', 'basicBlackDots', 'basicBlackSquares',
+		'basicThinLines', 'basicWhiteDashes', 'basicWhiteDots', 'basicWhiteSquares',
+		'basicWideInline', 'basicWideMidline', 'basicWideOutline', 'bats', 'birds',
+		'birdsFlight', 'cabins', 'cakeSlice', 'candyCorn', 'celticKnotwork',
+		'certificateBanner', 'chainLink', 'champagneBottle', 'checkedBarBlack',
+		'checkedBarColor', 'checkered', 'christmasTree', 'circlesLines', 'circlesRectangles',
+		'classicalWave', 'clocks', 'compass', 'confetti', 'confettiGrays', 'confettiOutline',
+		'confettiStreamers', 'confettiWhite', 'cornerTriangles', 'couponCutoutDashes',
+		'couponCutoutDots', 'crazyMaze', 'creaturesButterfly', 'creaturesFish',
+		'creaturesInsects', 'creaturesLadyBug', 'crossStitch', 'cup', 'decoArch',
+		'decoArchColor', 'decoBlocks', 'diamondsGray', 'doubleD', 'doubleDiamonds',
+		'earth1', 'earth2', 'eclipsingSquares1', 'eclipsingSquares2', 'eggsBlack',
+		'fans', 'film', 'firecrackers', 'flowersBlockPrint', 'flowersDaisies',
+		'flowersModern1', 'flowersModern2', 'flowersPansy', 'flowersRedRose',
+		'flowersRoses', 'flowersTeacup', 'flowersTiny', 'gems', 'gingerbreadMan',
+		'gradient', 'handmade1', 'handmade2', 'heartBalloon', 'heartGray', 'hearts',
+		'heebieJeebies', 'holly', 'houseFunky', 'hypnotic', 'iceCreamCones',
+		'lightBulb', 'lightning1', 'lightning2', 'mapPins', 'mapleLeaf', 'mapleMuffins',
+		'marquee', 'marqueeToothed', 'moons', 'mosaic', 'musicNotes', 'northwest',
+		'ovals', 'packages', 'palmsBlack', 'palmsColor', 'paperClips', 'papyrus',
+		'partyFavor', 'partyGlass', 'pencils', 'people', 'peopleHats', 'peopleWaving',
+		'pinkFlowers', 'pumpkin1', 'pushPinNote1', 'pushPinNote2', 'pyramids',
+		'pyramidsAbove', 'quadrants', 'rings', 'safari', 'sawtooth', 'sawtoothGray',
+		'scaredCat', 'seattle', 'shadowedSquares', 'sharksTeeth', 'shorebirdTracks',
+		'skyrocket', 'snowflakeFancy', 'snowflakes', 'sombrero', 'southwest', 'stars',
+		'stars3d', 'starsBlack', 'starsShadowed', 'starsTop', 'sun', 'swirligig',
+		'tornPaper', 'tornPaperBlack', 'trees', 'triangleParty', 'triangles',
+		'tribal1', 'tribal2', 'tribal3', 'tribal4', 'tribal5', 'tribal6',
+		'twistedLines1', 'twistedLines2', 'vine', 'waveline', 'weavingAngles',
+		'weavingBraid', 'weavingRibbon', 'weavingStrips', 'whiteFlowers', 'woodwork',
+		'xIllusions', 'zanyTriangles', 'zigZag', 'zigZagStitch'
+	]);
+
+	static isArtBorder(val: string): boolean {
+		return !!val && values.ART_BORDER_VALS.has(val);
 	}
 
 	// Companion to `valueOfBorder` for the `$themeColor-<prop>` sideband.

@@ -84,6 +84,15 @@ export interface Options {
 	renderChanges: boolean;
     renderComments: boolean;
     /**
+     * When `true`, render a small "Protected document" badge at the top of
+     * the wrapper whenever the underlying DOCX carries a
+     * `w:documentProtection` setting. Default `false` for back-compat —
+     * existing consumers should not see a new visual element appear.
+     * The badge is purely informational; this renderer is always read-only
+     * and does not enforce edit protection.
+     */
+    showProtectionBadge?: boolean;
+    /**
      * Experimental: when true, after the renderer emits its sections, walk
      * each one and split any that overflow their page-sized `min-height`
      * into multiple page-shaped sibling sections. This matches the visual
@@ -128,6 +137,7 @@ export const defaultOptions: Options = {
 	useBase64URL: false,
 	renderChanges: false,
     renderComments: false,
+    showProtectionBadge: false,
     experimentalPageBreaks: false,
     responsive: false,
     comments: {

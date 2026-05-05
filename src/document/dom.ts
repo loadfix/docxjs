@@ -92,7 +92,19 @@ export enum DomType {
     // unrecognised). Rendered as a labelled placeholder with the
     // layout URN carried in a data attribute. See
     // parseSmartArtReference in document-parser.ts.
-    SmartArt = "smartArt"
+    SmartArt = "smartArt",
+    // <w:object><o:OLEObject/> — legacy embedded OLE content (Equation.3,
+    // Excel spreadsheets, generic packaged files). Rendered as a styled
+    // placeholder span; the embedded payload itself is not decoded. The
+    // ProgID is carried via an allowlisted dataset attribute so it's safe
+    // to interpolate into the DOM. See parseOleObject in document-parser.ts.
+    OleObject = "oleObject"
+}
+
+export interface WmlOleObject extends OpenXmlElement {
+    progId?: string;
+    shapeId?: string;
+    objectType?: string;
 }
 
 // Structured Document Tag (content control). Parsed from w:sdt when
