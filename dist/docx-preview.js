@@ -10737,23 +10737,13 @@ section.${c} { width: auto !important; max-width: 100%; min-width: 0; box-sizing
                 children.push(this.renderTableColumns(elem.columns));
             const headerRendered = [];
             const bodyRendered = [];
-            const anyRowExplicitHeader = (elem.children ?? []).some((c) => c.type === DomType.Row
-                && c.isHeader !== undefined
-                && c.isHeader !== false);
-            const promoteFirstRow = !!elem.firstRowIsHeader && !anyRowExplicitHeader;
-            let firstRowPromoted = false;
             for (const child of (elem.children ?? [])) {
                 const rendered = this.renderElement(child);
                 if (rendered == null)
                     continue;
-                let isHeaderRow = child.type === DomType.Row
+                const isHeaderRow = child.type === DomType.Row
                     && child.isHeader !== undefined
                     && child.isHeader !== false;
-                if (!isHeaderRow && promoteFirstRow && !firstRowPromoted
-                    && child.type === DomType.Row) {
-                    isHeaderRow = true;
-                    firstRowPromoted = true;
-                }
                 if (isHeaderRow) {
                     if (Array.isArray(rendered)) {
                         for (const node of rendered)

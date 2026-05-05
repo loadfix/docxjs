@@ -23,9 +23,13 @@ export default defineConfig({
         baseURL: `http://localhost:${process.env.PORT || 8765}`,
         trace: 'on-first-retry',
         screenshot: 'only-on-failure',
-        // Matches the interop config; a stable viewport size keeps the
-        // visual_ssim cropped screenshot reproducible between runs.
-        viewport: { width: 1024, height: 1200 },
+        // Letter page is 8.5in x 11in at 150dpi = 1275x1650, matching
+        // the PDF-derived reference PNGs in the corpus. Set a viewport
+        // slightly larger than the wrapper so Playwright doesn't clip
+        // the screenshot; the visual_ssim evaluator crops to the
+        // .docx-wrapper bounding box.
+        viewport: { width: 1400, height: 1800 },
+        deviceScaleFactor: 1.5625,
     },
     projects: [
         {

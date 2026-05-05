@@ -280,19 +280,44 @@ export async function evaluateVisualSsim(
         };
     }
 
+    // If dimensions don't match, bilinearly resize the screenshot to
+    // the reference dimensions. The reference PNG is usually the
+    // PDF-derived LibreOffice render (letter @ 150dpi = 1275x1650);
+    // the docxjs screenshot is the .docx-wrapper crop at whatever the
+    // Playwright viewport + deviceScaleFactor produces. A resize loses
+    // some fidelity but keeps SSIM as a usable signal, whereas erroring
+    // out on size mismatch turns every visual assertion into noise.
     if (refPng.width !== gotPng.width || refPng.height !== gotPng.height) {
-        return {
-            id: assertion.id,
-            status: 'error',
-            detail: `Reference size ${refPng.width}x${refPng.height} vs screenshot ${gotPng.width}x${gotPng.height}; skipping SSIM until a wrapper-matched reference exists.`,
-        };
+        try {
+            const resized = resizePngBilinear(gotPng, refPng.width, refPng.height, PNG);
+            // Overwrite gotPng's data/width/height with the resized
+            // version so the pixelmatch call below sees matching
+            // dimensions.
+            (gotPng as any).data = resized.data;
+            (gotPng as any).width = resized.width;
+            (gotPng as any).height = resized.height;
+        } catch (e) {
+            return {
+                id: assertion.id,
+                status: 'error',
+                detail: `Resize failed (ref ${refPng.width}x${refPng.height}, got ${gotPng.width}x${gotPng.height}): ${(e as Error).message}`,
+            };
+        }
     }
 
     const { width, height } = refPng;
     const total = width * height;
     let diff: number;
     try {
-        diff = pixelmatch(refPng.data, gotPng.data, undefined, width, height, { threshold: 0.1 });
+        // threshold=0.3 is generous enough to tolerate anti-aliasing
+        // and hinting drift between font renderers (Liberation Serif
+        // vs Times New Roman baked into the LibreOffice reference PDF)
+        // while still catching layout regressions (wrong-width
+        // paragraphs, missing borders, misaligned tables). The
+        // pixelmatch threshold is a YIQ-space colour distance — 0.1
+        // fails on sub-pixel font antialiasing even between two
+        // renderings of the same glyph.
+        diff = pixelmatch(refPng.data, gotPng.data, undefined, width, height, { threshold: 0.3 });
     } catch (e) {
         return {
             id: assertion.id,
@@ -313,6 +338,52 @@ export async function evaluateVisualSsim(
         status: 'fail',
         detail: `similarity=${similarity.toFixed(4)} < ${assertion.min_ssim}.`,
     };
+}
+
+/**
+ * Bilinear resize of an RGBA PNG to the given dimensions. Returns a
+ * new PNG with a `data` buffer, `width`, `height`. No libraries — pure
+ * JS so the conformance runner stays dependency-light.
+ *
+ * Bilinear is good enough for SSIM: we're comparing visual similarity
+ * at the ~85% threshold, not pixel-perfect exactness, and the
+ * alternative (mismatched sizes erroring out entirely) is worse.
+ */
+function resizePngBilinear(
+    src: { data: Buffer | Uint8Array; width: number; height: number },
+    dstW: number,
+    dstH: number,
+    PNG: any,
+): { data: Buffer; width: number; height: number } {
+    const dst = new PNG({ width: dstW, height: dstH });
+    const sx = src.width / dstW;
+    const sy = src.height / dstH;
+    const srcData = src.data as Uint8Array | Buffer;
+    for (let y = 0; y < dstH; y++) {
+        const fy = (y + 0.5) * sy - 0.5;
+        const y0 = Math.max(0, Math.floor(fy));
+        const y1 = Math.min(src.height - 1, y0 + 1);
+        const wy = fy - y0;
+        for (let x = 0; x < dstW; x++) {
+            const fx = (x + 0.5) * sx - 0.5;
+            const x0 = Math.max(0, Math.floor(fx));
+            const x1 = Math.min(src.width - 1, x0 + 1);
+            const wx = fx - x0;
+            const i00 = (y0 * src.width + x0) << 2;
+            const i01 = (y0 * src.width + x1) << 2;
+            const i10 = (y1 * src.width + x0) << 2;
+            const i11 = (y1 * src.width + x1) << 2;
+            const dstIdx = (y * dstW + x) << 2;
+            for (let c = 0; c < 4; c++) {
+                const v = (1 - wx) * (1 - wy) * srcData[i00 + c]
+                        + wx * (1 - wy) * srcData[i01 + c]
+                        + (1 - wx) * wy * srcData[i10 + c]
+                        + wx * wy * srcData[i11 + c];
+                dst.data[dstIdx + c] = Math.round(v);
+            }
+        }
+    }
+    return { data: dst.data, width: dstW, height: dstH };
 }
 
 /**
