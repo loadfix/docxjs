@@ -2979,7 +2979,16 @@ export class DocumentParser {
 					break;
 
 				case "lang":
-					style["$lang"] = xml.attr(c, "val");
+					// w:lang carries up to three BCP-47 tags: w:val (Latin/
+					// default), w:eastAsia (CJK), w:bidi (complex-script).
+					// Prefer the general value; fall back to East-Asian and
+					// then bidi so screen readers and hyphenation see *some*
+					// language hint even when Word only set the
+					// script-specific slot (e.g. a Japanese-only or RTL-only
+					// run).
+					style["$lang"] = xml.attr(c, "val")
+						?? xml.attr(c, "eastAsia")
+						?? xml.attr(c, "bidi");
 					break;
 
 				case "rtl":
